@@ -26,19 +26,27 @@ jobs:
           echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
           echo "version=${latest_tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Get current release in this repo
+      - name: Get current release in this repo and decide whether to build
         id: current
         run: |
-          current_tag=$(curl -fsSL https://api.github.com/repos/${{ github.repository }}/releases/latest 2>/dev/null | jq -r .tag_name || true)
+          current_tag=$(curl -fsSL https://api.github.com/repos/${{ github.repository }}/releases/latest 2>/dev/null | jq -r '.tag_name // empty' || true)
           echo "tag=$current_tag" >> "$GITHUB_OUTPUT"
 
-      - name: Skip if already latest
-        if: steps.latest.outputs.tag == steps.current.outputs.tag
+          if [ "${{ steps.latest.outputs.tag }}" = "$current_tag" ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Already latest: $current_tag"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Need build: upstream=${{ steps.latest.outputs.tag }}, current=${current_tag:-none}"
+          fi
+
+      - name: Show skip reason
+        if: steps.current.outputs.should_build != 'true'
         run: |
-          echo "Already latest: ${{ steps.latest.outputs.tag }}"
-          exit 0
+          echo "Skip build because current repo is already at latest upstream release: ${{ steps.latest.outputs.tag }}"
 
       - name: Checkout sing-box source
+        if: steps.current.outputs.should_build == 'true'
         uses: actions/checkout@v5
         with:
           repository: SagerNet/sing-box
@@ -47,6 +55,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
+        if: steps.current.outputs.should_build == 'true'
         uses: actions/setup-go@v6
         with:
           go-version: "1.25"
@@ -54,16 +63,15 @@ jobs:
           cache-dependency-path: sing-box-src/go.sum
 
       - name: Prepare build tags and ldflags
+        if: steps.current.outputs.should_build == 'true'
         id: meta
         run: |
           cd sing-box-src
 
           default_tags=$(tr '\n' ',' < release/DEFAULT_BUILD_TAGS | sed 's/,$//')
 
-          # 删除 Linux 下容易导致编译失败的 naive tag
-          final_tags=$(printf '%s\n' "$default_tags" | tr ',' '\n' | grep -v '^with_naive_outbound$' | awk 'NF && !seen[$0]++' | paste -sd',' -)
-
-          # 追加 v2ray api
+          # 保留默认 tags，并去重；追加 v2ray api
+          final_tags=$(printf '%s\n' "$default_tags" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd',' -)
           final_tags="${final_tags},with_v2ray_api"
 
           # 原项目 ldflags
@@ -79,6 +87,7 @@ jobs:
           echo "Using ldflags: $final_ldflags"
 
       - name: Build linux amd64
+        if: steps.current.outputs.should_build == 'true'
         run: |
           cd sing-box-src
           mkdir -p ../dist/linux-amd64
@@ -90,6 +99,7 @@ jobs:
             ./cmd/sing-box
 
       - name: Build linux arm64
+        if: steps.current.outputs.should_build == 'true'
         run: |
           cd sing-box-src
           mkdir -p ../dist/linux-arm64
@@ -101,6 +111,7 @@ jobs:
             ./cmd/sing-box
 
       - name: Build linux armv7
+        if: steps.current.outputs.should_build == 'true'
         run: |
           cd sing-box-src
           mkdir -p ../dist/linux-armv7
@@ -112,6 +123,7 @@ jobs:
             ./cmd/sing-box
 
       - name: Build linux 386
+        if: steps.current.outputs.should_build == 'true'
         run: |
           cd sing-box-src
           mkdir -p ../dist/linux-386
@@ -123,13 +135,16 @@ jobs:
             ./cmd/sing-box
 
       - name: Verify amd64 build tags
+        if: steps.current.outputs.should_build == 'true'
         run: |
           chmod +x dist/linux-amd64/sing-box
           dist/linux-amd64/sing-box version
           dist/linux-amd64/sing-box version | grep "${{ steps.latest.outputs.version }}"
           dist/linux-amd64/sing-box version | grep with_v2ray_api
+          dist/linux-amd64/sing-box version | grep with_naive_outbound
 
       - name: Verify all binaries exist
+        if: steps.current.outputs.should_build == 'true'
         run: |
           test -f dist/linux-amd64/sing-box
           test -f dist/linux-arm64/sing-box
@@ -137,6 +152,7 @@ jobs:
           test -f dist/linux-386/sing-box
 
       - name: Package tar.gz
+        if: steps.current.outputs.should_build == 'true'
         run: |
           mkdir -p release-files
           tar -C dist/linux-amd64 -czf release-files/sing-box-linux-amd64.tar.gz sing-box
@@ -152,6 +168,7 @@ jobs:
           sha256sum release-files/* > release-files/sha256sum.txt
 
       - name: Delete existing tag release if needed
+        if: steps.current.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -159,6 +176,7 @@ jobs:
           gh release delete "$tag" -R "${{ github.repository }}" -y --cleanup-tag || true
 
       - name: Create release with gh
+        if: steps.current.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -175,4 +193,4 @@ jobs:
             release-files/sha256sum.txt \
             --repo "${{ github.repository }}" \
             --title "$tag" \
-            --notes "Auto-built sing-box with with_v2ray_api"
+            --notes "Auto-built sing-box with with_v2ray_api and with_naive_outbound"

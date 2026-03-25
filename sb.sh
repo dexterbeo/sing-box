@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.9.2"
+SCRIPT_VERSION="4.0.2"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1621,10 +1621,10 @@ user_db_min_template() {
   "users": {
     "admin": {
       "enabled": true,
-      "traffic_mode": "down",
-      "quota_gb": 0,
+            "quota_gb": 0,
       "used_up_bytes": 0,
       "used_down_bytes": 0,
+      "manual_added_bytes": 0,
       "last_live_up_bytes": 0,
       "last_live_down_bytes": 0,
       "last_reset_period": "",
@@ -1682,7 +1682,7 @@ format_traffic_auto() {
 reset_day_text() {
   case "${1:-0}" in
     0|"") echo "不重置" ;;
-    29) echo "月底" ;;
+    32) echo "月底" ;;
     *) echo "${1}号" ;;
   esac
 }
@@ -1692,40 +1692,39 @@ expire_text() {
   [ -n "$v" ] && [ "$v" != "0" ] && echo "$v" || echo "永久"
 }
 
-traffic_mode_text() {
-  case "${1:-down}" in
-    both) echo "双向" ;;
-    *) echo "单向" ;;
-  esac
-}
-
-traffic_mode_detail_text() {
-  case "${1:-down}" in
-    both) echo "双向流量" ;;
-    *) echo "单向流量" ;;
-  esac
-}
-
 user_billable_bytes() {
   local db_json="$1" username="$2"
   echo "$db_json" | jq -r --arg u "$username" '
-    (.users[$u].traffic_mode // "down") as $mode
-    | (.users[$u].used_up_bytes // 0) as $up
-    | (.users[$u].used_down_bytes // 0) as $down
-    | if $mode == "both" then ($up + $down) else $down end
+    (.users[$u].used_up_bytes // 0)
+    + (.users[$u].used_down_bytes // 0)
+    + (.users[$u].manual_added_bytes // 0)
   '
 }
 
 package_text_for_user() {
   local db_json="$1" username="$2"
-  local quota mode_text
+  local quota
   quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
-  mode_text="$(traffic_mode_text "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].traffic_mode // "down"')")"
   if [ "$quota" = "0" ]; then
-    echo "不限(${mode_text})"
+    echo "不限"
   else
-    echo "${quota}GB(${mode_text})"
+    echo "${quota}GB"
   fi
+}
+
+parse_traffic_to_bytes() {
+  local raw="${1:-}" normalized num unit
+  normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  if [[ ! "$normalized" =~ ^([0-9]+(\.[0-9])?)(mb|gb)$ ]]; then
+    return 1
+  fi
+  num="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[3]}"
+  awk -v n="$num" -v u="$unit" 'BEGIN {
+    if (u == "mb") printf "%.0f", n * 1048576;
+    else if (u == "gb") printf "%.0f", n * 1073741824;
+    else exit 1;
+  }'
 }
 
 user_db_enabled_users() {
@@ -1867,7 +1866,7 @@ show_user_status_table() {
   local -a rows=()
   local -a cols=()
 
-  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}套餐${sep}重置日${sep}到期时间"
+  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}已用总量${sep}套餐${sep}重置日${sep}到期时间"
   rows+=("$header")
 
   while IFS= read -r row_line; do
@@ -1882,19 +1881,21 @@ show_user_status_table() {
           (if (.value.enabled == true) then "开启" else "关闭" end),
           ((.value.used_up_bytes // 0) | tostring),
           ((.value.used_down_bytes // 0) | tostring),
-          (((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end) + "(" + (if (.value.traffic_mode // "down") == "both" then "双向" else "单向" end) + ")")),
-          (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 29 then "月底" else ((.value.reset_day|tostring) + "号") end),
+          (((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) | tostring),
+          ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
+          (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
         ] | @tsv
-    ' | while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    ' | while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
             "$c2" \
             "$(format_bytes_human "$c3")" \
             "$(format_bytes_human "$c4")" \
-            "$c5" \
+            "$(format_bytes_human "$c5")" \
             "$c6" \
-            "$c7"
+            "$c7" \
+            "$c8"
       done
   )
 
@@ -2122,18 +2123,18 @@ prompt_reset_day() {
   local outvar="$1" val
   while true; do
     ui_echo "0  不重置"
-    ui_echo "1-28 指定日期"
-    ui_echo "29 每月最后一天"
+    ui_echo "1-29 指定日期"
+    ui_echo "32 月底"
     read -r -p "请输入重置日: " val
     case "$val" in
-      0|29) printf -v "$outvar" '%s' "$val"; return 0 ;;
-      '') ui_echo "${Y}[WARN]${NC} 请输入 0、1-28 或 29。" ;;
+      0|32) printf -v "$outvar" '%s' "$val"; return 0 ;;
+      '') ui_echo "${Y}[WARN]${NC} 请输入 0、1-29 或 32。" ;;
       *)
-        if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 28 ]; then
+        if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 29 ]; then
           printf -v "$outvar" '%s' "$val"
           return 0
         fi
-        ui_echo "${Y}[WARN]${NC} 请输入 0、1-28 或 29。"
+        ui_echo "${Y}[WARN]${NC} 请输入 0、1-29 或 32。"
         ;;
     esac
   done
@@ -2184,37 +2185,34 @@ select_nodes_multi() {
 
 user_show_info() {
   local db_json="$1" username="$2"
-  local used_up used_down billable used_up_text used_down_text billable_text mode_text package_text
+  local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
   used_up="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_up_bytes // 0')"
   used_down="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_down_bytes // 0')"
-  billable="$(user_billable_bytes "$db_json" "$username")"
+  manual_added="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].manual_added_bytes // 0')"
+  total_used="$(user_billable_bytes "$db_json" "$username")"
+  quota_bytes="$(echo "$db_json" | jq -r --arg u "$username" '(.users[$u].quota_gb // 0) * 1073741824')"
   used_up_text="$(format_traffic_auto "$used_up")"
   used_down_text="$(format_traffic_auto "$used_down")"
-  billable_text="$(format_traffic_auto "$billable")"
-  mode_text="$(traffic_mode_detail_text "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].traffic_mode // "down"')")"
-  package_text="$(package_text_for_user "$db_json" "$username")"
-  echo "$db_json" | jq -r --arg u "$username" --arg mode "$mode_text" --arg billable "$billable_text" --arg up "$used_up_text" --arg down "$used_down_text" --arg package "$package_text" '
+  manual_text="$(format_traffic_auto "$manual_added")"
+  total_text="$(format_traffic_auto "$total_used")"
+  if [ "$quota_bytes" -eq 0 ]; then
+    quota_text="不限"
+  else
+    quota_text="$(format_traffic_auto "$quota_bytes")"
+  fi
+  echo "$db_json" | jq -r     --arg u "$username"     --arg up "$used_up_text"     --arg down "$used_down_text"     --arg manual "$manual_text"     --arg total "$total_text"     --arg quota "$quota_text" '
     .users[$u] as $x
-    | "用户名：" + $u + "
-"
-      + "状态：" + (if $x.enabled then "开启" else "关闭" end) + "
-"
-      + "统计方式：" + $mode + "
-"
-      + "计费流量：" + $billable + "
-"
-      + "上传流量：" + $up + (if (($x.traffic_mode // "down") == "down") then "（不计费）" else "" end) + "
-"
-      + "下载流量：" + $down + "
-"
-      + "套餐设置：" + $package + "
-"
-      + "重置日：" + (if (($x.reset_day // 0) == 0) then "不重置" elif (($x.reset_day // 0) == 29) then "月底" else (($x.reset_day|tostring)+"号") end) + "
-"
-      + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end) + "
-"
+    | "用户名：" + $u + "\n"
+      + "状态：" + (if $x.enabled then "开启" else "关闭" end) + "\n"
+      + "上传流量：" + $up + "\n"
+      + "下载流量：" + $down + "\n"
+      + "手动补正流量：" + $manual + "\n"
+      + "已用总量：" + $total + "\n"
+      + "套餐总量：" + $quota + "\n"
+      + "重置日：" + (if (($x.reset_day // 0) == 0) then "不重置" elif (($x.reset_day // 0) == 32) then "月底" else (($x.reset_day|tostring)+"号") end) + "\n"
+      + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end) + "\n"
       + "节点策略：" + (if ($x.allow_all_nodes // false) then "全部节点" else "自定义节点" end)
   '
   echo "允许节点："
@@ -2226,7 +2224,7 @@ user_show_info() {
 }
 
 user_add_menu() {
-  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json traffic_mode_raw traffic_mode
+  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -2244,27 +2242,20 @@ user_add_menu() {
     pause
     return 1
   fi
-  echo "1. 单向流量（仅下载）"
-  echo "2. 双向流量（上传+下载）"
-  read -r -p "请选择流量统计方式: " traffic_mode_raw
-  case "$traffic_mode_raw" in
-    1) traffic_mode="down" ;;
-    2) traffic_mode="both" ;;
-    *) warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0 ;;
-  esac
+  ui_echo "${Y}示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
   read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
   allow_all_json='false'
   nodes_json='[]'
-  db_json="$(echo "$db_json" | jq --arg u "$username" --arg mode "$traffic_mode" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
+  db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
-      traffic_mode: $mode,
       quota_gb: $quota,
       used_up_bytes: 0,
       used_down_bytes: 0,
+      manual_added_bytes: 0,
       last_live_up_bytes: 0,
       last_live_down_bytes: 0,
       last_reset_period: "",
@@ -2359,29 +2350,17 @@ user_manage_permission_menu() {
 
 user_manage_package_menu() {
   local db_json="$1" username="$2"
-  local current_mode current_quota current_reset current_expire mode_in quota_in reset_in expire_in mode_val quota_val reset_val expire_val
+  local current_quota current_reset current_expire quota_in reset_in expire_in quota_val reset_val expire_val
   clear >&2
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
 
-  current_mode="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].traffic_mode // "down"')"
   current_quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
   current_reset="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
   current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
 
-  ui_echo "当前统计方式：$(traffic_mode_detail_text "$current_mode")"
-  ui_echo "1. 单向流量（仅下载）"
-  ui_echo "2. 双向流量（上传+下载）"
-  ui_echo "回车：保持当前值"
-  read -r -p "请输入: " mode_in
-  case "$mode_in" in
-    "") mode_val="$current_mode" ;;
-    1) mode_val="down" ;;
-    2) mode_val="both" ;;
-    *) user_package_invalid_return; pause >&2; return 1 ;;
-  esac
-
   ui_echo "当前流量限制：${current_quota} GB"
+  ui_echo "${Y}示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
   ui_echo "输入 0 表示不限"
   ui_echo "回车：保持当前值"
   read -r -p "请输入: " quota_in
@@ -2395,15 +2374,15 @@ user_manage_package_menu() {
 
   ui_echo "当前重置日期：$(reset_day_text "$current_reset")"
   ui_echo "0. 不重置"
-  ui_echo "1-28. 指定日期"
-  ui_echo "29. 月底"
+  ui_echo "1-29. 指定日期"
+  ui_echo "32. 月底"
   ui_echo "回车：保持当前值"
   read -r -p "请输入: " reset_in
   if [ -z "$reset_in" ]; then
     reset_val="$current_reset"
-  elif [ "$reset_in" = "0" ] || [ "$reset_in" = "29" ]; then
+  elif [ "$reset_in" = "0" ] || [ "$reset_in" = "32" ]; then
     reset_val="$reset_in"
-  elif [[ "$reset_in" =~ ^[0-9]+$ ]] && [ "$reset_in" -ge 1 ] && [ "$reset_in" -le 28 ]; then
+  elif [[ "$reset_in" =~ ^[0-9]+$ ]] && [ "$reset_in" -ge 1 ] && [ "$reset_in" -le 29 ]; then
     reset_val="$reset_in"
   else
     user_package_invalid_return; pause >&2; return 1
@@ -2423,15 +2402,14 @@ user_manage_package_menu() {
     user_package_invalid_return; pause >&2; return 1
   fi
 
-  if [ "$mode_val" = "$current_mode" ]     && [ "$quota_val" = "$current_quota" ]     && [ "$reset_val" = "$current_reset" ]     && [ "$expire_val" = "$current_expire" ]; then
+  if [ "$quota_val" = "$current_quota" ] && [ "$reset_val" = "$current_reset" ] && [ "$expire_val" = "$current_expire" ]; then
     ui_echo "[INFO] 未检测到改动，按任意键返回。"
     pause >&2
     return 1
   fi
 
-  echo "$db_json" | jq --arg u "$username" --arg mode "$mode_val" --argjson quota "$quota_val" --argjson reset "$reset_val" --arg exp "$expire_val" '
+  echo "$db_json" | jq --arg u "$username" --argjson quota "$quota_val" --argjson reset "$reset_val" --arg exp "$expire_val" '
     (.users[$u].reset_day // 0) as $old_reset
-    | .users[$u].traffic_mode = $mode
     | .users[$u].quota_gb = $quota
     | .users[$u].reset_day = $reset
     | .users[$u].expire_at = $exp
@@ -2440,13 +2418,29 @@ user_manage_package_menu() {
 }
 
 
+user_add_usage_menu() {
+  local db_json="$1" username="$2" raw bytes
+  clear >&2
+  print_rect_title "手动添加流量" >&2
+  show_user_status_table "$db_json" >&2
+  ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
+  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB）: " raw
+  bytes="$(parse_traffic_to_bytes "$raw")" || {
+    warn "[WARN] 输入无效，未作修改，已返回上一级。" >&2
+    pause >&2
+    return 1
+  }
+  echo "$db_json" | jq --arg u "$username" --argjson add "$bytes" '
+    .users[$u].manual_added_bytes = ((.users[$u].manual_added_bytes // 0) + $add)
+  '
+}
+
 user_reset_usage_menu() {
   local db_json="$1" username="$2"
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
-  ui_echo "${B}--------------------------------------------------------${NC}"
-  ui_echo "将清零该用户的上传流量、下载流量以及统计基线。"
+  ui_echo "将清零该用户的上传流量、下载流量、手动补正流量以及统计基线。"
   ui_echo "此操作不会修改用户的启用状态、套餐设置、到期时间或重置日。"
   local ans
   read -r -p "输入 YES 确认重置该用户流量，其它任意输入取消: " ans
@@ -2476,7 +2470,9 @@ user_manage_single() {
       echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
       echo "  1. 启用/停用"
       echo "  2. 套餐设置"
-      echo "  3. 查看用户信息"
+      echo "  3. 手动重置流量"
+      echo "  4. 手动添加流量（对齐总量）"
+      echo "  5. 查看用户信息"
       echo "  0. 返回"
       read -r -p "请选择操作: " act
       case "${act:-}" in
@@ -2494,7 +2490,19 @@ user_manage_single() {
             user_manager_apply_changes "$new_db" "$json" || true
           fi
           ;;
-        3) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
+        3)
+          new_db="$(user_reset_usage_menu "$db_json" "$username")" || new_db=""
+          if json_is_object "$new_db"; then
+            user_manager_apply_changes "$new_db" "$json" || true
+          fi
+          ;;
+        4)
+          new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
+          if json_is_object "$new_db"; then
+            user_manager_apply_changes "$new_db" "$json" || true
+          fi
+          ;;
+        5) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
         0|q|Q|"") return 0 ;;
         *) warn "无效输入：$act"; sleep 1 ;;
       esac
@@ -2504,7 +2512,8 @@ user_manage_single() {
     echo "  2. 节点权限"
     echo "  3. 套餐设置"
     echo "  4. 手动重置流量"
-    echo "  5. 用户信息"
+    echo "  5. 手动添加流量（对齐总量）"
+    echo "  6. 用户信息"
     echo "  0. 返回"
     read -r -p "请选择操作: " act
     case "${act:-}" in
@@ -2535,6 +2544,12 @@ user_manage_single() {
         fi
         ;;
       5)
+        new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
+        if json_is_object "$new_db"; then
+          user_manager_apply_changes "$new_db" "$json" || true
+        fi
+        ;;
+      6)
         clear
         print_rect_title "用户信息"
         user_show_info "$db_json" "$username"
@@ -2672,7 +2687,7 @@ apply_automatic_user_controls() {
   period="$(user_current_period)"
   today_day=$((10#$(date +%d)))
 
-  local username expire_at reset_day last_reset enabled quota billable hit_reset last_day
+  local username expire_at reset_day last_reset enabled quota billable hit_reset last_day effective_reset_day
   while IFS= read -r username; do
     [ -n "$username" ] || continue
 
@@ -2691,12 +2706,19 @@ apply_automatic_user_controls() {
 
     hit_reset=0
     if [[ "$reset_day" =~ ^[0-9]+$ ]]; then
-      if [ "$reset_day" -eq 29 ]; then
-        last_day=$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)
-        [ "$today_day" -eq $((10#$last_day)) ] && hit_reset=1
-      elif [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 28 ] && [ "$today_day" -eq "$reset_day" ]; then
-        hit_reset=1
+      last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
+      if [ "$reset_day" -eq 32 ]; then
+        effective_reset_day="$last_day"
+      elif [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 29 ]; then
+        if [ "$reset_day" -gt "$last_day" ]; then
+          effective_reset_day="$last_day"
+        else
+          effective_reset_day="$reset_day"
+        fi
+      else
+        effective_reset_day=0
       fi
+      [ "$effective_reset_day" -gt 0 ] && [ "$today_day" -eq "$effective_reset_day" ] && hit_reset=1
     fi
     if [ "$hit_reset" -eq 1 ] && [ "$last_reset" != "$period" ]; then
       db_json="$(echo "$db_json" | jq --arg u "$username" --arg p "$period" '
@@ -4073,13 +4095,13 @@ view_realtime_log() {
     return 0
   fi
 
-  echo -e "${Y}[WARN]${NC} 正在显示最近 100 行日志，并进入实时跟踪；按 Ctrl+C 返回菜单。"
+  echo -e "${Y}正在显示最近 10 行日志，并进入实时跟踪；按 Ctrl+C 返回菜单。${NC}"
 
   local old_trap
   old_trap="$(trap -p INT || true)"
 
   trap 'echo ""; trap - INT; return 0' INT
-  tail -n 100 -f "$SCRIPT_LOG_FILE"
+  tail -n 10 -f "$SCRIPT_LOG_FILE"
   trap - INT
 
   if [ -n "$old_trap" ]; then

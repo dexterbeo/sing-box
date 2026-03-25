@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.0.2"
+SCRIPT_VERSION="4.0.3"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -2242,7 +2242,7 @@ user_add_menu() {
     pause
     return 1
   fi
-  ui_echo "${Y}示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
+  ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
   read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
@@ -2360,8 +2360,8 @@ user_manage_package_menu() {
   current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
 
   ui_echo "当前流量限制：${current_quota} GB"
-  ui_echo "${Y}示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
-  ui_echo "输入 0 表示不限"
+  ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
+  ui_echo "单位为 GB ，输入 0 表示不限"
   ui_echo "回车：保持当前值"
   read -r -p "请输入: " quota_in
   if [ -z "$quota_in" ]; then

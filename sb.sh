@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.2"
+SCRIPT_VERSION="4.1.4"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -910,6 +910,19 @@ build_tuic_inbound() {
   '
 }
 
+cleanup_inbound_generated_cert_files() {
+  local json="$1" entry_key="$2"
+  local crt key
+  crt="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
+  key="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
+  if [ -n "$crt" ] && [[ "$crt" == /etc/sing-box/* ]]; then
+    rm -f "$crt" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$key" ] && [[ "$key" == /etc/sing-box/* ]]; then
+    rm -f "$key" >/dev/null 2>&1 || true
+  fi
+}
+
 # --------------------------------------------------
 # remove_inbound_by_entry_key
 # 作用：
@@ -1071,7 +1084,7 @@ relay_list_table() {
 
 relay_add() {
   init_manager_env
-  local json lines=() entry_key choice land ip pw normalized_pw relay_user out_tag inbound
+  local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
   json="$(config_load)"
 
   mapfile -t lines < <(protocol_entry_table "$json")
@@ -1111,6 +1124,13 @@ relay_add() {
   [ -z "${land:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
   read -r -p "落地 IP 地址: " ip
   [ -z "${ip:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
+  read -r -p "落地端口（默认: 8080）: " relay_port
+  relay_port="${relay_port:-8080}"
+  if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || [ "$relay_port" -lt 1 ] || [ "$relay_port" -gt 65535 ]; then
+    warn "落地端口无效，已返回上一级。"
+    pause
+    return 0
+  fi
   read -r -p "落地 SS 2022 密钥（回车随机生成）: " pw
   normalized_pw="$(ss2022_normalize_password_pair "$pw")"
 
@@ -1149,7 +1169,7 @@ relay_add() {
       ;;
   esac
 
-  new_out="$(jq -n --arg tag "$out_tag" --arg ip "$ip" --arg pw "$normalized_pw" '{type:"shadowsocks",tag:$tag,server:$ip,server_port:8080,method:"2022-blake3-aes-128-gcm",password:$pw}')"
+  new_out="$(jq -n --arg tag "$out_tag" --arg ip "$ip" --arg pw "$normalized_pw" --argjson p "$relay_port" '{type:"shadowsocks",tag:$tag,server:$ip,server_port:$p,method:"2022-blake3-aes-128-gcm",password:$pw}')"
 
   updated_json="$(echo "$json" | jq --arg ek "$entry_key" --arg ru "$relay_user" --arg ot "$out_tag" --argjson nu "$new_user" --argjson no "$new_out" '
     def auth_users_array:
@@ -3045,7 +3065,7 @@ ${W}[${out_name}]${NC}"
 ${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: \"${out_name}\", type: trojan, server: $ip, port: ${port}, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
             echo ""
-            echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=true, fast-open=false, udp-relay=true, tag=${out_name}"
+            echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=false, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
             echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
             echo ""
@@ -4062,6 +4082,7 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
       pause
       return 1
     }
+    cleanup_inbound_generated_cert_files "$updated_json" "$entry_key"
     updated_json="$(remove_inbound_by_entry_key "$updated_json" "$entry_key")" || {
       err "删除核心模块失败，已中止，未写入配置。"
       pause

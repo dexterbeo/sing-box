@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.0.3"
+SCRIPT_VERSION="4.1.2"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -432,6 +432,7 @@ entry_key_prefix_by_type() {
     vless-reality) echo "reality" ;;
     anytls) echo "anytls" ;;
     shadowsocks) echo "ss" ;;
+    trojan) echo "trojan" ;;
     vmess-ws) echo "vmess-ws" ;;
     vless-ws) echo "vless-ws" ;;
     tuic) echo "tuic" ;;
@@ -451,6 +452,7 @@ entry_key_to_protocol_label() {
     reality-*) echo "vless-reality" ;;
     anytls-*) echo "anytls" ;;
     ss-*) echo "shadowsocks" ;;
+    trojan-*) echo "trojan" ;;
     vmess-ws-*) echo "vmess-ws" ;;
     vless-ws-*) echo "vless-ws" ;;
     tuic-*) echo "tuic" ;;
@@ -484,6 +486,7 @@ protocol_entry_inventory() {
         if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
         elif .type == "anytls" then "anytls"
         elif .type == "shadowsocks" then "shadowsocks"
+        elif .type == "trojan" then "trojan"
         elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
         elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
         elif .type == "tuic" then "tuic"
@@ -507,6 +510,7 @@ protocol_entry_inventory_ext() {
         if $ib.type == "vless" and ($ib.tls.reality.enabled // false) then "vless-reality"
         elif $ib.type == "anytls" then "anytls"
         elif $ib.type == "shadowsocks" then "shadowsocks"
+        elif $ib.type == "trojan" then "trojan"
         elif $ib.type == "vmess" and (($ib.transport.type // "") == "ws") then "vmess-ws"
         elif $ib.type == "vless" and (($ib.transport.type // "") == "ws") then "vless-ws"
         elif $ib.type == "tuic" then "tuic"
@@ -525,6 +529,7 @@ inbound_protocol_name() {
     if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
     elif .type == "anytls" then "anytls"
     elif .type == "shadowsocks" then "shadowsocks"
+    elif .type == "trojan" then "trojan"
     elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
     elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
     elif .type == "tuic" then "tuic"
@@ -682,7 +687,7 @@ protocol_status_summary() {
   local all_lines proto label ports
   all_lines="$(protocol_entry_inventory "$json")"
 
-  for proto in vless-reality anytls shadowsocks vmess-ws vless-ws tuic; do
+  for proto in vless-reality anytls shadowsocks trojan vmess-ws vless-ws tuic; do
     label="$proto"
     ports="$(printf '%s
 ' "$all_lines" | awk -F '	' -v p="$proto" 'NF >= 3 && $2 == p { print $3 }' | sort -n | uniq | paste -sd'|' -)"
@@ -820,6 +825,31 @@ build_ss_inbound() {
       "method":"2022-blake3-aes-128-gcm",
       "password":$sp,
       "users":[{"name":$tag,"password":$up}]
+    }
+  '
+}
+
+build_trojan_inbound() {
+  local port="$1" sni="$2"
+  local entry_key pass crt key
+  entry_key="$(entry_key_from_parts trojan "$port")"
+  pass="$(openssl rand -base64 16)"
+  crt="/etc/sing-box/trojan-${port}.crt"
+  key="/etc/sing-box/trojan-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key"
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"trojan",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "certificate_path":$crt,
+        "key_path":$key
+      }
     }
   '
 }
@@ -997,6 +1027,7 @@ relay_list_table() {
       if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
       elif .type == "anytls" then "anytls"
       elif .type == "shadowsocks" then "shadowsocks"
+      elif .type == "trojan" then "trojan"
       elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
       elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
       elif .type == "tuic" then "tuic"
@@ -1103,6 +1134,9 @@ relay_add() {
       new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
       ;;
     anytls)
+      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
+      ;;
+    trojan)
       new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
       ;;
     tuic)
@@ -1944,6 +1978,9 @@ build_user_object_from_inbound() {
       jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
       ;;
     anytls)
+      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      ;;
+    trojan)
       jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
@@ -2869,6 +2906,11 @@ build_v2rayn_anytls_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_trojan_link() {
+  local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  printf 'trojan://%s@%s:%s?security=tls&sni=%s&alpn=%s&allowInsecure=1#%s'     "$(url_encode "$password")" "$server" "$port"     "$(url_encode "$sni")"     "$(url_encode "h2,http/1.1")"     "$(url_encode "$name")"
+}
+
 build_v2rayn_tuic_link() {
   local server="$1" port="$2" uuid="$3" password="$4" sni="$5" name="$6"
   printf 'tuic://%s:%s@%s:%s?sni=%s&alpn=%s&allow_insecure=1&congestion_control=bbr#%s' \
@@ -2993,6 +3035,21 @@ ${W}[${out_name}]${NC}"
             echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
             echo ""
             v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+          } >> "$target_file"
+          ;;
+        trojan)
+          [ -z "$pass" ] && continue
+          {
+            echo -e "
+${W}[${out_name}]${NC}"
+            echo -e " Clash: - {name: \"${out_name}\", type: trojan, server: $ip, port: ${port}, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
+            echo ""
+            echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=true, fast-open=false, udp-relay=true, tag=${out_name}"
+            echo ""
+            echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_trojan_link "$ip" "$port" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
@@ -3791,16 +3848,17 @@ protocol_install_menu() {
   echo -e "  [1] vless-reality"
   echo -e "  [2] anytls"
   echo -e "  [3] shadowsocks"
-  echo -e "  [4] vmess-ws"
-  echo -e "  [5] vless-ws"
-  echo -e "  [6] tuic"
+  echo -e "  [4] trojan"
+  echo -e "  [5] vmess-ws"
+  echo -e "  [6] vless-ws"
+  echo -e "  [7] tuic"
   read -r -p "请输入要安装的模块编号: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何模块，已返回上一级。"; pause; return 0; }
 
   local c port listen sni path priv sid entry_key inbound pub generated_pair
   for c in "${choice_arr[@]}"; do
-    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 6 ]; then
+    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 7 ]; then
       warn "无效模块编号：$c，已返回上一级。"
       pause
       return 0
@@ -3874,6 +3932,19 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       4)
+        ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
+        entry_key="$(entry_key_from_parts trojan "$port")"
+        while port_conflict_for_protocol "$updated_json" trojan "$port" "$entry_key"; do
+          warn "端口 ${port} 已被占用，请更换。"
+          ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
+          entry_key="$(entry_key_from_parts trojan "$port")"
+        done
+        sni="$(choose_tls_domain "Trojan")" || return 0
+        inbound="$(build_trojan_inbound "$port" "$sni")"
+        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        added_node_keys+=("$entry_key")
+        ;;
+      5)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vmess-ws "$port")"
@@ -3887,7 +3958,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      5)
+      6)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vless-ws "$port")"
@@ -3901,7 +3972,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      6)
+      7)
         ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts tuic "$port")"
         while port_conflict_for_protocol "$updated_json" tuic "$port" "$entry_key"; do

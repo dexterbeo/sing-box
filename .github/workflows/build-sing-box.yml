@@ -70,11 +70,11 @@ jobs:
 
           default_tags=$(tr '\n' ',' < release/DEFAULT_BUILD_TAGS | sed 's/,$//')
 
-          # 删除 Linux 下容易导致编译失败的 naive tag
-          final_tags=$(printf '%s\n' "$default_tags" | tr ',' '\n' | grep -v '^with_naive_outbound$' | awk 'NF && !seen[$0]++' | paste -sd',' -)
+          # 1. 不再删除 with_naive_outbound，保留原汁原味的 default tags
+          final_tags=$(printf '%s\n' "$default_tags" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd',' -)
 
-          # 追加 v2ray api
-          final_tags="${final_tags},with_v2ray_api"
+          # 2. 追加 v2ray api，以及解决 naive 免 CGO 编译问题的 with_purego
+          final_tags="${final_tags},with_v2ray_api,with_purego"
 
           # 原项目 ldflags
           base_ldflags=$(tr '\n' ' ' < release/LDFLAGS | sed 's/  */ /g')
@@ -112,30 +112,6 @@ jobs:
             -o ../dist/linux-arm64/sing-box \
             ./cmd/sing-box
 
-      - name: Build linux armv7
-        if: steps.current.outputs.should_build == 'true'
-        run: |
-          cd sing-box-src
-          mkdir -p ../dist/linux-armv7
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
-          go build -trimpath \
-            -ldflags "${{ steps.meta.outputs.ldflags }}" \
-            -tags "${{ steps.meta.outputs.tags }}" \
-            -o ../dist/linux-armv7/sing-box \
-            ./cmd/sing-box
-
-      - name: Build linux 386
-        if: steps.current.outputs.should_build == 'true'
-        run: |
-          cd sing-box-src
-          mkdir -p ../dist/linux-386
-          CGO_ENABLED=0 GOOS=linux GOARCH=386 \
-          go build -trimpath \
-            -ldflags "${{ steps.meta.outputs.ldflags }}" \
-            -tags "${{ steps.meta.outputs.tags }}" \
-            -o ../dist/linux-386/sing-box \
-            ./cmd/sing-box
-
       - name: Verify amd64 build tags
         if: steps.current.outputs.should_build == 'true'
         run: |
@@ -149,8 +125,6 @@ jobs:
         run: |
           test -f dist/linux-amd64/sing-box
           test -f dist/linux-arm64/sing-box
-          test -f dist/linux-armv7/sing-box
-          test -f dist/linux-386/sing-box
 
       - name: Package tar.gz
         if: steps.current.outputs.should_build == 'true'
@@ -158,13 +132,9 @@ jobs:
           mkdir -p release-files
           tar -C dist/linux-amd64 -czf release-files/sing-box-linux-amd64.tar.gz sing-box
           tar -C dist/linux-arm64 -czf release-files/sing-box-linux-arm64.tar.gz sing-box
-          tar -C dist/linux-armv7 -czf release-files/sing-box-linux-armv7.tar.gz sing-box
-          tar -C dist/linux-386 -czf release-files/sing-box-linux-386.tar.gz sing-box
 
           cp dist/linux-amd64/sing-box release-files/sing-box-linux-amd64
           cp dist/linux-arm64/sing-box release-files/sing-box-linux-arm64
-          cp dist/linux-armv7/sing-box release-files/sing-box-linux-armv7
-          cp dist/linux-386/sing-box release-files/sing-box-linux-386
 
           sha256sum release-files/* > release-files/sha256sum.txt
 
@@ -185,13 +155,9 @@ jobs:
           gh release create "$tag" \
             release-files/sing-box-linux-amd64 \
             release-files/sing-box-linux-arm64 \
-            release-files/sing-box-linux-armv7 \
-            release-files/sing-box-linux-386 \
             release-files/sing-box-linux-amd64.tar.gz \
             release-files/sing-box-linux-arm64.tar.gz \
-            release-files/sing-box-linux-armv7.tar.gz \
-            release-files/sing-box-linux-386.tar.gz \
             release-files/sha256sum.txt \
             --repo "${{ github.repository }}" \
             --title "$tag" \
-            --notes "Auto-built sing-box with with_v2ray_api"
+            --notes "Auto-built sing-box with with_v2ray_api and with_naive_outbound"

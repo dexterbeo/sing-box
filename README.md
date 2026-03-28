@@ -29,8 +29,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
 
 ### 2. 协议安装
 提供主流协议的一键部署：
-* **支持的协议**：Reality、AnyTLS、Shadowsocks2022、VMess-WS、VLESS-WS、TUIC。
-* **不支持的协议**：不支持 Naive 协议安装。
+* **支持的协议**：Reality、AnyTLS、Shadowsocks2022、Trojan、VMess-WS、VLESS-WS、TUIC。
 * **稳定性优化**：为增强在复杂网络环境下的容错率，所有部署的协议均默认关闭了 `tcp_fast_open` 和 `多路复用 (multiplexing)`。
 
 ### 3. 中转节点搭建
@@ -40,7 +39,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
 
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
-* 支持一键导出 Clash、Quantumult X、Surge 格式的节点配置。
+* 支持一键导出 Clash、Quantumult X、Surge、v2rayN 等格式的节点配置。
 
 ---
 

@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+# ============================================================
+# 模块: 20_protocol.sh
+# 职责: 协议构建器、TLS 域名选择、证书生成
+# 依赖: 00_base.sh (协议注册表), 01_utils.sh
+# ============================================================
+
+# ---------- 协议 entry key 映射（基于注册表，取代 6 处 case） ----------
+
+entry_key_prefix_by_type() {
+  local proto="$1"
+  local prefix="${PROTO_PREFIX[$proto]:-}"
+  if [ -z "$prefix" ]; then return 1; fi
+  echo "$prefix"
+}
+
+entry_key_from_parts() {
+  local proto="$1" port="$2"
+  local prefix
+  prefix="$(entry_key_prefix_by_type "$proto")" || return 1
+  echo "${prefix}-${port}"
+}
+
+entry_key_to_protocol_label() {
+  local key="$1"
+  # 从 entry_key 提取 prefix 并查注册表
+  local prefix
+  for prefix in "${!PREFIX_TO_PROTO[@]}"; do
+    if [[ "$key" == "${prefix}-"* ]]; then
+      echo "${PREFIX_TO_PROTO[$prefix]}"
+      return 0
+    fi
+  done
+  echo "unknown"
+}
+
+entry_key_to_port() {
+  echo "$1" | awk -F- '{print $NF}'
+}
+
+# ---------- TLS 证书 ----------
+
+ensure_self_signed_cert() {
+  local cn="$1" crt_path="$2" key_path="$3"
+  mkdir -p "$(dirname "$crt_path")"
+  openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) \
+    -keyout "$key_path" -out "$crt_path" -days 36500 -nodes -subj "/CN=${cn}" >/dev/null 2>&1
+}
+
+generate_reality_keypair_auto() {
+  local out priv pub
+  out="$(sing-box generate reality-keypair 2>/dev/null || true)"
+  priv="$(printf '%s\n' "$out" | awk -F': *' '/PrivateKey/ {print $2; exit}')"
+  pub="$(printf '%s\n' "$out" | awk -F': *' '/PublicKey/ {print $2; exit}')"
+  if [ -n "$priv" ] && [ -n "$pub" ]; then
+    printf '%s\t%s\n' "$priv" "$pub"
+    return 0
+  fi
+  return 1
+}
+
+# ---------- TLS 域名选择 ----------
+
+get_tls_domain_candidates() {
+  cat <<'EOF_TLS'
+assets.adobedtm.com
+lpcdn.lpsnmedia.net
+s.go-mpulse.net
+d0.m.awsstatic.com
+a0.awsstatic.com
+devblogs.microsoft.com
+ds-aksb-a.akamaihd.net
+tag.demandbase.com
+electronics.sony.com
+tag-logger.demandbase.com
+d3agakyjgjv5i8.cloudfront.net
+ms-python.gallerycdn.vsassets.io
+img-prod-cms-rt-microsoft-com.akamaized.net
+cdn.bizible.com
+store-images.s-microsoft.com
+catalog.gamepass.com
+www.nvidia.com
+mscom.demdex.net
+drivers.amd.com
+azure.microsoft.com
+downloadmirror.intel.com
+prod.us-east-1.ui.gcr-chat.marketing.aws.dev
+r.bing.com
+www.intel.com
+ms-vscode.gallerycdn.vsassets.io
+rum.hlx.page
+www.tesla.com
+ts2.tc.mm.bing.net
+res-1.cdn.office.net
+cdn-dynmedia-1.microsoft.com
+EOF_TLS
+}
+
+benchmark_tls_domain_ms() {
+  local domain="$1" t1 t2
+  t1="$(date +%s%3N 2>/dev/null || true)"
+  timeout 1 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >/dev/null 2>&1 || return 1
+  t2="$(date +%s%3N 2>/dev/null || true)"
+  if [ -n "$t1" ] && [ -n "$t2" ]; then
+    echo $((t2 - t1))
+  else
+    echo 999
+  fi
+}
+
+auto_pick_tls_domain() {
+  local best_domain="" best_ms=999999 ms domain
+  while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
+    ms="$(benchmark_tls_domain_ms "$domain" 2>/dev/null || true)"
+    if [ -n "$ms" ] && [[ "$ms" =~ ^[0-9]+$ ]] && [ "$ms" -lt "$best_ms" ]; then
+      best_ms="$ms"
+      best_domain="$domain"
+    fi
+  done < <(get_tls_domain_candidates)
+  [ -n "$best_domain" ] || return 1
+  printf '%s\t%s\n' "$best_domain" "$best_ms"
+}
+
+choose_tls_domain() {
+  local proto_label="$1" choice manual picked picked_ms
+  ui_echo "1. 手动输入"
+  ui_echo "2. 自动测速选择推荐域名"
+  read -r -p "请选择域名填写方式（回车默认2. 自动测速选择推荐域名）: " choice
+  case "${choice:-2}" in
+    1)
+      read -r -p "请输入${proto_label}域名: " manual
+      if [ -z "${manual:-}" ]; then
+        warn "[WARN] 输入无效，已返回上一级。" >&2
+        pause >&2
+        return 1
+      fi
+      echo "$manual"
+      ;;
+    2)
+      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
+      if [ -n "$picked" ]; then
+        picked_ms="${picked#*$'\t'}"
+        picked="${picked%%$'\t'*}"
+        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
+        echo "$picked"
+      else
+        warn "自动测速失败，已返回上一级。" >&2
+        pause >&2
+        return 1
+      fi
+      ;;
+    *)
+      warn "输入无效，已使用默认自动测速。" >&2
+      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
+      if [ -n "$picked" ]; then
+        picked_ms="${picked#*$'\t'}"
+        picked="${picked%%$'\t'*}"
+        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
+        echo "$picked"
+      else
+        warn "自动测速失败，已返回上一级。" >&2
+        pause >&2
+        return 1
+      fi
+      ;;
+  esac
+}
+
+# ---------- SS 密码规范化 ----------
+
+ss2022_normalize_password_pair() {
+  local raw="$1"
+  local sp up
+  if [ -z "$raw" ]; then
+    sp="$(openssl rand -base64 16)"
+    up="$(openssl rand -base64 16)"
+    echo "${sp}:${up}"
+    return 0
+  fi
+  sp="${raw%%:*}"
+  up=""
+  [[ "$raw" == *:* ]] && up="${raw#*:}"
+  if ! echo "$sp" | base64 -d >/dev/null 2>&1; then sp="$(openssl rand -base64 16)"; fi
+  if [ -n "$up" ] && ! echo "$up" | base64 -d >/dev/null 2>&1; then up="$(openssl rand -base64 16)"; fi
+  if [ -n "$up" ]; then echo "${sp}:${up}"; else echo "$sp"; fi
+}
+
+# ====================================================
+# 协议 Inbound 构建器
+# 每个协议一个函数，结构统一，互不依赖
+# ====================================================
+
+build_vless_reality_inbound() {
+  local port="$1" sni="$2" priv="$3" sid="$4"
+  local entry_key uuid sid_json
+  entry_key="$(entry_key_from_parts vless-reality "$port")"
+  uuid="$(sing-box generate uuid)"
+  if [ -n "$sid" ]; then
+    sid_json="[\"$sid\"]"
+  else
+    sid_json='[]'
+  fi
+  jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg sni "$sni" --arg priv "$priv" --argjson sid "$sid_json" --argjson port "$port" '
+    {
+      "type":"vless",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"uuid":$uuid,"flow":"xtls-rprx-vision"}],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "reality":{
+          "enabled":true,
+          "handshake":{"server":$sni,"server_port":443},
+          "private_key":$priv,
+          "short_id":$sid
+        }
+      }
+    }
+  '
+}
+
+build_anytls_inbound() {
+  local port="$1" sni="$2"
+  local entry_key pass crt key
+  entry_key="$(entry_key_from_parts anytls "$port")"
+  pass="$(openssl rand -base64 16)"
+  crt="/etc/sing-box/anytls-${port}.crt"
+  key="/etc/sing-box/anytls-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key"
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"anytls",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "padding_scheme":[],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "certificate_path":$crt,
+        "key_path":$key,
+        "alpn":["h2","http/1.1"]
+      }
+    }
+  '
+}
+
+build_ss_inbound() {
+  local port="$1"
+  local entry_key server_p user_p
+  entry_key="$(entry_key_from_parts shadowsocks "$port")"
+  server_p="$(openssl rand -base64 16)"
+  user_p="$(openssl rand -base64 16)"
+  jq -n --arg tag "$entry_key" --arg sp "$server_p" --arg up "$user_p" --argjson port "$port" '
+    {
+      "type":"shadowsocks",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "method":"2022-blake3-aes-128-gcm",
+      "password":$sp,
+      "users":[{"name":$tag,"password":$up}]
+    }
+  '
+}
+
+build_trojan_inbound() {
+  local port="$1" sni="$2"
+  local entry_key pass crt key
+  entry_key="$(entry_key_from_parts trojan "$port")"
+  pass="$(openssl rand -base64 16)"
+  crt="/etc/sing-box/trojan-${port}.crt"
+  key="/etc/sing-box/trojan-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key"
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"trojan",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "certificate_path":$crt,
+        "key_path":$key
+      }
+    }
+  '
+}
+
+build_vmess_ws_inbound() {
+  local port="$1" listen="$2" path="$3"
+  local entry_key uuid
+  entry_key="$(entry_key_from_parts vmess-ws "$port")"
+  uuid="$(sing-box generate uuid)"
+  jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg listen "$listen" --arg path "$path" --argjson port "$port" '
+    {
+      "type":"vmess",
+      "tag":$tag,
+      "listen":$listen,
+      "listen_port":$port,
+      "users":[{"name":$tag,"uuid":$uuid,"alterId":0}],
+      "transport":{"type":"ws","path":$path,"max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}
+    }
+  '
+}
+
+build_vless_ws_inbound() {
+  local port="$1" listen="$2" path="$3"
+  local entry_key uuid
+  entry_key="$(entry_key_from_parts vless-ws "$port")"
+  uuid="$(sing-box generate uuid)"
+  jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg listen "$listen" --arg path "$path" --argjson port "$port" '
+    {
+      "type":"vless",
+      "tag":$tag,
+      "listen":$listen,
+      "listen_port":$port,
+      "users":[{"name":$tag,"uuid":$uuid}],
+      "transport":{"type":"ws","path":$path,"max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}
+    }
+  '
+}
+
+build_tuic_inbound() {
+  local port="$1" sni="$2"
+  local entry_key uuid pass crt key
+  entry_key="$(entry_key_from_parts tuic "$port")"
+  uuid="$(sing-box generate uuid)"
+  pass="$(openssl rand -base64 12)"
+  crt="/etc/sing-box/tuic-${port}.crt"
+  key="/etc/sing-box/tuic-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key"
+  jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"tuic",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"uuid":$uuid,"password":$pass}],
+      "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key},
+      "congestion_control":"bbr"
+    }
+  '
+}
+
+# ---------- 证书清理 ----------
+
+cleanup_inbound_generated_cert_files() {
+  local json="$1" entry_key="$2"
+  local crt key
+  crt="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
+  key="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
+  if [ -n "$crt" ] && [[ "$crt" == /etc/sing-box/* ]]; then
+    rm -f "$crt" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$key" ] && [[ "$key" == /etc/sing-box/* ]]; then
+    rm -f "$key" >/dev/null 2>&1 || true
+  fi
+}
+
+# ---------- 用户对象构建（按协议类型分派） ----------
+
+build_user_object_from_inbound() {
+  local inbound="$1" full_name="$2"
+  local inbound_type
+  inbound_type="$(echo "$inbound" | jq -r '.type')"
+  case "$inbound_type" in
+    vless)
+      if echo "$inbound" | jq -e '.tls.reality.enabled == true' >/dev/null 2>&1; then
+        jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,flow:"xtls-rprx-vision"}'
+      else
+        jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid}'
+      fi
+      ;;
+    vmess)
+      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
+      ;;
+    shadowsocks)
+      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      ;;
+    anytls)
+      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      ;;
+    trojan)
+      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      ;;
+    tuic)
+      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" --arg pass "$(openssl rand -base64 12)" '{name:$name,uuid:$uuid,password:$pass}'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+find_user_obj_in_inbound() {
+  local inbound="$1" full_name="$2"
+  echo "$inbound" | jq -c --arg n "$full_name" '(.users // [])[]? | select((.name // "") == $n)' | head -n1
+}

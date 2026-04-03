@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-03 14:09:04 UTC
+# 构建时间: 2026-04-03 14:54:08 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.1.2"
+SCRIPT_VERSION="5.1.3"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -1288,7 +1288,7 @@ remove_relays_by_user_names(){
       | .route.rules |= map(
           if (.auth_user? == null) then .
           else
-            (auth_users_array | map(select(($users | index(.)) == null))) as $remain
+            (auth_users_array | [.[] | . as $u | select(($users | index($u)) == null)]) as $remain
             | if ($remain | length) == 0 then empty
               elif ($remain | length) == 1 then .auth_user = $remain[0]
               else .auth_user = $remain
@@ -2045,16 +2045,15 @@ user_db_grant_node_to_enabled_users() {
 
 user_db_cleanup_missing_nodes() {
   local db_json="$1" json="$2"
-  # 用户 nodes 字段只存 entry_key（inbound tag），
-  # 不含 relay node_part，因此参照集只取 inbound tag，
-  # 避免 list_all_node_keys（含 relay）造成判断偏差。
   local available_json
-  available_json="$(echo "$json" | jq -c '[.inbounds[]?.tag // empty]')"
+  available_json="$(
+    list_all_node_keys "$json" | jq -R . | jq -s '.'
+  )"
   echo "$db_json" | jq --argjson available "$available_json" '
     .users |= with_entries(
       .value.nodes = (
         (.value.nodes // [])
-        | map(select(($available | index(.)) != null))
+        | [.[] | . as $n | select(($available | index($n)) != null)]
         | unique
       )
     )

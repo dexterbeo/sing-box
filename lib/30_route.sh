@@ -186,7 +186,7 @@ remove_relays_by_user_names(){
       | .route.rules |= map(
           if (.auth_user? == null) then .
           else
-            (auth_users_array | map(select(($users | index(.)) == null))) as $remain
+            (auth_users_array | [.[] | . as $u | select(($users | index($u)) == null)]) as $remain
             | if ($remain | length) == 0 then empty
               elif ($remain | length) == 1 then .auth_user = $remain[0]
               else .auth_user = $remain

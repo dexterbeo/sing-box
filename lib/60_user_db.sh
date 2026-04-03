@@ -101,10 +101,11 @@ user_db_grant_node_to_enabled_users() {
 
 user_db_cleanup_missing_nodes() {
   local db_json="$1" json="$2"
+  # 用户 nodes 字段只存 entry_key（inbound tag），
+  # 不含 relay node_part，因此参照集只取 inbound tag，
+  # 避免 list_all_node_keys（含 relay）造成判断偏差。
   local available_json
-  available_json="$(
-    list_all_node_keys "$json" | jq -R . | jq -s '.'
-  )"
+  available_json="$(echo "$json" | jq -c '[.inbounds[]?.tag // empty]')"
   echo "$db_json" | jq --argjson available "$available_json" '
     .users |= with_entries(
       .value.nodes = (

@@ -81,8 +81,17 @@ sync_runtime_script_entrypoints() {
   target_ver="$(script_version_of_file "$SB_TARGET_SCRIPT" || true)"
 
   if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
+    # 管道/process substitution 执行场景：从自身文件描述符读取内容写入目标
+    # 这样无论从哪个分支执行，s 快捷命令始终与当前运行版本一致
     if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
-      curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+      local fd_path
+      fd_path="$(readlink -f "$current" 2>/dev/null || true)"
+      if [ -n "$fd_path" ] && [ -r "$fd_path" ]; then
+        cp -f "$fd_path" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+      else
+        # fd 不可读时（极少数系统）回退到网络下载
+        curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+      fi
     fi
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
@@ -98,10 +107,20 @@ install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
-    curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-      warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
-      return 1
-    }
+    # 管道执行场景：优先从自身 fd 读取，确保版本一致
+    local fd_path
+    fd_path="$(readlink -f "$current" 2>/dev/null || true)"
+    if [ -n "$fd_path" ] && [ -r "$fd_path" ]; then
+      cp -f "$fd_path" "$SB_TARGET_SCRIPT" || {
+        warn "快捷命令 s 安装失败：无法写入 $SB_TARGET_SCRIPT"
+        return 1
+      }
+    else
+      curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
+        warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
+        return 1
+      }
+    fi
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then

@@ -265,7 +265,7 @@ export_configs() {
           ;;
       esac
     done < <(echo "$inbound" | jq -c '.users[]?')
-  done < <(echo "$json" | jq -c '.inbounds[]?')
+  done < <(echo "$json" | jq -c "${JQ_PROTOCOL_SORT}"'[.inbounds[]?] | sort_by(protocol_sort_index(.tag // "")) | .[]')
 
   echo -e "\n${C}直连节点${NC}"
   if [ -s "$direct_tmp" ]; then

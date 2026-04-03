@@ -108,7 +108,7 @@ list_all_node_keys() {
         echo "$np"
       fi
     done
-  } | awk 'NF' | LC_ALL=C sort -u
+  } | awk 'NF' | LC_ALL=C sort -u | sort_node_keys_by_protocol
 }
 
 # ====================================================

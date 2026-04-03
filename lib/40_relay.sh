@@ -67,7 +67,7 @@ relay_add() {
   local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
   json="$(config_load)"
 
-  mapfile -t lines < <(protocol_entry_inventory "$json" | head -100)
+  mapfile -t lines < <(protocol_entry_inventory "$json" | sort_tsv_by_protocol 1 | head -100)
   if [ ${#lines[@]} -eq 0 ]; then
     err "当前没有任何主入站，请先在核心模块管理里安装协议。"
     pause
@@ -218,7 +218,7 @@ relay_delete() {
           seen[node]=1
           print $1 "\t" node "\t" $3
         }
-      }'
+      }' | sort_tsv_by_protocol 2
   )
 
   clear
@@ -283,14 +283,10 @@ manage_relay_nodes() {
         [ -n "$relay_user" ] || continue
         relay_node="$(user_node_part "$relay_user")"
         [ -n "$relay_node" ] || continue
-        if [ -z "${_relay_seen:-}" ]; then _relay_seen=""; fi
-        if printf '%s\n' "$_relay_seen" | grep -Fxq "$relay_node"; then
-          continue
-        fi
-        _relay_seen="${_relay_seen}${relay_node}"$'\n'
+        echo "$relay_node"
+      done | sort -u | sort_node_keys_by_protocol | while IFS= read -r relay_node; do
         echo -e "  - ${G}${relay_node}${NC}"
       done
-      unset _relay_seen
     else
       echo -e "  ${Y}当前没有中转节点。${NC}"
     fi

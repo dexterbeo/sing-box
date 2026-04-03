@@ -114,28 +114,38 @@ prompt_expire_date() {
 select_nodes_multi() {
   local json="$1" outvar="$2"
   local nodes=()
+  # 节点按协议顺序排序
   mapfile -t nodes < <(list_all_node_keys "$json")
   if [ ${#nodes[@]} -eq 0 ]; then
     printf -v "$outvar" '%s' '[]'
     return 0
   fi
-  ui_echo "请选择可用节点（多个用空格分隔，回车表示不选择）："
+  ui_echo "请选择可用节点（多个用 + 连接，0 清除全部，回车跳过）："
   local i=1 node
   for node in "${nodes[@]}"; do
     ui_echo " [$i] $node"
     i=$((i+1))
   done
-  local ans picks_json='[]' part selected=()
+  local ans part selected=()
   read -r -p "请输入编号: " ans
-  for part in $ans; do
+  [ -z "${ans:-}" ] && { printf -v "$outvar" '%s' '__SKIP__'; return 0; }
+  mapfile -t picks < <(parse_plus_selections "$ans")
+  if [ ${#picks[@]} -eq 1 ] && [ "${picks[0]}" = "0" ]; then
+    printf -v "$outvar" '%s' '[]'
+    return 0
+  fi
+  for part in "${picks[@]}"; do
     if [[ "$part" =~ ^[0-9]+$ ]] && [ "$part" -ge 1 ] && [ "$part" -le "${#nodes[@]}" ]; then
       selected+=("${nodes[$((part-1))]}")
     fi
   done
   if [ ${#selected[@]} -gt 0 ]; then
+    local picks_json
     picks_json="$(printf '%s\n' "${selected[@]}" | awk 'NF' | sort -u | jq -R . | jq -s '.')"
+    printf -v "$outvar" '%s' "$picks_json"
+  else
+    printf -v "$outvar" '%s' '[]'
   fi
-  printf -v "$outvar" '%s' "$picks_json"
 }
 
 user_show_info() {
@@ -202,8 +212,17 @@ user_add_menu() {
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
+
+  # 节点权限设置（按协议顺序展示）
   allow_all_json='false'
   nodes_json='[]'
+  ui_echo "${C}--- 节点权限 ---${NC}"
+  select_nodes_multi "$json" nodes_json
+  if [ "$nodes_json" = "__SKIP__" ]; then
+    nodes_json='[]'
+    ui_echo "已跳过节点权限设置，默认不分配节点。"
+  fi
+
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
@@ -259,8 +278,10 @@ user_manage_permission_menu() {
   fi
   ui_echo "${B}--------------------------------------------------------${NC}"
 
+  # 节点列表按协议顺序排序（统一使用 sort_node_keys_by_protocol）
   mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
+  ui_echo "  0. 清除全部节点权限"
   ui_echo "  1. 全部节点"
   i=2
   for node in "${nodes[@]}"; do
@@ -271,6 +292,13 @@ user_manage_permission_menu() {
   [ -z "${raw:-}" ] && return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
+
+  # 选择 0 = 清除全部
+  if [ ${#picks[@]} -eq 1 ] && [ "${picks[0]}" = "0" ]; then
+    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].allow_all_nodes = false | .users[$u].nodes = []')"
+    echo "$new_db"
+    return 0
+  fi
 
   for sel in "${picks[@]}"; do
     if ! [[ "$sel" =~ ^[0-9]+$ ]]; then invalid=1; break; fi

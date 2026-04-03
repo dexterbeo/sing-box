@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.0.0"
+SCRIPT_VERSION="5.1.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -204,5 +204,59 @@ def node_part($s):
   if ($s | contains("@")) then ($s | split("@")[0]) else $s end;
 '
 
+# 协议排序索引：将 tag/node_key 映射为排序序号（唯一定义）
+JQ_PROTOCOL_SORT='
+def protocol_sort_index($tag):
+  if ($tag | startswith("reality-")) then 0
+  elif ($tag | startswith("anytls-")) then 1
+  elif ($tag | startswith("ss-")) then 2
+  elif ($tag | startswith("trojan-")) then 3
+  elif ($tag | startswith("vmess-ws-")) then 4
+  elif ($tag | startswith("vless-ws-")) then 5
+  elif ($tag | startswith("tuic-")) then 6
+  else 99
+  end;
+'
+
 # 组合：常用 jq 前缀（包含所有共享定义）
-JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}"
+JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+
+# ====================================================
+# 节点排序基础设施 — bash 层面的协议排序
+# 所有需要按协议排序的地方统一调用这些函数
+# ====================================================
+
+# 返回 node key 的排序序号（00-06，未知为 99）
+node_protocol_sort_key() {
+  local key="$1"
+  local i=0 prefix
+  for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+    prefix="${PROTO_PREFIX[$proto]}"
+    if [[ "$key" == "${prefix}-"* ]]; then
+      printf '%02d' "$i"
+      return 0
+    fi
+    i=$((i+1))
+  done
+  printf '99'
+}
+
+# 从 stdin 读取 node key，按协议顺序排序后输出
+sort_node_keys_by_protocol() {
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    printf '%s\t%s\n' "$(node_protocol_sort_key "$key")" "$key"
+  done | sort -t$'\t' -k1,1 -k2,2 | cut -f2
+}
+
+# 从 stdin 读取 TSV 行，按指定字段的协议顺序排序
+# 用法：some_command | sort_tsv_by_protocol 1  （按第1列排序）
+sort_tsv_by_protocol() {
+  local field="${1:-1}"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local fval
+    fval="$(echo "$line" | cut -f"$field")"
+    printf '%s\t%s\n' "$(node_protocol_sort_key "$fval")" "$line"
+  done | sort -t$'\t' -k1,1 | cut -f2-
+}

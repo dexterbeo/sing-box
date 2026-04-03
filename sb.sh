@@ -16,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.0.0"
+SCRIPT_VERSION="5.1.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -213,8 +213,62 @@ def node_part($s):
   if ($s | contains("@")) then ($s | split("@")[0]) else $s end;
 '
 
+# 协议排序索引：将 tag/node_key 映射为排序序号（唯一定义）
+JQ_PROTOCOL_SORT='
+def protocol_sort_index($tag):
+  if ($tag | startswith("reality-")) then 0
+  elif ($tag | startswith("anytls-")) then 1
+  elif ($tag | startswith("ss-")) then 2
+  elif ($tag | startswith("trojan-")) then 3
+  elif ($tag | startswith("vmess-ws-")) then 4
+  elif ($tag | startswith("vless-ws-")) then 5
+  elif ($tag | startswith("tuic-")) then 6
+  else 99
+  end;
+'
+
 # 组合：常用 jq 前缀（包含所有共享定义）
-JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}"
+JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+
+# ====================================================
+# 节点排序基础设施 — bash 层面的协议排序
+# 所有需要按协议排序的地方统一调用这些函数
+# ====================================================
+
+# 返回 node key 的排序序号（00-06，未知为 99）
+node_protocol_sort_key() {
+  local key="$1"
+  local i=0 prefix
+  for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+    prefix="${PROTO_PREFIX[$proto]}"
+    if [[ "$key" == "${prefix}-"* ]]; then
+      printf '%02d' "$i"
+      return 0
+    fi
+    i=$((i+1))
+  done
+  printf '99'
+}
+
+# 从 stdin 读取 node key，按协议顺序排序后输出
+sort_node_keys_by_protocol() {
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    printf '%s\t%s\n' "$(node_protocol_sort_key "$key")" "$key"
+  done | sort -t$'\t' -k1,1 -k2,2 | cut -f2
+}
+
+# 从 stdin 读取 TSV 行，按指定字段的协议顺序排序
+# 用法：some_command | sort_tsv_by_protocol 1  （按第1列排序）
+sort_tsv_by_protocol() {
+  local field="${1:-1}"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local fval
+    fval="$(echo "$line" | cut -f"$field")"
+    printf '%s\t%s\n' "$(node_protocol_sort_key "$fval")" "$line"
+  done | sort -t$'\t' -k1,1 | cut -f2-
+}
 
 
 # >>>>>>>>> END MODULE: 00_base.sh <<<<<<<<<<<
@@ -1159,7 +1213,7 @@ list_all_node_keys() {
         echo "$np"
       fi
     done
-  } | awk 'NF' | LC_ALL=C sort -u
+  } | awk 'NF' | LC_ALL=C sort -u | sort_node_keys_by_protocol
 }
 
 # ====================================================
@@ -1411,7 +1465,7 @@ relay_add() {
   local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
   json="$(config_load)"
 
-  mapfile -t lines < <(protocol_entry_inventory "$json" | head -100)
+  mapfile -t lines < <(protocol_entry_inventory "$json" | sort_tsv_by_protocol 1 | head -100)
   if [ ${#lines[@]} -eq 0 ]; then
     err "当前没有任何主入站，请先在核心模块管理里安装协议。"
     pause
@@ -1562,7 +1616,7 @@ relay_delete() {
           seen[node]=1
           print $1 "\t" node "\t" $3
         }
-      }'
+      }' | sort_tsv_by_protocol 2
   )
 
   clear
@@ -1627,14 +1681,10 @@ manage_relay_nodes() {
         [ -n "$relay_user" ] || continue
         relay_node="$(user_node_part "$relay_user")"
         [ -n "$relay_node" ] || continue
-        if [ -z "${_relay_seen:-}" ]; then _relay_seen=""; fi
-        if printf '%s\n' "$_relay_seen" | grep -Fxq "$relay_node"; then
-          continue
-        fi
-        _relay_seen="${_relay_seen}${relay_node}"$'\n'
+        echo "$relay_node"
+      done | sort -u | sort_node_keys_by_protocol | while IFS= read -r relay_node; do
         echo -e "  - ${G}${relay_node}${NC}"
       done
-      unset _relay_seen
     else
       echo -e "  ${Y}当前没有中转节点。${NC}"
     fi
@@ -2417,28 +2467,38 @@ prompt_expire_date() {
 select_nodes_multi() {
   local json="$1" outvar="$2"
   local nodes=()
+  # 节点按协议顺序排序
   mapfile -t nodes < <(list_all_node_keys "$json")
   if [ ${#nodes[@]} -eq 0 ]; then
     printf -v "$outvar" '%s' '[]'
     return 0
   fi
-  ui_echo "请选择可用节点（多个用空格分隔，回车表示不选择）："
+  ui_echo "请选择可用节点（多个用 + 连接，0 清除全部，回车跳过）："
   local i=1 node
   for node in "${nodes[@]}"; do
     ui_echo " [$i] $node"
     i=$((i+1))
   done
-  local ans picks_json='[]' part selected=()
+  local ans part selected=()
   read -r -p "请输入编号: " ans
-  for part in $ans; do
+  [ -z "${ans:-}" ] && { printf -v "$outvar" '%s' '__SKIP__'; return 0; }
+  mapfile -t picks < <(parse_plus_selections "$ans")
+  if [ ${#picks[@]} -eq 1 ] && [ "${picks[0]}" = "0" ]; then
+    printf -v "$outvar" '%s' '[]'
+    return 0
+  fi
+  for part in "${picks[@]}"; do
     if [[ "$part" =~ ^[0-9]+$ ]] && [ "$part" -ge 1 ] && [ "$part" -le "${#nodes[@]}" ]; then
       selected+=("${nodes[$((part-1))]}")
     fi
   done
   if [ ${#selected[@]} -gt 0 ]; then
+    local picks_json
     picks_json="$(printf '%s\n' "${selected[@]}" | awk 'NF' | sort -u | jq -R . | jq -s '.')"
+    printf -v "$outvar" '%s' "$picks_json"
+  else
+    printf -v "$outvar" '%s' '[]'
   fi
-  printf -v "$outvar" '%s' "$picks_json"
 }
 
 user_show_info() {
@@ -2505,8 +2565,17 @@ user_add_menu() {
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
+
+  # 节点权限设置（按协议顺序展示）
   allow_all_json='false'
   nodes_json='[]'
+  ui_echo "${C}--- 节点权限 ---${NC}"
+  select_nodes_multi "$json" nodes_json
+  if [ "$nodes_json" = "__SKIP__" ]; then
+    nodes_json='[]'
+    ui_echo "已跳过节点权限设置，默认不分配节点。"
+  fi
+
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
@@ -2562,8 +2631,10 @@ user_manage_permission_menu() {
   fi
   ui_echo "${B}--------------------------------------------------------${NC}"
 
+  # 节点列表按协议顺序排序（统一使用 sort_node_keys_by_protocol）
   mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
+  ui_echo "  0. 清除全部节点权限"
   ui_echo "  1. 全部节点"
   i=2
   for node in "${nodes[@]}"; do
@@ -2574,6 +2645,13 @@ user_manage_permission_menu() {
   [ -z "${raw:-}" ] && return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
+
+  # 选择 0 = 清除全部
+  if [ ${#picks[@]} -eq 1 ] && [ "${picks[0]}" = "0" ]; then
+    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].allow_all_nodes = false | .users[$u].nodes = []')"
+    echo "$new_db"
+    return 0
+  fi
 
   for sel in "${picks[@]}"; do
     if ! [[ "$sel" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
@@ -3172,7 +3250,7 @@ export_configs() {
           ;;
       esac
     done < <(echo "$inbound" | jq -c '.users[]?')
-  done < <(echo "$json" | jq -c '.inbounds[]?')
+  done < <(echo "$json" | jq -c "${JQ_PROTOCOL_SORT}"'[.inbounds[]?] | sort_by(protocol_sort_index(.tag // "")) | .[]')
 
   echo -e "\n${C}直连节点${NC}"
   if [ -s "$direct_tmp" ]; then
@@ -3730,7 +3808,7 @@ protocol_status_summary() {
 
 protocol_entry_table() {
   local json="$1"
-  protocol_entry_inventory "$json"
+  protocol_entry_inventory "$json" | sort_tsv_by_protocol 1
 }
 
 # ---------- 规范化接管 ----------

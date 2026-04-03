@@ -26,7 +26,7 @@ protocol_status_summary() {
 
 protocol_entry_table() {
   local json="$1"
-  protocol_entry_inventory "$json"
+  protocol_entry_inventory "$json" | sort_tsv_by_protocol 1
 }
 
 # ---------- 规范化接管 ----------

@@ -16,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.1.0"
+SCRIPT_VERSION="5.1.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -2184,13 +2184,11 @@ user_manager_apply_changes() {
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   say "更新用户数据库..."
+  db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   user_db_save "$db_json"
   ok "用户数据库已保存。"
 
   say "重新生成用户节点关系..."
-  db_json="$(user_db_load)"
-  db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
-  user_db_save "$db_json"
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
     err "生成用户节点关系失败。"
@@ -2530,14 +2528,16 @@ user_show_info() {
       + "已用总量：" + $total + "\n"
       + "套餐总量：" + $quota + "\n"
       + "重置日：" + (if (($x.reset_day // 0) == 0) then "不重置" elif (($x.reset_day // 0) == 32) then "月底" else (($x.reset_day|tostring)+"号") end) + "\n"
-      + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end) + "\n"
-      + "节点策略：" + (if ($x.allow_all_nodes // false) then "全部节点" else "自定义节点" end)
+      + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end)
   '
   echo "允许节点："
-  if echo "$db_json" | jq -e --arg u "$username" '.users[$u].allow_all_nodes == true' >/dev/null 2>&1; then
-    echo "  - 全部节点"
-  else
-    echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sed 's/^/  - /'
+  echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sed 's/^/  - /'
+  if ! echo "$db_json" | jq -e --arg u "$username" '(.users[$u].nodes // []) | length > 0' >/dev/null 2>&1; then
+    if echo "$db_json" | jq -e --arg u "$username" '.users[$u].allow_all_nodes == true' >/dev/null 2>&1; then
+      echo "  - 全部节点（admin）"
+    else
+      echo "  - （无）"
+    fi
   fi
 }
 
@@ -2604,39 +2604,28 @@ user_manage_permission_menu() {
     user_db_save "$cleaned_db_json"
   fi
   db_json="$cleaned_db_json"
-  local current_nodes_json current_allow_all
+  local current_nodes_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
 
   clear >&2
   print_rect_title "节点权限" >&2
   show_user_status_table "$db_json" >&2
-  current_allow_all="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].allow_all_nodes // false')"
   current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // [])')"
 
-  if [ "$current_allow_all" = "true" ]; then
-    ui_echo "当前权限类型：全部节点"
-  else
-    ui_echo "当前权限类型：自定义节点"
-  fi
   ui_echo "当前已分配节点："
-  if [ "$current_allow_all" = "true" ]; then
-    ui_echo "- 全部节点"
-  else
-    while IFS= read -r node; do
-      [ -n "$node" ] && ui_echo "- $node"
-    done < <(echo "$current_nodes_json" | jq -r '.[]?')
-    if ! echo "$current_nodes_json" | jq -e 'length > 0' >/dev/null 2>&1; then
-      ui_echo "- （无）"
-    fi
+  while IFS= read -r node; do
+    [ -n "$node" ] && ui_echo "- $node"
+  done < <(echo "$current_nodes_json" | jq -r '.[]?')
+  if ! echo "$current_nodes_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+    ui_echo "- （无）"
   fi
   ui_echo "${B}--------------------------------------------------------${NC}"
 
-  # 节点列表按协议顺序排序（统一使用 sort_node_keys_by_protocol）
+  # 节点列表按协议顺序排序
   mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
   ui_echo "  0. 清除全部节点权限"
-  ui_echo "  1. 全部节点"
-  i=2
+  i=1
   for node in "${nodes[@]}"; do
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
@@ -2655,7 +2644,7 @@ user_manage_permission_menu() {
 
   for sel in "${picks[@]}"; do
     if ! [[ "$sel" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
-    if [ "$sel" -lt 1 ] || [ "$sel" -gt $(( ${#nodes[@]} + 1 )) ]; then invalid=1; break; fi
+    if [ "$sel" -lt 1 ] || [ "$sel" -gt ${#nodes[@]} ]; then invalid=1; break; fi
   done
 
   if [ $invalid -eq 1 ]; then
@@ -2664,15 +2653,9 @@ user_manage_permission_menu() {
     return 1
   fi
 
-  if printf '%s\n' "${picks[@]}" | grep -qx '1'; then
-    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].allow_all_nodes = true | .users[$u].nodes = []')"
-    echo "$new_db"
-    return 0
-  fi
-
   selected_json="$({
     for sel in "${picks[@]}"; do
-      idx=$((sel-2))
+      idx=$((sel-1))
       if [ $idx -ge 0 ] && [ $idx -lt ${#nodes[@]} ]; then
         echo "${nodes[$idx]}"
       fi
@@ -4269,20 +4252,8 @@ protocol_remove_menu() {
     return 1
   }
   if user_db_exists; then
-    local db_json removed_nodes_json
-    removed_nodes_json="$(
-      for c in "${choice_arr[@]}"; do
-        IFS=$'\t' read -r entry_key _ <<< "${lines[$((c-1))]}"
-        printf '%s\n' "$entry_key"
-      done | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.'
-    )"
+    local db_json
     db_json="$(user_db_load)"
-    db_json="$(echo "$db_json" | jq --argjson removed "$removed_nodes_json" '
-      .users |= with_entries(
-        .value.nodes = (((.value.nodes // []) | map(select(($removed | index(.)) == null))) | unique)
-      )
-    ')"
-    db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
     if ! user_manager_apply_changes "$db_json" "$updated_json"; then
       warn "核心模块卸载失败，已返回上一级。"
     fi

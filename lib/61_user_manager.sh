@@ -103,13 +103,11 @@ user_manager_apply_changes() {
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   say "更新用户数据库..."
+  db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   user_db_save "$db_json"
   ok "用户数据库已保存。"
 
   say "重新生成用户节点关系..."
-  db_json="$(user_db_load)"
-  db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
-  user_db_save "$db_json"
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
     err "生成用户节点关系失败。"

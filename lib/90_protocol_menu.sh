@@ -487,20 +487,8 @@ protocol_remove_menu() {
     return 1
   }
   if user_db_exists; then
-    local db_json removed_nodes_json
-    removed_nodes_json="$(
-      for c in "${choice_arr[@]}"; do
-        IFS=$'\t' read -r entry_key _ <<< "${lines[$((c-1))]}"
-        printf '%s\n' "$entry_key"
-      done | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.'
-    )"
+    local db_json
     db_json="$(user_db_load)"
-    db_json="$(echo "$db_json" | jq --argjson removed "$removed_nodes_json" '
-      .users |= with_entries(
-        .value.nodes = (((.value.nodes // []) | map(select(($removed | index(.)) == null))) | unique)
-      )
-    ')"
-    db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
     if ! user_manager_apply_changes "$db_json" "$updated_json"; then
       warn "核心模块卸载失败，已返回上一级。"
     fi

@@ -44,7 +44,7 @@ user_db_load() {
 user_db_save() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  echo "$db_json" | jq . > "$USER_DB_FILE"
+  echo "$db_json" | jq . > "${USER_DB_FILE}.tmp" && mv -f "${USER_DB_FILE}.tmp" "$USER_DB_FILE"
 }
 
 user_billable_bytes() {
@@ -94,7 +94,8 @@ user_db_user_allow_node() {
   ' >/dev/null 2>&1
 }
 
-user_db_grant_node_to_enabled_users() {
+# 节点添加时的扩展点（当前设计：新节点只给 admin，不自动分配给其他用户）
+user_db_on_node_added() {
   local db_json="$1" node_key="$2"
   echo "$db_json"
 }

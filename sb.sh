@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-03 14:54:08 UTC
+# 构建时间: 2026-04-04 04:16:22 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.1.3"
+SCRIPT_VERSION="5.2.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -50,8 +50,8 @@ C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'
 # -------------------- 日志/UI 函数 --------------------
 say()  { echo -e "${C}[INFO]${NC} $*"; }
 ok()   { echo -e "${G}[ OK ]${NC} $*"; }
-warn() { echo -e "${Y}[WARN]${NC} $*"; }
-err()  { echo -e "${R}[ERR ]${NC} $*"; }
+warn() { echo -e "${Y}[WARN]${NC} $*" >&2; }
+err()  { echo -e "${R}[ERR ]${NC} $*" >&2; }
 pause(){ read -r -n 1 -p "按任意键继续..." || true; echo ""; }
 ui_echo(){ printf '%b\n' "$*" >&2; }
 
@@ -397,15 +397,6 @@ json_is_object() {
   [ -n "$s" ] && echo "$s" | jq -e 'type=="object"' >/dev/null 2>&1
 }
 
-format_bytes_human() {
-  local bytes="${1:-0}"
-  awk -v b="$bytes" 'BEGIN {
-    if (b >= 1099511627776) printf("%.1f TB", b/1099511627776)
-    else if (b >= 1073741824) printf("%.1f GB", b/1073741824)
-    else printf("%.1f MB", b/1048576)
-  }'
-}
-
 format_traffic_auto() {
   local bytes="${1:-0}"
   awk -v b="$bytes" 'BEGIN {
@@ -414,6 +405,8 @@ format_traffic_auto() {
     else printf("%.1f TB", b/1024/1024/1024/1024);
   }'
 }
+
+format_bytes_human() { format_traffic_auto "$@"; }
 
 reset_day_text() {
   case "${1:-0}" in
@@ -825,27 +818,13 @@ choose_tls_domain() {
     1)
       read -r -p "请输入${proto_label}域名: " manual
       if [ -z "${manual:-}" ]; then
-        warn "[WARN] 输入无效，已返回上一级。" >&2
+        warn "[WARN] 输入无效，已返回上一级。"
         pause >&2
         return 1
       fi
       echo "$manual"
       ;;
-    2)
-      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
-      if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'\t'}"
-        picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
-        echo "$picked"
-      else
-        warn "自动测速失败，已返回上一级。" >&2
-        pause >&2
-        return 1
-      fi
-      ;;
     *)
-      warn "输入无效，已使用默认自动测速。" >&2
       picked="$(auto_pick_tls_domain 2>/dev/null || true)"
       if [ -n "$picked" ]; then
         picked_ms="${picked#*$'\t'}"
@@ -853,7 +832,7 @@ choose_tls_domain() {
         echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
         echo "$picked"
       else
-        warn "自动测速失败，已返回上一级。" >&2
+        warn "自动测速失败，已返回上一级。"
         pause >&2
         return 1
       fi
@@ -1511,37 +1490,12 @@ relay_add() {
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
 
-  local new_user new_out updated_json inbound_type
-  inbound_type="$(echo "$inbound" | jq -r '.type')"
-  case "$inbound_type" in
-    vless)
-      if echo "$inbound" | jq -e '.tls.reality.enabled == true' >/dev/null 2>&1; then
-        new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,flow:"xtls-rprx-vision"}')"
-      else
-        new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid}')"
-      fi
-      ;;
-    vmess)
-      new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}')"
-      ;;
-    shadowsocks)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    anytls)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    trojan)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    tuic)
-      new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" --arg pass "$(openssl rand -base64 12)" '{name:$name,uuid:$uuid,password:$pass}')"
-      ;;
-    *)
-      err "不支持的主入站类型：$inbound_type"
-      pause
-      return 1
-      ;;
-  esac
+  local new_user new_out updated_json
+  new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
+    err "不支持的主入站类型，无法生成中转用户。"
+    pause
+    return 1
+  }
 
   new_out="$(jq -n --arg tag "$out_tag" --arg ip "$ip" --arg pw "$normalized_pw" --argjson p "$relay_port" '{type:"shadowsocks",tag:$tag,server:$ip,server_port:$p,method:"2022-blake3-aes-128-gcm",password:$pw}')"
 
@@ -1574,7 +1528,7 @@ relay_add() {
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
-    db_json="$(user_db_grant_node_to_enabled_users "$db_json" "$relay_user")"
+    db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if user_manager_apply_changes "$db_json" "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
     else
@@ -1672,8 +1626,10 @@ manage_relay_nodes() {
     local json
     json="$(config_load)"
     print_rect_title "中转节点管理"
-    if relay_list_table "$json" >/tmp/.sb_relay_list.$$ && [ -s /tmp/.sb_relay_list.$$ ]; then
-      awk -F '\t' 'NF >= 2 {print $2}' /tmp/.sb_relay_list.$$ | while IFS= read -r relay_user; do
+    local _relay_tmp
+    _relay_tmp="$(mktemp)"
+    if relay_list_table "$json" >"$_relay_tmp" && [ -s "$_relay_tmp" ]; then
+      awk -F '\t' 'NF >= 2 {print $2}' "$_relay_tmp" | while IFS= read -r relay_user; do
         [ -n "$relay_user" ] || continue
         relay_node="$(user_node_part "$relay_user")"
         [ -n "$relay_node" ] || continue
@@ -1684,7 +1640,7 @@ manage_relay_nodes() {
     else
       echo -e "  ${Y}当前没有中转节点。${NC}"
     fi
-    rm -f /tmp/.sb_relay_list.$$ >/dev/null 2>&1 || true
+    rm -f "$_relay_tmp" >/dev/null 2>&1 || true
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"
     echo -e "  ${C}2.${NC} 删除中转"
@@ -1845,25 +1801,6 @@ query_v2ray_api_stats_json() {
   echo '[]'
 }
 
-sum_live_downlink_for_user() {
-  local username="$1"
-  local stats_json full_name
-  stats_json="$(query_v2ray_api_stats_json)"
-  if [ "$username" = "admin" ]; then
-    echo "$stats_json" | jq -r '
-      map(select((.name // "") | test("^user>>>[^@>]+>>>traffic>>>downlink$")))
-      | map(.value // 0)
-      | add // 0
-    '
-  else
-    echo "$stats_json" | jq -r --arg u "$username" '
-      map(select((.name // "") | test("^user>>>.+@" + $u + ">>>traffic>>>downlink$")))
-      | map(.value // 0)
-      | add // 0
-    '
-  fi
-}
-
 build_live_usage_object() {
   local stats_json="$1"
   echo "$stats_json" | jq -c '
@@ -1923,7 +1860,7 @@ meta_load() {
 meta_save() {
   local meta_json="$1"
   mkdir -p "$(dirname "$META_FILE")"
-  echo "$meta_json" | jq . > "$META_FILE"
+  echo "$meta_json" | jq . > "${META_FILE}.tmp" && mv -f "${META_FILE}.tmp" "$META_FILE"
 }
 
 meta_set_reality_public_key() {
@@ -1988,7 +1925,7 @@ user_db_load() {
 user_db_save() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  echo "$db_json" | jq . > "$USER_DB_FILE"
+  echo "$db_json" | jq . > "${USER_DB_FILE}.tmp" && mv -f "${USER_DB_FILE}.tmp" "$USER_DB_FILE"
 }
 
 user_billable_bytes() {
@@ -2038,7 +1975,8 @@ user_db_user_allow_node() {
   ' >/dev/null 2>&1
 }
 
-user_db_grant_node_to_enabled_users() {
+# 节点添加时的扩展点（当前设计：新节点只给 admin，不自动分配给其他用户）
+user_db_on_node_added() {
   local db_json="$1" node_key="$2"
   echo "$db_json"
 }
@@ -2319,8 +2257,13 @@ apply_automatic_user_controls() {
 }
 
 user_watch_run() {
-  init_user_manager_if_needed >/dev/null 2>&1 || return 0
+  # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
+  local lock_fd
+  exec {lock_fd}>/var/lock/singbox-manager.lock || return 0
+  flock -n "$lock_fd" || return 0
+  init_user_manager_if_needed >/dev/null 2>&1 || { exec {lock_fd}>&-; return 0; }
   apply_automatic_user_controls >/dev/null 2>&1 || true
+  exec {lock_fd}>&-
 }
 
 init_user_manager_if_needed() {
@@ -2735,7 +2678,7 @@ user_add_usage_menu() {
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
   read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
-    warn "[WARN] 输入无效，未作修改，已返回上一级。" >&2
+    warn "输入无效，未作修改，已返回上一级。"
     pause >&2
     return 1
   }
@@ -2759,6 +2702,7 @@ user_reset_usage_menu() {
   echo "$db_json" | jq --arg u "$username" '
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
+    | .users[$u].manual_added_bytes = 0
     | .users[$u].last_live_up_bytes = 0
     | .users[$u].last_live_down_bytes = 0
   '
@@ -3449,21 +3393,23 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-install_log_maintain_cron() {
+_install_cron_job() {
+  local mark="$1" schedule="$2" cmd="$3"
   has_cmd crontab || return 1
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
-  echo "${LOG_MAINTAIN_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --maintain-logs >/dev/null 2>&1" >> "$tmp"
+  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp"
   rm -f "$tmp"
 }
 
-remove_log_maintain_cron() {
+_remove_cron_job() {
+  local mark="$1"
   has_cmd crontab || return 0
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -3472,28 +3418,10 @@ remove_log_maintain_cron() {
   rm -f "$tmp"
 }
 
-install_user_watch_cron() {
-  has_cmd crontab || return 1
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
-  echo "${USER_WATCH_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --user-watch >/dev/null 2>&1" >> "$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
-}
-
-remove_user_watch_cron() {
-  has_cmd crontab || return 0
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
-  if [ -s "$tmp" ]; then
-    crontab "$tmp"
-  else
-    crontab -r 2>/dev/null || true
-  fi
-  rm -f "$tmp"
-}
+install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --maintain-logs"; }
+remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
+install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
+remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 
 # ---------- Systemd 服务管理 ----------
 
@@ -4176,7 +4104,7 @@ protocol_install_menu() {
     local db_json node_key
     db_json="$(user_db_load)"
     for node_key in "${added_node_keys[@]}"; do
-      db_json="$(user_db_grant_node_to_enabled_users "$db_json" "$node_key")"
+      db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
     if ! user_manager_apply_changes "$db_json" "$updated_json"; then
       warn "核心模块安装/更新失败，已返回上一级。"
@@ -4283,7 +4211,9 @@ protocol_manager() {
     local json
     json="$(config_load)"
     print_rect_title "核心模块管理"
-    if protocol_status_summary "$json" >/tmp/.sb_protocols.$$ && [ -s /tmp/.sb_protocols.$$ ]; then
+    local _proto_tmp
+    _proto_tmp="$(mktemp)"
+    if protocol_status_summary "$json" >"$_proto_tmp" && [ -s "$_proto_tmp" ]; then
       local proto_width=15 proto_pad status_color port_text
       echo -e "${C}当前状态${NC}"
       echo -e "${B}--------------------------------------------------------${NC}"
@@ -4300,11 +4230,11 @@ protocol_manager() {
         else
           printf "  - %b%s%b  %b【%s】%b\n" "$W" "$proto_pad" "$NC" "$status_color" "$status" "$NC"
         fi
-      done < /tmp/.sb_protocols.$$
+      done < "$_proto_tmp"
     else
       echo -e "${Y}当前没有任何核心模块。${NC}"
     fi
-    rm -f /tmp/.sb_protocols.$$ >/dev/null 2>&1 || true
+    rm -f "$_proto_tmp" >/dev/null 2>&1 || true
     echo -e "${B}--------------------------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 安装核心模块"
     echo -e "  ${C}2.${NC} 卸载核心模块"

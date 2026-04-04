@@ -122,15 +122,6 @@ json_is_object() {
   [ -n "$s" ] && echo "$s" | jq -e 'type=="object"' >/dev/null 2>&1
 }
 
-format_bytes_human() {
-  local bytes="${1:-0}"
-  awk -v b="$bytes" 'BEGIN {
-    if (b >= 1099511627776) printf("%.1f TB", b/1099511627776)
-    else if (b >= 1073741824) printf("%.1f GB", b/1073741824)
-    else printf("%.1f MB", b/1048576)
-  }'
-}
-
 format_traffic_auto() {
   local bytes="${1:-0}"
   awk -v b="$bytes" 'BEGIN {
@@ -139,6 +130,8 @@ format_traffic_auto() {
     else printf("%.1f TB", b/1024/1024/1024/1024);
   }'
 }
+
+format_bytes_human() { format_traffic_auto "$@"; }
 
 reset_day_text() {
   case "${1:-0}" in

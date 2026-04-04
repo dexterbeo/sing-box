@@ -131,27 +131,13 @@ choose_tls_domain() {
     1)
       read -r -p "请输入${proto_label}域名: " manual
       if [ -z "${manual:-}" ]; then
-        warn "[WARN] 输入无效，已返回上一级。" >&2
+        warn "[WARN] 输入无效，已返回上一级。"
         pause >&2
         return 1
       fi
       echo "$manual"
       ;;
-    2)
-      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
-      if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'\t'}"
-        picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
-        echo "$picked"
-      else
-        warn "自动测速失败，已返回上一级。" >&2
-        pause >&2
-        return 1
-      fi
-      ;;
     *)
-      warn "输入无效，已使用默认自动测速。" >&2
       picked="$(auto_pick_tls_domain 2>/dev/null || true)"
       if [ -n "$picked" ]; then
         picked_ms="${picked#*$'\t'}"
@@ -159,7 +145,7 @@ choose_tls_domain() {
         echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
         echo "$picked"
       else
-        warn "自动测速失败，已返回上一级。" >&2
+        warn "自动测速失败，已返回上一级。"
         pause >&2
         return 1
       fi

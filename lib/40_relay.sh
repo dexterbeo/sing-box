@@ -117,37 +117,12 @@ relay_add() {
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
 
-  local new_user new_out updated_json inbound_type
-  inbound_type="$(echo "$inbound" | jq -r '.type')"
-  case "$inbound_type" in
-    vless)
-      if echo "$inbound" | jq -e '.tls.reality.enabled == true' >/dev/null 2>&1; then
-        new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,flow:"xtls-rprx-vision"}')"
-      else
-        new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid}')"
-      fi
-      ;;
-    vmess)
-      new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}')"
-      ;;
-    shadowsocks)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    anytls)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    trojan)
-      new_user="$(jq -n --arg name "$relay_user" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}')"
-      ;;
-    tuic)
-      new_user="$(jq -n --arg name "$relay_user" --arg uuid "$(sing-box generate uuid)" --arg pass "$(openssl rand -base64 12)" '{name:$name,uuid:$uuid,password:$pass}')"
-      ;;
-    *)
-      err "不支持的主入站类型：$inbound_type"
-      pause
-      return 1
-      ;;
-  esac
+  local new_user new_out updated_json
+  new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
+    err "不支持的主入站类型，无法生成中转用户。"
+    pause
+    return 1
+  }
 
   new_out="$(jq -n --arg tag "$out_tag" --arg ip "$ip" --arg pw "$normalized_pw" --argjson p "$relay_port" '{type:"shadowsocks",tag:$tag,server:$ip,server_port:$p,method:"2022-blake3-aes-128-gcm",password:$pw}')"
 
@@ -180,7 +155,7 @@ relay_add() {
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
-    db_json="$(user_db_grant_node_to_enabled_users "$db_json" "$relay_user")"
+    db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if user_manager_apply_changes "$db_json" "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
     else
@@ -278,8 +253,10 @@ manage_relay_nodes() {
     local json
     json="$(config_load)"
     print_rect_title "中转节点管理"
-    if relay_list_table "$json" >/tmp/.sb_relay_list.$$ && [ -s /tmp/.sb_relay_list.$$ ]; then
-      awk -F '\t' 'NF >= 2 {print $2}' /tmp/.sb_relay_list.$$ | while IFS= read -r relay_user; do
+    local _relay_tmp
+    _relay_tmp="$(mktemp)"
+    if relay_list_table "$json" >"$_relay_tmp" && [ -s "$_relay_tmp" ]; then
+      awk -F '\t' 'NF >= 2 {print $2}' "$_relay_tmp" | while IFS= read -r relay_user; do
         [ -n "$relay_user" ] || continue
         relay_node="$(user_node_part "$relay_user")"
         [ -n "$relay_node" ] || continue
@@ -290,7 +267,7 @@ manage_relay_nodes() {
     else
       echo -e "  ${Y}当前没有中转节点。${NC}"
     fi
-    rm -f /tmp/.sb_relay_list.$$ >/dev/null 2>&1 || true
+    rm -f "$_relay_tmp" >/dev/null 2>&1 || true
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"
     echo -e "  ${C}2.${NC} 删除中转"

@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.1.3"
+SCRIPT_VERSION="5.2.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -40,8 +40,8 @@ C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'
 # -------------------- 日志/UI 函数 --------------------
 say()  { echo -e "${C}[INFO]${NC} $*"; }
 ok()   { echo -e "${G}[ OK ]${NC} $*"; }
-warn() { echo -e "${Y}[WARN]${NC} $*"; }
-err()  { echo -e "${R}[ERR ]${NC} $*"; }
+warn() { echo -e "${Y}[WARN]${NC} $*" >&2; }
+err()  { echo -e "${R}[ERR ]${NC} $*" >&2; }
 pause(){ read -r -n 1 -p "按任意键继续..." || true; echo ""; }
 ui_echo(){ printf '%b\n' "$*" >&2; }
 

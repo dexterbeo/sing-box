@@ -142,25 +142,6 @@ query_v2ray_api_stats_json() {
   echo '[]'
 }
 
-sum_live_downlink_for_user() {
-  local username="$1"
-  local stats_json full_name
-  stats_json="$(query_v2ray_api_stats_json)"
-  if [ "$username" = "admin" ]; then
-    echo "$stats_json" | jq -r '
-      map(select((.name // "") | test("^user>>>[^@>]+>>>traffic>>>downlink$")))
-      | map(.value // 0)
-      | add // 0
-    '
-  else
-    echo "$stats_json" | jq -r --arg u "$username" '
-      map(select((.name // "") | test("^user>>>.+@" + $u + ">>>traffic>>>downlink$")))
-      | map(.value // 0)
-      | add // 0
-    '
-  fi
-}
-
 build_live_usage_object() {
   local stats_json="$1"
   echo "$stats_json" | jq -c '
@@ -220,7 +201,7 @@ meta_load() {
 meta_save() {
   local meta_json="$1"
   mkdir -p "$(dirname "$META_FILE")"
-  echo "$meta_json" | jq . > "$META_FILE"
+  echo "$meta_json" | jq . > "${META_FILE}.tmp" && mv -f "${META_FILE}.tmp" "$META_FILE"
 }
 
 meta_set_reality_public_key() {

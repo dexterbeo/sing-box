@@ -392,7 +392,7 @@ user_add_usage_menu() {
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
   read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
-    warn "[WARN] 输入无效，未作修改，已返回上一级。" >&2
+    warn "输入无效，未作修改，已返回上一级。"
     pause >&2
     return 1
   }
@@ -416,6 +416,7 @@ user_reset_usage_menu() {
   echo "$db_json" | jq --arg u "$username" '
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
+    | .users[$u].manual_added_bytes = 0
     | .users[$u].last_live_up_bytes = 0
     | .users[$u].last_live_down_bytes = 0
   '

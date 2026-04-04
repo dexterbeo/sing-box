@@ -186,21 +186,23 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-install_log_maintain_cron() {
+_install_cron_job() {
+  local mark="$1" schedule="$2" cmd="$3"
   has_cmd crontab || return 1
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
-  echo "${LOG_MAINTAIN_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --maintain-logs >/dev/null 2>&1" >> "$tmp"
+  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp"
   rm -f "$tmp"
 }
 
-remove_log_maintain_cron() {
+_remove_cron_job() {
+  local mark="$1"
   has_cmd crontab || return 0
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -209,28 +211,10 @@ remove_log_maintain_cron() {
   rm -f "$tmp"
 }
 
-install_user_watch_cron() {
-  has_cmd crontab || return 1
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
-  echo "${USER_WATCH_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --user-watch >/dev/null 2>&1" >> "$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
-}
-
-remove_user_watch_cron() {
-  has_cmd crontab || return 0
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
-  if [ -s "$tmp" ]; then
-    crontab "$tmp"
-  else
-    crontab -r 2>/dev/null || true
-  fi
-  rm -f "$tmp"
-}
+install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --maintain-logs"; }
+remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
+install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
+remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 
 # ---------- Systemd 服务管理 ----------
 

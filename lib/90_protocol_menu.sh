@@ -403,7 +403,7 @@ protocol_install_menu() {
     local db_json node_key
     db_json="$(user_db_load)"
     for node_key in "${added_node_keys[@]}"; do
-      db_json="$(user_db_grant_node_to_enabled_users "$db_json" "$node_key")"
+      db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
     if ! user_manager_apply_changes "$db_json" "$updated_json"; then
       warn "核心模块安装/更新失败，已返回上一级。"
@@ -510,7 +510,9 @@ protocol_manager() {
     local json
     json="$(config_load)"
     print_rect_title "核心模块管理"
-    if protocol_status_summary "$json" >/tmp/.sb_protocols.$$ && [ -s /tmp/.sb_protocols.$$ ]; then
+    local _proto_tmp
+    _proto_tmp="$(mktemp)"
+    if protocol_status_summary "$json" >"$_proto_tmp" && [ -s "$_proto_tmp" ]; then
       local proto_width=15 proto_pad status_color port_text
       echo -e "${C}当前状态${NC}"
       echo -e "${B}--------------------------------------------------------${NC}"
@@ -527,11 +529,11 @@ protocol_manager() {
         else
           printf "  - %b%s%b  %b【%s】%b\n" "$W" "$proto_pad" "$NC" "$status_color" "$status" "$NC"
         fi
-      done < /tmp/.sb_protocols.$$
+      done < "$_proto_tmp"
     else
       echo -e "${Y}当前没有任何核心模块。${NC}"
     fi
-    rm -f /tmp/.sb_protocols.$$ >/dev/null 2>&1 || true
+    rm -f "$_proto_tmp" >/dev/null 2>&1 || true
     echo -e "${B}--------------------------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 安装核心模块"
     echo -e "  ${C}2.${NC} 卸载核心模块"

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-04 04:16:22 UTC
+# 构建时间: 2026-04-05 09:53:07 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.2.0"
+SCRIPT_VERSION="5.3.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -336,11 +336,16 @@ normalize_ws_path() {
 }
 
 get_public_ip() {
+  if [ -n "${_CACHED_PUBLIC_IP:-}" ]; then
+    echo "$_CACHED_PUBLIC_IP"
+    return 0
+  fi
   local ip=""
   ip=$(curl -s4 --max-time 3 --connect-timeout 2 ifconfig.me 2>/dev/null || true)
   [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 api.ipify.org 2>/dev/null || true)
   [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 icanhazip.com 2>/dev/null | tr -d '\n' || true)
   [ -z "$ip" ] && ip="IP"
+  _CACHED_PUBLIC_IP="$ip"
   echo "$ip"
 }
 
@@ -422,16 +427,21 @@ expire_text() {
 }
 
 parse_traffic_to_bytes() {
-  local raw="${1:-}" normalized num unit
+  local raw="${1:-}" normalized num unit sign=1
   normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
-  if [[ ! "$normalized" =~ ^([0-9]+(\.[0-9])?)(mb|gb)$ ]]; then
+  if [[ "$normalized" == -* ]]; then
+    sign=-1
+    normalized="${normalized#-}"
+  fi
+  if [[ ! "$normalized" =~ ^([0-9]+(\.[0-9])?)(mb|gb|tb)$ ]]; then
     return 1
   fi
   num="${BASH_REMATCH[1]}"
   unit="${BASH_REMATCH[3]}"
-  awk -v n="$num" -v u="$unit" 'BEGIN {
-    if (u == "mb") printf "%.0f", n * 1048576;
-    else if (u == "gb") printf "%.0f", n * 1073741824;
+  awk -v n="$num" -v u="$unit" -v s="$sign" 'BEGIN {
+    if (u == "mb") printf "%.0f", s * n * 1048576;
+    else if (u == "gb") printf "%.0f", s * n * 1073741824;
+    else if (u == "tb") printf "%.0f", s * n * 1099511627776;
     else exit 1;
   }'
 }
@@ -651,6 +661,15 @@ config_apply() {
   if restart_singbox_safe; then
     systemctl enable sing-box >/dev/null 2>&1 || true
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
+    # 自动清理旧备份，保留最近 5 个
+    local -a old_baks=()
+    mapfile -t old_baks < <(ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null || true)
+    if [ ${#old_baks[@]} -gt 5 ]; then
+      local _i
+      for _i in "${old_baks[@]:5}"; do
+        rm -f "$_i" >/dev/null 2>&1 || true
+      done
+    fi
     ok "配置已应用。"
     return 0
   fi
@@ -797,14 +816,31 @@ benchmark_tls_domain_ms() {
 
 auto_pick_tls_domain() {
   local best_domain="" best_ms=999999 ms domain
-  while IFS= read -r domain; do
+  local -a candidates=()
+  mapfile -t candidates < <(get_tls_domain_candidates)
+  # 随机抽取 5 个域名测速，避免全量串行等待过久
+  local total=${#candidates[@]}
+  if [ "$total" -gt 5 ]; then
+    local -a sampled=()
+    local -a indices=()
+    while [ ${#sampled[@]} -lt 5 ]; do
+      local r=$((RANDOM % total))
+      local dup=0 idx
+      for idx in "${indices[@]}"; do
+        [ "$idx" -eq "$r" ] && { dup=1; break; }
+      done
+      [ $dup -eq 0 ] && { sampled+=("${candidates[$r]}"); indices+=("$r"); }
+    done
+    candidates=("${sampled[@]}")
+  fi
+  for domain in "${candidates[@]}"; do
     [ -n "$domain" ] || continue
     ms="$(benchmark_tls_domain_ms "$domain" 2>/dev/null || true)"
     if [ -n "$ms" ] && [[ "$ms" =~ ^[0-9]+$ ]] && [ "$ms" -lt "$best_ms" ]; then
       best_ms="$ms"
       best_domain="$domain"
     fi
-  done < <(get_tls_domain_candidates)
+  done
   [ -n "$best_domain" ] || return 1
   printf '%s\t%s\n' "$best_domain" "$best_ms"
 }
@@ -1054,13 +1090,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
-      ;;
-    anytls)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
-      ;;
-    trojan)
+    shadowsocks|anytls|trojan)
       jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
@@ -2185,73 +2215,58 @@ apply_automatic_user_controls() {
   user_db_exists || return 0
   sync_user_usage_counters || true
 
-  local db_json json changed=0 today period today_day
+  local db_json json today period today_day last_day result changed
   db_json="$(user_db_load)"
   json="$(config_load)"
   today="$(user_today_date)"
   period="$(user_current_period)"
   today_day=$((10#$(date +%d)))
+  last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
 
-  local username expire_at reset_day last_reset enabled quota billable hit_reset last_day effective_reset_day
-  while IFS= read -r username; do
-    [ -n "$username" ] || continue
+  result="$(echo "$db_json" | jq --arg today "$today" --arg period "$period" --argjson today_day "$today_day" --argjson last_day "$last_day" '
+    .users |= with_entries(
+      .value as $v
+      | ($v.expire_at // "0") as $expire
+      | ($v.reset_day // 0) as $reset_day
+      | ($v.last_reset_period // "") as $last_reset
+      | ($v.enabled // false) as $enabled
+      | ($v.quota_gb // 0) as $quota
+      | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
-    expire_at="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
-    reset_day="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
-    last_reset="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].last_reset_period // ""')"
-    enabled="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].enabled // false')"
-
-    if [ "$expire_at" != "0" ] && [[ "$today" > "$expire_at" || "$today" == "$expire_at" ]]; then
-      if [ "$enabled" = "true" ]; then
-        db_json="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-        changed=1
-      fi
-      continue
-    fi
-
-    hit_reset=0
-    if [[ "$reset_day" =~ ^[0-9]+$ ]]; then
-      last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
-      if [ "$reset_day" -eq 32 ]; then
-        effective_reset_day="$last_day"
-      elif [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 29 ]; then
-        if [ "$reset_day" -gt "$last_day" ]; then
-          effective_reset_day="$last_day"
+      # 1. 到期检查
+      | if ($expire != "0" and ($today >= $expire)) then
+          .value.enabled = false
         else
-          effective_reset_day="$reset_day"
-        fi
-      else
-        effective_reset_day=0
-      fi
-      [ "$effective_reset_day" -gt 0 ] && [ "$today_day" -eq "$effective_reset_day" ] && hit_reset=1
-    fi
-    if [ "$hit_reset" -eq 1 ] && [ "$last_reset" != "$period" ]; then
-      db_json="$(echo "$db_json" | jq --arg u "$username" --arg p "$period" '
-        .users[$u].used_up_bytes = 0
-        | .users[$u].used_down_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
-        | .users[$u].last_reset_period = $p
-        | .users[$u].enabled = true
-      ')"
-      changed=1
-    fi
+          # 2. 重置检查
+          (
+            if ($reset_day == 32) then $last_day
+            elif ($reset_day >= 1 and $reset_day <= 29) then
+              (if ($reset_day > $last_day) then $last_day else $reset_day end)
+            else 0 end
+          ) as $effective_reset_day
+          | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+              .value.used_up_bytes = 0
+              | .value.used_down_bytes = 0
+              | .value.last_live_up_bytes = 0
+              | .value.last_live_down_bytes = 0
+              | .value.last_reset_period = $period
+              | .value.enabled = true
+            else . end
+          # 3. 超额检查（重置后 billable 已清零，不会误判）
+          | if ($quota > 0 and .value.enabled == true) then
+              ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
+              | if ($current_billable >= ($quota * 1073741824)) then
+                  .value.enabled = false
+                else . end
+            else . end
+        end
+    )
+  ')" || return 1
 
-    quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
-    if [[ "$quota" =~ ^[0-9]+$ ]] && [ "$quota" -gt 0 ]; then
-      billable="$(user_billable_bytes "$db_json" "$username")"
-      if [ "$billable" -ge $((quota * 1073741824)) ]; then
-        enabled="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].enabled // false')"
-        if [ "$enabled" = "true" ]; then
-          db_json="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-          changed=1
-        fi
-      fi
-    fi
-  done < <(user_db_all_users "$db_json")
+  changed="$(jq -n --argjson old "$db_json" --argjson new "$result" 'if ($old == $new) then "0" else "1" end' | tr -d '"')"
 
-  if [ "$changed" -eq 1 ]; then
-    user_manager_apply_changes "$db_json" "$json" >/dev/null 2>&1 || return 1
+  if [ "$changed" = "1" ]; then
+    user_manager_apply_changes "$result" "$json" >/dev/null 2>&1 || return 1
   fi
   return 0
 }
@@ -2676,7 +2691,8 @@ user_add_usage_menu() {
   print_rect_title "手动添加流量" >&2
   show_user_status_table "$db_json" >&2
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
-  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB）: " raw
+  ui_echo "支持负值输入（如 -100MB）减少补正流量。"
+  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
     warn "输入无效，未作修改，已返回上一级。"
     pause >&2
@@ -2710,7 +2726,8 @@ user_reset_usage_menu() {
 
 user_manage_single() {
   local username="$1"
-  local db_json json act new_db
+  local db_json json act new_db is_admin=0
+  [ "$username" = "admin" ] && is_admin=1
   while true; do
     user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
@@ -2719,54 +2736,13 @@ user_manage_single() {
     print_rect_title "管理用户"
     show_user_status_table "$db_json"
     echo "当前用户：$username"
-    if [ "$username" = "admin" ]; then
-      echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
-      echo "  1. 启用/停用"
-      echo "  2. 套餐设置"
-      echo "  3. 手动重置流量"
-      echo "  4. 手动添加流量（对齐总量）"
-      echo "  5. 查看用户信息"
-      echo "  0. 返回"
-      read -r -p "请选择操作: " act
-      case "${act:-}" in
-        1)
-          if user_db_user_is_enabled "$db_json" "$username"; then
-            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-          else
-            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true')"
-          fi
-          user_manager_apply_changes "$new_db" "$json" || true
-          ;;
-        2)
-          new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        3)
-          new_db="$(user_reset_usage_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        4)
-          new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        5) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
-        0|q|Q|"") return 0 ;;
-        *) warn "无效输入：$act"; sleep 1 ;;
-      esac
-      continue
-    fi
+    [ $is_admin -eq 1 ] && echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
     echo "  1. 启用/停用"
-    echo "  2. 节点权限"
+    [ $is_admin -eq 0 ] && echo "  2. 节点权限"
     echo "  3. 套餐设置"
     echo "  4. 手动重置流量"
     echo "  5. 手动添加流量（对齐总量）"
-    echo "  6. 用户信息"
+    echo "  6. 查看用户信息"
     echo "  0. 返回"
     read -r -p "请选择操作: " act
     case "${act:-}" in
@@ -2779,9 +2755,13 @@ user_manage_single() {
         user_manager_apply_changes "$new_db" "$json" || true
         ;;
       2)
-        new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
-        if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+        if [ $is_admin -eq 1 ]; then
+          warn "无效输入：$act"; sleep 1
+        else
+          new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
+          if json_is_object "$new_db"; then
+            user_manager_apply_changes "$new_db" "$json" || true
+          fi
         fi
         ;;
       3)
@@ -2840,7 +2820,7 @@ user_select_and_manage_menu() {
 }
 
 user_delete_menu() {
-  local db_json json usernames=() ans idx username new_db
+  local db_json json usernames=() ans new_db picks=() part idx username
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
@@ -2858,17 +2838,31 @@ user_delete_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择要删除的用户（回车返回）: " ans
+  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回）: " ans
   [ -z "${ans:-}" ] && return 0
-  if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
-    warn "无效输入：$ans"
-    pause
-    return 1
-  fi
-  idx=$((ans-1))
-  username="${usernames[$idx]}"
-  ask_confirm_yes "输入 YES 确认彻底删除用户 ${username}，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
-  new_db="$(echo "$db_json" | jq --arg u "$username" 'del(.users[$u])')" || return 1
+  mapfile -t picks < <(parse_plus_selections "$ans")
+  [ ${#picks[@]} -eq 0 ] && { warn "未选择任何用户。"; pause; return 1; }
+
+  local names_to_delete=()
+  for part in "${picks[@]}"; do
+    if ! [[ "$part" =~ ^[0-9]+$ ]] || [ "$part" -lt 1 ] || [ "$part" -gt "${#usernames[@]}" ]; then
+      err "编号超出范围：$part"
+      pause
+      return 1
+    fi
+    names_to_delete+=("${usernames[$((part-1))]}")
+  done
+
+  echo "即将删除以下用户："
+  for username in "${names_to_delete[@]}"; do
+    echo "  - $username"
+  done
+  ask_confirm_yes "输入 YES 确认彻底删除，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
+
+  new_db="$db_json"
+  for username in "${names_to_delete[@]}"; do
+    new_db="$(echo "$new_db" | jq --arg u "$username" 'del(.users[$u])')" || return 1
+  done
   user_manager_apply_changes "$new_db" "$json" || true
   pause
 }
@@ -2882,7 +2876,6 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
-    db_json="$(user_db_load)"
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"

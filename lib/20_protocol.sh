@@ -112,12 +112,12 @@ auto_pick_tls_domain() {
   local best_domain="" best_ms=999999 ms domain
   local -a candidates=()
   mapfile -t candidates < <(get_tls_domain_candidates)
-  # 随机抽取 5 个域名测速，避免全量串行等待过久
+  # 随机抽取 10 个域名测速，避免全量串行等待过久
   local total=${#candidates[@]}
-  if [ "$total" -gt 5 ]; then
+  if [ "$total" -gt 10 ]; then
     local -a sampled=()
     local -a indices=()
-    while [ ${#sampled[@]} -lt 5 ]; do
+    while [ ${#sampled[@]} -lt 10 ]; do
       local r=$((RANDOM % total))
       local dup=0 idx
       for idx in "${indices[@]}"; do

@@ -70,3 +70,5 @@ rm -rf /etc/sing-box-manager
 rm -rf /var/log/sing-box
 rm -rf /var/lib/sing-box
 ```
+
+> 如果首次安装时通过 `curl -o sb.sh` 下载了脚本文件，也请手动删除该文件。

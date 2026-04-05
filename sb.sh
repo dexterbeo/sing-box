@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-05 09:53:07 UTC
+# 构建时间: 2026-04-05 10:07:23 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.0"
+SCRIPT_VERSION="5.3.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -661,12 +661,12 @@ config_apply() {
   if restart_singbox_safe; then
     systemctl enable sing-box >/dev/null 2>&1 || true
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
-    # 自动清理旧备份，保留最近 5 个
+    # 自动清理旧备份，保留最近 1 个
     local -a old_baks=()
     mapfile -t old_baks < <(ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null || true)
-    if [ ${#old_baks[@]} -gt 5 ]; then
+    if [ ${#old_baks[@]} -gt 1 ]; then
       local _i
-      for _i in "${old_baks[@]:5}"; do
+      for _i in "${old_baks[@]:1}"; do
         rm -f "$_i" >/dev/null 2>&1 || true
       done
     fi
@@ -818,12 +818,12 @@ auto_pick_tls_domain() {
   local best_domain="" best_ms=999999 ms domain
   local -a candidates=()
   mapfile -t candidates < <(get_tls_domain_candidates)
-  # 随机抽取 5 个域名测速，避免全量串行等待过久
+  # 随机抽取 10 个域名测速，避免全量串行等待过久
   local total=${#candidates[@]}
-  if [ "$total" -gt 5 ]; then
+  if [ "$total" -gt 10 ]; then
     local -a sampled=()
     local -a indices=()
-    while [ ${#sampled[@]} -lt 5 ]; do
+    while [ ${#sampled[@]} -lt 10 ]; do
       local r=$((RANDOM % total))
       local dup=0 idx
       for idx in "${indices[@]}"; do

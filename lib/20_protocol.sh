@@ -110,14 +110,31 @@ benchmark_tls_domain_ms() {
 
 auto_pick_tls_domain() {
   local best_domain="" best_ms=999999 ms domain
-  while IFS= read -r domain; do
+  local -a candidates=()
+  mapfile -t candidates < <(get_tls_domain_candidates)
+  # 随机抽取 5 个域名测速，避免全量串行等待过久
+  local total=${#candidates[@]}
+  if [ "$total" -gt 5 ]; then
+    local -a sampled=()
+    local -a indices=()
+    while [ ${#sampled[@]} -lt 5 ]; do
+      local r=$((RANDOM % total))
+      local dup=0 idx
+      for idx in "${indices[@]}"; do
+        [ "$idx" -eq "$r" ] && { dup=1; break; }
+      done
+      [ $dup -eq 0 ] && { sampled+=("${candidates[$r]}"); indices+=("$r"); }
+    done
+    candidates=("${sampled[@]}")
+  fi
+  for domain in "${candidates[@]}"; do
     [ -n "$domain" ] || continue
     ms="$(benchmark_tls_domain_ms "$domain" 2>/dev/null || true)"
     if [ -n "$ms" ] && [[ "$ms" =~ ^[0-9]+$ ]] && [ "$ms" -lt "$best_ms" ]; then
       best_ms="$ms"
       best_domain="$domain"
     fi
-  done < <(get_tls_domain_candidates)
+  done
   [ -n "$best_domain" ] || return 1
   printf '%s\t%s\n' "$best_domain" "$best_ms"
 }
@@ -367,13 +384,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
-      ;;
-    anytls)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
-      ;;
-    trojan)
+    shadowsocks|anytls|trojan)
       jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
       ;;
     tuic)

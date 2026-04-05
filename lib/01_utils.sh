@@ -61,11 +61,16 @@ normalize_ws_path() {
 }
 
 get_public_ip() {
+  if [ -n "${_CACHED_PUBLIC_IP:-}" ]; then
+    echo "$_CACHED_PUBLIC_IP"
+    return 0
+  fi
   local ip=""
   ip=$(curl -s4 --max-time 3 --connect-timeout 2 ifconfig.me 2>/dev/null || true)
   [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 api.ipify.org 2>/dev/null || true)
   [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 icanhazip.com 2>/dev/null | tr -d '\n' || true)
   [ -z "$ip" ] && ip="IP"
+  _CACHED_PUBLIC_IP="$ip"
   echo "$ip"
 }
 
@@ -147,16 +152,21 @@ expire_text() {
 }
 
 parse_traffic_to_bytes() {
-  local raw="${1:-}" normalized num unit
+  local raw="${1:-}" normalized num unit sign=1
   normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
-  if [[ ! "$normalized" =~ ^([0-9]+(\.[0-9])?)(mb|gb)$ ]]; then
+  if [[ "$normalized" == -* ]]; then
+    sign=-1
+    normalized="${normalized#-}"
+  fi
+  if [[ ! "$normalized" =~ ^([0-9]+(\.[0-9])?)(mb|gb|tb)$ ]]; then
     return 1
   fi
   num="${BASH_REMATCH[1]}"
   unit="${BASH_REMATCH[3]}"
-  awk -v n="$num" -v u="$unit" 'BEGIN {
-    if (u == "mb") printf "%.0f", n * 1048576;
-    else if (u == "gb") printf "%.0f", n * 1073741824;
+  awk -v n="$num" -v u="$unit" -v s="$sign" 'BEGIN {
+    if (u == "mb") printf "%.0f", s * n * 1048576;
+    else if (u == "gb") printf "%.0f", s * n * 1073741824;
+    else if (u == "tb") printf "%.0f", s * n * 1099511627776;
     else exit 1;
   }'
 }

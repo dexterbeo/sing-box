@@ -173,73 +173,58 @@ apply_automatic_user_controls() {
   user_db_exists || return 0
   sync_user_usage_counters || true
 
-  local db_json json changed=0 today period today_day
+  local db_json json today period today_day last_day result changed
   db_json="$(user_db_load)"
   json="$(config_load)"
   today="$(user_today_date)"
   period="$(user_current_period)"
   today_day=$((10#$(date +%d)))
+  last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
 
-  local username expire_at reset_day last_reset enabled quota billable hit_reset last_day effective_reset_day
-  while IFS= read -r username; do
-    [ -n "$username" ] || continue
+  result="$(echo "$db_json" | jq --arg today "$today" --arg period "$period" --argjson today_day "$today_day" --argjson last_day "$last_day" '
+    .users |= with_entries(
+      .value as $v
+      | ($v.expire_at // "0") as $expire
+      | ($v.reset_day // 0) as $reset_day
+      | ($v.last_reset_period // "") as $last_reset
+      | ($v.enabled // false) as $enabled
+      | ($v.quota_gb // 0) as $quota
+      | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
-    expire_at="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
-    reset_day="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
-    last_reset="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].last_reset_period // ""')"
-    enabled="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].enabled // false')"
-
-    if [ "$expire_at" != "0" ] && [[ "$today" > "$expire_at" || "$today" == "$expire_at" ]]; then
-      if [ "$enabled" = "true" ]; then
-        db_json="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-        changed=1
-      fi
-      continue
-    fi
-
-    hit_reset=0
-    if [[ "$reset_day" =~ ^[0-9]+$ ]]; then
-      last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
-      if [ "$reset_day" -eq 32 ]; then
-        effective_reset_day="$last_day"
-      elif [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 29 ]; then
-        if [ "$reset_day" -gt "$last_day" ]; then
-          effective_reset_day="$last_day"
+      # 1. 到期检查
+      | if ($expire != "0" and ($today >= $expire)) then
+          .value.enabled = false
         else
-          effective_reset_day="$reset_day"
-        fi
-      else
-        effective_reset_day=0
-      fi
-      [ "$effective_reset_day" -gt 0 ] && [ "$today_day" -eq "$effective_reset_day" ] && hit_reset=1
-    fi
-    if [ "$hit_reset" -eq 1 ] && [ "$last_reset" != "$period" ]; then
-      db_json="$(echo "$db_json" | jq --arg u "$username" --arg p "$period" '
-        .users[$u].used_up_bytes = 0
-        | .users[$u].used_down_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
-        | .users[$u].last_reset_period = $p
-        | .users[$u].enabled = true
-      ')"
-      changed=1
-    fi
+          # 2. 重置检查
+          (
+            if ($reset_day == 32) then $last_day
+            elif ($reset_day >= 1 and $reset_day <= 29) then
+              (if ($reset_day > $last_day) then $last_day else $reset_day end)
+            else 0 end
+          ) as $effective_reset_day
+          | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+              .value.used_up_bytes = 0
+              | .value.used_down_bytes = 0
+              | .value.last_live_up_bytes = 0
+              | .value.last_live_down_bytes = 0
+              | .value.last_reset_period = $period
+              | .value.enabled = true
+            else . end
+          # 3. 超额检查（重置后 billable 已清零，不会误判）
+          | if ($quota > 0 and .value.enabled == true) then
+              ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
+              | if ($current_billable >= ($quota * 1073741824)) then
+                  .value.enabled = false
+                else . end
+            else . end
+        end
+    )
+  ')" || return 1
 
-    quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
-    if [[ "$quota" =~ ^[0-9]+$ ]] && [ "$quota" -gt 0 ]; then
-      billable="$(user_billable_bytes "$db_json" "$username")"
-      if [ "$billable" -ge $((quota * 1073741824)) ]; then
-        enabled="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].enabled // false')"
-        if [ "$enabled" = "true" ]; then
-          db_json="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-          changed=1
-        fi
-      fi
-    fi
-  done < <(user_db_all_users "$db_json")
+  changed="$(jq -n --argjson old "$db_json" --argjson new "$result" 'if ($old == $new) then "0" else "1" end' | tr -d '"')"
 
-  if [ "$changed" -eq 1 ]; then
-    user_manager_apply_changes "$db_json" "$json" >/dev/null 2>&1 || return 1
+  if [ "$changed" = "1" ]; then
+    user_manager_apply_changes "$result" "$json" >/dev/null 2>&1 || return 1
   fi
   return 0
 }

@@ -390,7 +390,8 @@ user_add_usage_menu() {
   print_rect_title "手动添加流量" >&2
   show_user_status_table "$db_json" >&2
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
-  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB）: " raw
+  ui_echo "支持负值输入（如 -100MB）减少补正流量。"
+  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
     warn "输入无效，未作修改，已返回上一级。"
     pause >&2
@@ -424,7 +425,8 @@ user_reset_usage_menu() {
 
 user_manage_single() {
   local username="$1"
-  local db_json json act new_db
+  local db_json json act new_db is_admin=0
+  [ "$username" = "admin" ] && is_admin=1
   while true; do
     user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
@@ -433,54 +435,13 @@ user_manage_single() {
     print_rect_title "管理用户"
     show_user_status_table "$db_json"
     echo "当前用户：$username"
-    if [ "$username" = "admin" ]; then
-      echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
-      echo "  1. 启用/停用"
-      echo "  2. 套餐设置"
-      echo "  3. 手动重置流量"
-      echo "  4. 手动添加流量（对齐总量）"
-      echo "  5. 查看用户信息"
-      echo "  0. 返回"
-      read -r -p "请选择操作: " act
-      case "${act:-}" in
-        1)
-          if user_db_user_is_enabled "$db_json" "$username"; then
-            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
-          else
-            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true')"
-          fi
-          user_manager_apply_changes "$new_db" "$json" || true
-          ;;
-        2)
-          new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        3)
-          new_db="$(user_reset_usage_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        4)
-          new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
-          if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
-          fi
-          ;;
-        5) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
-        0|q|Q|"") return 0 ;;
-        *) warn "无效输入：$act"; sleep 1 ;;
-      esac
-      continue
-    fi
+    [ $is_admin -eq 1 ] && echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
     echo "  1. 启用/停用"
-    echo "  2. 节点权限"
+    [ $is_admin -eq 0 ] && echo "  2. 节点权限"
     echo "  3. 套餐设置"
     echo "  4. 手动重置流量"
     echo "  5. 手动添加流量（对齐总量）"
-    echo "  6. 用户信息"
+    echo "  6. 查看用户信息"
     echo "  0. 返回"
     read -r -p "请选择操作: " act
     case "${act:-}" in
@@ -493,9 +454,13 @@ user_manage_single() {
         user_manager_apply_changes "$new_db" "$json" || true
         ;;
       2)
-        new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
-        if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+        if [ $is_admin -eq 1 ]; then
+          warn "无效输入：$act"; sleep 1
+        else
+          new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
+          if json_is_object "$new_db"; then
+            user_manager_apply_changes "$new_db" "$json" || true
+          fi
         fi
         ;;
       3)
@@ -554,7 +519,7 @@ user_select_and_manage_menu() {
 }
 
 user_delete_menu() {
-  local db_json json usernames=() ans idx username new_db
+  local db_json json usernames=() ans new_db picks=() part idx username
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
@@ -572,17 +537,31 @@ user_delete_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择要删除的用户（回车返回）: " ans
+  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回）: " ans
   [ -z "${ans:-}" ] && return 0
-  if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
-    warn "无效输入：$ans"
-    pause
-    return 1
-  fi
-  idx=$((ans-1))
-  username="${usernames[$idx]}"
-  ask_confirm_yes "输入 YES 确认彻底删除用户 ${username}，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
-  new_db="$(echo "$db_json" | jq --arg u "$username" 'del(.users[$u])')" || return 1
+  mapfile -t picks < <(parse_plus_selections "$ans")
+  [ ${#picks[@]} -eq 0 ] && { warn "未选择任何用户。"; pause; return 1; }
+
+  local names_to_delete=()
+  for part in "${picks[@]}"; do
+    if ! [[ "$part" =~ ^[0-9]+$ ]] || [ "$part" -lt 1 ] || [ "$part" -gt "${#usernames[@]}" ]; then
+      err "编号超出范围：$part"
+      pause
+      return 1
+    fi
+    names_to_delete+=("${usernames[$((part-1))]}")
+  done
+
+  echo "即将删除以下用户："
+  for username in "${names_to_delete[@]}"; do
+    echo "  - $username"
+  done
+  ask_confirm_yes "输入 YES 确认彻底删除，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
+
+  new_db="$db_json"
+  for username in "${names_to_delete[@]}"; do
+    new_db="$(echo "$new_db" | jq --arg u "$username" 'del(.users[$u])')" || return 1
+  done
   user_manager_apply_changes "$new_db" "$json" || true
   pause
 }
@@ -596,7 +575,6 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
-    db_json="$(user_db_load)"
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"

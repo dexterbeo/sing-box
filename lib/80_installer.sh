@@ -475,6 +475,8 @@ uninstall_singbox_keep_config() {
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl disable sing-box >/dev/null 2>&1 || true
   remove_all_singbox_service_units
+  userdel sing-box >/dev/null 2>&1 || true
+  groupdel sing-box >/dev/null 2>&1 || true
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     pkg_installed sing-box && apt-get remove -y sing-box || true

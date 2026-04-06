@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-06 02:54:24 UTC
+# 构建时间: 2026-04-06 08:01:11 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.2"
+SCRIPT_VERSION="5.3.3"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3688,6 +3688,8 @@ uninstall_singbox_keep_config() {
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl disable sing-box >/dev/null 2>&1 || true
   remove_all_singbox_service_units
+  userdel sing-box >/dev/null 2>&1 || true
+  groupdel sing-box >/dev/null 2>&1 || true
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     pkg_installed sing-box && apt-get remove -y sing-box || true

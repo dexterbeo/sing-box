@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-05 10:07:54 UTC
+# 构建时间: 2026-04-06 02:54:24 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.1"
+SCRIPT_VERSION="5.3.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -1816,17 +1816,19 @@ ensure_v2ray_api_on_json() {
 query_v2ray_api_stats_json() {
   ensure_grpcurl >/dev/null 2>&1 || { echo '[]'; return 0; }
   ensure_v2ray_api_proto_files
-  local payload out
+  local payload out stats
   payload='{"patterns":["user>>>"],"reset":false,"regexp":false}'
   out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-v2ray.proto -d "$payload" "$V2RAY_API_LISTEN" v2ray.core.app.stats.command.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ] && echo "$out" | jq -e '.stat != null' >/dev/null 2>&1; then
-    echo "$out" | jq -c '.stat // []'
-    return 0
+  if [ -n "$out" ]; then
+    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
+      echo "$stats"; return 0
+    }
   fi
   out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-experimental.proto -d "$payload" "$V2RAY_API_LISTEN" experimental.v2rayapi.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ] && echo "$out" | jq -e '.stat != null' >/dev/null 2>&1; then
-    echo "$out" | jq -c '.stat // []'
-    return 0
+  if [ -n "$out" ]; then
+    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
+      echo "$stats"; return 0
+    }
   fi
   echo '[]'
 }
@@ -1904,7 +1906,7 @@ meta_set_reality_public_key() {
 
 meta_get_reality_public_key() {
   local tag="$1"
-  echo "$(meta_load)" | jq -r --arg t "$tag" '.[$t].public_key // ""'
+  meta_load | jq -r --arg t "$tag" '.[$t].public_key // ""'
 }
 
 # >>>>>>>>> END MODULE: 50_v2ray_api.sh <<<<<<<<<<<
@@ -2454,11 +2456,16 @@ user_show_info() {
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  used_up="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_up_bytes // 0')"
-  used_down="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_down_bytes // 0')"
-  manual_added="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].manual_added_bytes // 0')"
-  total_used="$(user_billable_bytes "$db_json" "$username")"
-  quota_bytes="$(echo "$db_json" | jq -r --arg u "$username" '(.users[$u].quota_gb // 0) * 1073741824')"
+  IFS=$'\t' read -r used_up used_down manual_added total_used quota_bytes < <(
+    echo "$db_json" | jq -r --arg u "$username" '
+      (.users[$u].used_up_bytes // 0) as $up
+      | (.users[$u].used_down_bytes // 0) as $down
+      | (.users[$u].manual_added_bytes // 0) as $manual
+      | [($up | tostring), ($down | tostring), ($manual | tostring),
+         (($up + $down + $manual) | tostring),
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | @tsv
+    '
+  )
   used_up_text="$(format_traffic_auto "$used_up")"
   used_down_text="$(format_traffic_auto "$used_down")"
   manual_text="$(format_traffic_auto "$manual_added")"
@@ -2623,9 +2630,13 @@ user_manage_package_menu() {
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
 
-  current_quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
-  current_reset="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
-  current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
+  IFS=$'\t' read -r current_quota current_reset current_expire < <(
+    echo "$db_json" | jq -r --arg u "$username" '
+      [((.users[$u].quota_gb // 0) | tostring),
+       ((.users[$u].reset_day // 0) | tostring),
+       (.users[$u].expire_at // "0")] | @tsv
+    '
+  )
 
   ui_echo "当前流量限制：${current_quota} GB"
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
@@ -3019,11 +3030,13 @@ export_configs() {
   init_manager_env
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
+  local tag proto port sni path sid method server_p
+  local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
-  ip="$(echo "$ctx" | jq -r '.ip')"
-  ws_domain="$(echo "$ctx" | jq -r '.ws_domain')"
-  vm_domain="$(echo "$ctx" | jq -r '.vm_domain')"
+  IFS=$'\t' read -r ip ws_domain vm_domain < <(
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | @tsv'
+  )
   relay_users_nl="$(relay_list_table "$json" | awk -F '\t' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
@@ -3032,25 +3045,27 @@ export_configs() {
   direct_tmp="$(mktemp)"
   relay_tmp="$(mktemp)"
   user_dir="$(mktemp -d)"
+  _export_cleanup() {
+    rm -rf "$user_dir" >/dev/null 2>&1 || true
+    rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
+  }
+  trap _export_cleanup RETURN
 
   while read -r inbound; do
-    local tag type port sni path sid method server_p proto
-    tag="$(echo "$inbound" | jq -r '.tag')"
-    type="$(echo "$inbound" | jq -r '.type')"
-    proto="$(inbound_protocol_name "$inbound")"
-    port="$(echo "$inbound" | jq -r '.listen_port')"
-    sni="$(echo "$inbound" | jq -r '.tls.server_name // "www.icloud.com"')"
-    path="$(echo "$inbound" | jq -r '.transport.path // "/"')"
-    sid="$(echo "$inbound" | jq -r '.tls.reality.short_id[0] // ""')"
-    method="$(echo "$inbound" | jq -r '.method // "2022-blake3-aes-128-gcm"')"
-    server_p="$(echo "$inbound" | jq -r '.password // empty')"
+    IFS=$'\t' read -r tag proto port sni path sid method server_p < <(
+      echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
+        [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
+         (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
+         (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
+         (.password // "")] | @tsv
+      '
+    )
 
     while read -r user; do
-      local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
-      name="$(echo "$user" | jq -r '.name // empty')"
-      uuid="$(echo "$user" | jq -r '.uuid // empty')"
-      pass="$(echo "$user" | jq -r '.password // empty')"
-      flow="$(echo "$user" | jq -r '.flow // "xtls-rprx-vision"')"
+      IFS=$'\t' read -r name uuid pass flow < <(
+        echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
+          (.flow // "xtls-rprx-vision")] | @tsv'
+      )
       [ -z "$name" ] && continue
       out_name="$name"
 
@@ -3190,8 +3205,6 @@ export_configs() {
     echo -e "  ${Y}当前没有用户节点。${NC}"
   fi
 
-  rm -rf "$user_dir" >/dev/null 2>&1 || true
-  rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   echo ""
   pause
 }

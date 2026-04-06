@@ -123,11 +123,13 @@ export_configs() {
   init_manager_env
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
+  local tag proto port sni path sid method server_p
+  local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
-  ip="$(echo "$ctx" | jq -r '.ip')"
-  ws_domain="$(echo "$ctx" | jq -r '.ws_domain')"
-  vm_domain="$(echo "$ctx" | jq -r '.vm_domain')"
+  IFS=$'\t' read -r ip ws_domain vm_domain < <(
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | @tsv'
+  )
   relay_users_nl="$(relay_list_table "$json" | awk -F '\t' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
@@ -136,25 +138,27 @@ export_configs() {
   direct_tmp="$(mktemp)"
   relay_tmp="$(mktemp)"
   user_dir="$(mktemp -d)"
+  _export_cleanup() {
+    rm -rf "$user_dir" >/dev/null 2>&1 || true
+    rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
+  }
+  trap _export_cleanup RETURN
 
   while read -r inbound; do
-    local tag type port sni path sid method server_p proto
-    tag="$(echo "$inbound" | jq -r '.tag')"
-    type="$(echo "$inbound" | jq -r '.type')"
-    proto="$(inbound_protocol_name "$inbound")"
-    port="$(echo "$inbound" | jq -r '.listen_port')"
-    sni="$(echo "$inbound" | jq -r '.tls.server_name // "www.icloud.com"')"
-    path="$(echo "$inbound" | jq -r '.transport.path // "/"')"
-    sid="$(echo "$inbound" | jq -r '.tls.reality.short_id[0] // ""')"
-    method="$(echo "$inbound" | jq -r '.method // "2022-blake3-aes-128-gcm"')"
-    server_p="$(echo "$inbound" | jq -r '.password // empty')"
+    IFS=$'\t' read -r tag proto port sni path sid method server_p < <(
+      echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
+        [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
+         (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
+         (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
+         (.password // "")] | @tsv
+      '
+    )
 
     while read -r user; do
-      local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
-      name="$(echo "$user" | jq -r '.name // empty')"
-      uuid="$(echo "$user" | jq -r '.uuid // empty')"
-      pass="$(echo "$user" | jq -r '.password // empty')"
-      flow="$(echo "$user" | jq -r '.flow // "xtls-rprx-vision"')"
+      IFS=$'\t' read -r name uuid pass flow < <(
+        echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
+          (.flow // "xtls-rprx-vision")] | @tsv'
+      )
       [ -z "$name" ] && continue
       out_name="$name"
 
@@ -294,8 +298,6 @@ export_configs() {
     echo -e "  ${Y}当前没有用户节点。${NC}"
   fi
 
-  rm -rf "$user_dir" >/dev/null 2>&1 || true
-  rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   echo ""
   pause
 }

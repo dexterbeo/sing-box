@@ -127,17 +127,19 @@ ensure_v2ray_api_on_json() {
 query_v2ray_api_stats_json() {
   ensure_grpcurl >/dev/null 2>&1 || { echo '[]'; return 0; }
   ensure_v2ray_api_proto_files
-  local payload out
+  local payload out stats
   payload='{"patterns":["user>>>"],"reset":false,"regexp":false}'
   out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-v2ray.proto -d "$payload" "$V2RAY_API_LISTEN" v2ray.core.app.stats.command.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ] && echo "$out" | jq -e '.stat != null' >/dev/null 2>&1; then
-    echo "$out" | jq -c '.stat // []'
-    return 0
+  if [ -n "$out" ]; then
+    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
+      echo "$stats"; return 0
+    }
   fi
   out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-experimental.proto -d "$payload" "$V2RAY_API_LISTEN" experimental.v2rayapi.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ] && echo "$out" | jq -e '.stat != null' >/dev/null 2>&1; then
-    echo "$out" | jq -c '.stat // []'
-    return 0
+  if [ -n "$out" ]; then
+    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
+      echo "$stats"; return 0
+    }
   fi
   echo '[]'
 }
@@ -215,5 +217,5 @@ meta_set_reality_public_key() {
 
 meta_get_reality_public_key() {
   local tag="$1"
-  echo "$(meta_load)" | jq -r --arg t "$tag" '.[$t].public_key // ""'
+  meta_load | jq -r --arg t "$tag" '.[$t].public_key // ""'
 }

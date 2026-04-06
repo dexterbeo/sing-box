@@ -153,11 +153,16 @@ user_show_info() {
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  used_up="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_up_bytes // 0')"
-  used_down="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_down_bytes // 0')"
-  manual_added="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].manual_added_bytes // 0')"
-  total_used="$(user_billable_bytes "$db_json" "$username")"
-  quota_bytes="$(echo "$db_json" | jq -r --arg u "$username" '(.users[$u].quota_gb // 0) * 1073741824')"
+  IFS=$'\t' read -r used_up used_down manual_added total_used quota_bytes < <(
+    echo "$db_json" | jq -r --arg u "$username" '
+      (.users[$u].used_up_bytes // 0) as $up
+      | (.users[$u].used_down_bytes // 0) as $down
+      | (.users[$u].manual_added_bytes // 0) as $manual
+      | [($up | tostring), ($down | tostring), ($manual | tostring),
+         (($up + $down + $manual) | tostring),
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | @tsv
+    '
+  )
   used_up_text="$(format_traffic_auto "$used_up")"
   used_down_text="$(format_traffic_auto "$used_down")"
   manual_text="$(format_traffic_auto "$manual_added")"
@@ -322,9 +327,13 @@ user_manage_package_menu() {
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
 
-  current_quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
-  current_reset="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
-  current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
+  IFS=$'\t' read -r current_quota current_reset current_expire < <(
+    echo "$db_json" | jq -r --arg u "$username" '
+      [((.users[$u].quota_gb // 0) | tostring),
+       ((.users[$u].reset_day // 0) | tostring),
+       (.users[$u].expire_at // "0")] | @tsv
+    '
+  )
 
   ui_echo "当前流量限制：${current_quota} GB"
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"

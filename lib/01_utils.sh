@@ -13,33 +13,68 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-singbox_service_active() {
-  has_cmd systemctl && systemctl is-active --quiet sing-box 2>/dev/null
+# ---------- 包管理器 / init 系统检测 ----------
+
+detect_pkg_manager() {
+  if has_cmd apt-get; then echo "apt"
+  elif has_cmd apk;   then echo "apk"
+  else                     echo "unknown"
+  fi
+}
+PKG_MANAGER="$(detect_pkg_manager)"
+
+detect_init_system() {
+  if has_cmd systemctl && systemctl --version >/dev/null 2>&1; then echo "systemd"
+  elif has_cmd rc-service; then echo "openrc"
+  else                          echo "unknown"
+  fi
+}
+INIT_SYSTEM="$(detect_init_system)"
+
+# ---------- 包管理抽象 ----------
+
+pkg_installed() {
+  case "$PKG_MANAGER" in
+    apt) [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null || true)" = "installed" ] ;;
+    apk) apk info -e "$1" >/dev/null 2>&1 ;;
+    *)   return 1 ;;
+  esac
 }
 
-pkg_status() { dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null || true; }
-pkg_installed() { [ "$(pkg_status "$1")" = "installed" ]; }
-
-apt_update_once() {
-  local stamp="/tmp/.sb_v3_apt_updated"
-  if [ -f "$stamp" ]; then
-    ok "apt-get update 已执行过（本次会话）。"
-    return 0
-  fi
-  say "执行 apt-get update"
-  apt-get update -y
+pkg_update_once() {
+  local stamp="/tmp/.sb_pkg_updated"
+  [ -f "$stamp" ] && return 0
+  case "$PKG_MANAGER" in
+    apt) say "执行 apt-get update"; apt-get update -y ;;
+    apk) say "执行 apk update";     apk update -q ;;
+  esac
   touch "$stamp"
 }
 
-install_pkg_apt() {
+install_pkg() {
   local pkg="$1"
-  if pkg_installed "$pkg"; then
-    ok "依赖已存在: $pkg"
-    return 0
-  fi
-  apt_update_once
+  pkg_installed "$pkg" && { ok "依赖已存在: $pkg"; return 0; }
+  pkg_update_once
   say "安装依赖: $pkg"
-  apt-get install -y "$pkg"
+  case "$PKG_MANAGER" in
+    apt) apt-get install -y "$pkg" ;;
+    apk) apk add -q "$pkg" ;;
+    *)   err "不支持的包管理器，请手动安装: $pkg"; return 1 ;;
+  esac
+}
+
+# 保留旧名以避免遗漏调用
+install_pkg_apt() { install_pkg "$@"; }
+apt_update_once()  { pkg_update_once; }
+
+# ---------- 服务检测 ----------
+
+singbox_service_active() {
+  case "$INIT_SYSTEM" in
+    systemd) has_cmd systemctl && systemctl is-active --quiet sing-box 2>/dev/null ;;
+    openrc)  rc-service sing-box status >/dev/null 2>&1 ;;
+    *)       return 1 ;;
+  esac
 }
 
 generate_random_alpha_path() {

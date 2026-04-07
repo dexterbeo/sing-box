@@ -9,16 +9,21 @@
 
 ensure_deps_for_installer() {
   require_root
-  has_cmd apt-get || { err "未找到 apt-get，本脚本按 Debian/Ubuntu APT 方式设计。"; exit 1; }
+  [ "$PKG_MANAGER" = "unknown" ] && { err "未找到受支持的包管理器（apt-get 或 apk）。"; exit 1; }
   say "检查并安装必要依赖..."
-  install_pkg_apt sudo
-  install_pkg_apt ca-certificates
-  install_pkg_apt curl
-  install_pkg_apt gnupg
-  install_pkg_apt jq
-  install_pkg_apt openssl
-  install_pkg_apt tar
-  install_pkg_apt gzip
+  install_pkg curl
+  install_pkg jq
+  install_pkg openssl
+  install_pkg tar
+  case "$PKG_MANAGER" in
+    apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
+    apk) install_pkg ca-certificates ;;
+  esac
+}
+
+version_ge() {
+  # version_ge A B → true if A >= B（使用 sort -V）
+  [ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)" = "$2" ]
 }
 
 ensure_sagernet_repo() { :; }
@@ -216,22 +221,34 @@ remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
 install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
 remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 
-# ---------- Systemd 服务管理 ----------
+# ---------- 服务管理（systemd / OpenRC） ----------
 
 remove_all_singbox_service_units() {
   say "清理 sing-box service（包含官方残留）..."
-  systemctl stop sing-box >/dev/null 2>&1 || true
-  systemctl disable sing-box >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/sing-box.service >/dev/null 2>&1 || true
-  rm -f /usr/lib/systemd/system/sing-box.service >/dev/null 2>&1 || true
-  rm -f /lib/systemd/system/sing-box.service >/dev/null 2>&1 || true
-  systemctl daemon-reload >/dev/null 2>&1 || true
+  case "$INIT_SYSTEM" in
+    systemd)
+      systemctl stop sing-box >/dev/null 2>&1 || true
+      systemctl disable sing-box >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/sing-box.service \
+            /usr/lib/systemd/system/sing-box.service \
+            /lib/systemd/system/sing-box.service >/dev/null 2>&1 || true
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-service sing-box stop >/dev/null 2>&1 || true
+      rc-update del sing-box default >/dev/null 2>&1 || true
+      rm -f /etc/init.d/sing-box >/dev/null 2>&1 || true
+      ;;
+  esac
   ok "sing-box service 已清理。"
 }
 
 write_managed_singbox_service() {
-  mkdir -p /etc/systemd/system /var/lib/sing-box /etc/sing-box
-  cat > /etc/systemd/system/sing-box.service <<EOF
+  mkdir -p /var/lib/sing-box /etc/sing-box
+  case "$INIT_SYSTEM" in
+    systemd)
+      mkdir -p /etc/systemd/system
+      cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -249,6 +266,23 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+      ;;
+    openrc)
+      cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+description="sing-box service"
+command="${SINGBOX_BIN}"
+command_args="-D /var/lib/sing-box -c ${CONFIG_FILE} run"
+command_background=true
+pidfile="/run/sing-box.pid"
+depend() {
+  need net
+  after firewall
+}
+EOF
+      chmod +x /etc/init.d/sing-box
+      ;;
+  esac
 }
 
 ensure_command_compat_links() {
@@ -264,8 +298,17 @@ migrate_legacy_user_db_if_needed() {
 }
 
 is_script_managed_environment() {
-  [ -f /etc/systemd/system/sing-box.service ] || return 1
-  grep -Fq "ExecStart=${SINGBOX_BIN} -D /var/lib/sing-box -c /etc/sing-box/config.json run" /etc/systemd/system/sing-box.service 2>/dev/null || return 1
+  case "$INIT_SYSTEM" in
+    systemd)
+      [ -f /etc/systemd/system/sing-box.service ] || return 1
+      grep -Fq "ExecStart=${SINGBOX_BIN} -D /var/lib/sing-box -c /etc/sing-box/config.json run" /etc/systemd/system/sing-box.service 2>/dev/null || return 1
+      ;;
+    openrc)
+      [ -f /etc/init.d/sing-box ] || return 1
+      grep -Fq "${SINGBOX_BIN}" /etc/init.d/sing-box 2>/dev/null || return 1
+      ;;
+    *) return 1 ;;
+  esac
   [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
   return 0
 }
@@ -276,7 +319,7 @@ prepare_script_runtime() {
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
-  systemctl daemon-reload
+  [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
   ok "脚本运行环境已就绪。"
 }
 
@@ -331,7 +374,7 @@ install_or_update_singbox() {
   if [ "${managed_env}" = "1" ]; then
     echo -e "当前版本：${G}${inst:-未知}${NC}"
     echo -e "最新版本：${G}${latest_ver}${NC}"
-    if [ -n "${inst:-}" ] && ! dpkg --compare-versions "$inst" lt "$latest_ver"; then
+    if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       ok "当前已是最新版本。"
       pause
       return 0
@@ -436,26 +479,49 @@ sync_system_time_chrony() {
   echo -e "${R}--- 一键同步系统时间 ---${NC}"
   if ! has_cmd chronyc; then
     warn "未检测到 chrony，开始安装..."
-    apt_update_once
-    apt-get install -y chrony || { err "chrony 安装失败。"; pause; return 1; }
+    install_pkg chrony || { err "chrony 安装失败。"; pause; return 1; }
   fi
-  systemctl stop systemd-timesyncd >/dev/null 2>&1 || true
-  systemctl disable systemd-timesyncd >/dev/null 2>&1 || true
-  if chronyc tracking >/dev/null 2>&1 && [ "$(systemctl is-active chrony 2>/dev/null)" = "active" ]; then
+  # 停用系统自带 timesyncd（仅 systemd 有此服务）
+  if [ "$INIT_SYSTEM" = "systemd" ]; then
+    systemctl stop systemd-timesyncd >/dev/null 2>&1 || true
+    systemctl disable systemd-timesyncd >/dev/null 2>&1 || true
+  fi
+  local chrony_running=0
+  case "$INIT_SYSTEM" in
+    systemd) [ "$(systemctl is-active chrony 2>/dev/null)" = "active" ] && chrony_running=1 ;;
+    openrc)  rc-service chrony status >/dev/null 2>&1 && chrony_running=1 ;;
+  esac
+  if chronyc tracking >/dev/null 2>&1 && [ "$chrony_running" = "1" ]; then
     ok "chrony 已正常运行。"
   else
     warn "开始修复 chrony 服务状态..."
-    systemctl stop chrony >/dev/null 2>&1 || true
-    pkill -9 chronyd >/dev/null 2>&1 || true
-    rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
-    systemctl reset-failed chrony >/dev/null 2>&1 || true
-    systemctl start chrony >/dev/null 2>&1 || true
+    case "$INIT_SYSTEM" in
+      systemd)
+        systemctl stop chrony >/dev/null 2>&1 || true
+        pkill -9 chronyd >/dev/null 2>&1 || true
+        rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
+        systemctl reset-failed chrony >/dev/null 2>&1 || true
+        systemctl start chrony >/dev/null 2>&1 || true
+        ;;
+      openrc)
+        rc-service chrony stop >/dev/null 2>&1 || true
+        pkill -9 chronyd >/dev/null 2>&1 || true
+        rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
+        rc-service chrony start >/dev/null 2>&1 || true
+        ;;
+    esac
     sleep 2
   fi
-  systemctl enable chrony >/dev/null 2>&1 || true
+  case "$INIT_SYSTEM" in
+    systemd) systemctl enable chrony >/dev/null 2>&1 || true ;;
+    openrc)  rc-update add chrony default >/dev/null 2>&1 || true ;;
+  esac
   chronyc -a makestep >/dev/null 2>&1 || true
   ok "时间同步完成。"
-  systemctl status chrony --no-pager -l || true
+  case "$INIT_SYSTEM" in
+    systemd) systemctl status chrony --no-pager -l || true ;;
+    openrc)  rc-service chrony status || true ;;
+  esac
   pause
 }
 
@@ -468,21 +534,35 @@ uninstall_singbox_keep_config() {
   echo -e "${Y}注意：该操作将卸载接管层、官方安装残留、cron 与运行文件，但保留配置、用户数据、日志文件。${NC}"
   ask_confirm_yes || { warn "已取消卸载。"; pause; return 0; }
 
-  has_cmd apt-get || { err "未找到 apt-get。"; pause; return 1; }
   sync_user_usage_counters || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
-  systemctl stop sing-box >/dev/null 2>&1 || true
-  systemctl disable sing-box >/dev/null 2>&1 || true
   remove_all_singbox_service_units
-  userdel sing-box >/dev/null 2>&1 || true
-  groupdel sing-box >/dev/null 2>&1 || true
+  # 清理官方包可能创建的系统用户/组
+  if has_cmd deluser; then
+    deluser --system sing-box >/dev/null 2>&1 || true
+  else
+    userdel sing-box >/dev/null 2>&1 || true
+  fi
+  if has_cmd delgroup; then
+    delgroup --system sing-box >/dev/null 2>&1 || true
+  else
+    groupdel sing-box >/dev/null 2>&1 || true
+  fi
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
-    pkg_installed sing-box && apt-get remove -y sing-box || true
-    pkg_installed sing-box-beta && apt-get remove -y sing-box-beta || true
-    pkg_installed sing-box && apt-get purge -y sing-box || true
-    pkg_installed sing-box-beta && apt-get purge -y sing-box-beta || true
+    case "$PKG_MANAGER" in
+      apt)
+        pkg_installed sing-box && apt-get remove -y sing-box || true
+        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta || true
+        pkg_installed sing-box && apt-get purge -y sing-box || true
+        pkg_installed sing-box-beta && apt-get purge -y sing-box-beta || true
+        ;;
+      apk)
+        pkg_installed sing-box && apk del sing-box >/dev/null 2>&1 || true
+        pkg_installed sing-box-beta && apk del sing-box-beta >/dev/null 2>&1 || true
+        ;;
+    esac
     ok "已清理脚本运行层并卸载官方包残留（如存在）。"
   else
     ok "已清理脚本运行层（如存在）。"

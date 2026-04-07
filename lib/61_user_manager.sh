@@ -179,7 +179,11 @@ apply_automatic_user_controls() {
   today="$(user_today_date)"
   period="$(user_current_period)"
   today_day=$((10#$(date +%d)))
-  last_day=$((10#$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)))
+  last_day=$(awk -v y="$(date +%Y)" -v m="$(date +%m)" 'BEGIN {
+    split("31 28 31 30 31 30 31 31 30 31 30 31", d, " ")
+    d[2] = (y%4==0 && (y%100!=0 || y%400==0)) ? 29 : 28
+    print d[m+0]
+  }')
 
   result="$(echo "$db_json" | jq --arg today "$today" --arg period "$period" --argjson today_day "$today_day" --argjson last_day "$last_day" '
     .users |= with_entries(

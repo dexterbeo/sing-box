@@ -94,30 +94,47 @@ check_config_or_print() {
 }
 
 restart_singbox_safe() {
-  if ! has_cmd systemctl; then
-    err "未找到 systemctl。"
-    return 1
-  fi
   if ! check_config_or_print; then
     err "已阻止重启：请先修复配置。"
     return 1
   fi
-  say "重启服务：systemctl reload sing-box 2>/dev/null || systemctl restart sing-box"
-  systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+  case "$INIT_SYSTEM" in
+    systemd)
+      say "重启服务：systemctl reload sing-box 2>/dev/null || systemctl restart sing-box"
+      systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+      ;;
+    openrc)
+      say "重启服务：rc-service sing-box restart"
+      rc-service sing-box restart
+      ;;
+    *)
+      err "未识别的 init 系统，无法重启 sing-box。"
+      return 1
+      ;;
+  esac
   ok "sing-box 已重启。"
 }
 
 enable_now_singbox_safe() {
-  if ! has_cmd systemctl; then
-    err "未找到 systemctl。"
-    return 1
-  fi
   if ! check_config_or_print; then
     err "已阻止启动/自启：请先修复配置。"
     return 1
   fi
-  say "启用自启并立即启动：systemctl enable --now sing-box"
-  systemctl enable --now sing-box
+  case "$INIT_SYSTEM" in
+    systemd)
+      say "启用自启并立即启动：systemctl enable --now sing-box"
+      systemctl enable --now sing-box
+      ;;
+    openrc)
+      say "启用自启并立即启动：rc-update add sing-box default && rc-service sing-box start"
+      rc-update add sing-box default
+      rc-service sing-box start
+      ;;
+    *)
+      err "未识别的 init 系统，无法启动 sing-box。"
+      return 1
+      ;;
+  esac
   ok "sing-box 已启用自启并启动。"
 }
 
@@ -172,7 +189,10 @@ config_apply() {
   mv -f "$TEMP_FILE" "$CONFIG_FILE"
 
   if restart_singbox_safe; then
-    systemctl enable sing-box >/dev/null 2>&1 || true
+    case "$INIT_SYSTEM" in
+      systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
+      openrc)  rc-update add sing-box default >/dev/null 2>&1 || true ;;
+    esac
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
     local -a old_baks=()
@@ -211,6 +231,6 @@ init_manager_env() {
   has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
   has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
-  has_cmd systemctl || { err "未找到 systemctl。"; exit 1; }
+  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
   config_ensure_exists
 }

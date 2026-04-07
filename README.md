@@ -5,11 +5,11 @@
 ## 快速开始
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh -o sb.sh && bash sb.sh
+curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh -o sb.sh && bash sb.sh
 ```
 **非root用户：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh -o sb.sh && sudo bash sb.sh
+curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh -o sb.sh && sudo bash sb.sh
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。

@@ -145,19 +145,19 @@ export_configs() {
   trap _export_cleanup RETURN
 
   while read -r inbound; do
-    IFS=$'\t' read -r tag proto port sni path sid method server_p < <(
+    IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(
       echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
         [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
          (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
          (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
-         (.password // "")] | @tsv
+         (.password // "")] | join("\u0001")
       '
     )
 
     while read -r user; do
-      IFS=$'\t' read -r name uuid pass flow < <(
+      IFS=$'\x01' read -r name uuid pass flow < <(
         echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
-          (.flow // "xtls-rprx-vision")] | @tsv'
+          (.flow // "xtls-rprx-vision")] | join("\u0001")'
       )
       [ -z "$name" ] && continue
       out_name="$name"

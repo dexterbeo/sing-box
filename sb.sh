@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-07 07:25:12 UTC
+# 构建时间: 2026-04-09 03:10:05 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.4"
+SCRIPT_VERSION="5.3.5"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3111,19 +3111,19 @@ export_configs() {
   trap _export_cleanup RETURN
 
   while read -r inbound; do
-    IFS=$'\t' read -r tag proto port sni path sid method server_p < <(
+    IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(
       echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
         [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
          (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
          (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
-         (.password // "")] | @tsv
+         (.password // "")] | join("\u0001")
       '
     )
 
     while read -r user; do
-      IFS=$'\t' read -r name uuid pass flow < <(
+      IFS=$'\x01' read -r name uuid pass flow < <(
         echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
-          (.flow // "xtls-rprx-vision")] | @tsv'
+          (.flow // "xtls-rprx-vision")] | join("\u0001")'
       )
       [ -z "$name" ] && continue
       out_name="$name"

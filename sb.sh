@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-09 03:10:05 UTC
+# 构建时间: 2026-04-10 03:11:27 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.5"
+SCRIPT_VERSION="5.3.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3289,7 +3289,7 @@ ensure_deps_for_installer() {
   install_pkg tar
   case "$PKG_MANAGER" in
     apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
-    apk) install_pkg ca-certificates ;;
+    apk) install_pkg ca-certificates; install_pkg gcompat ;;
   esac
 }
 

@@ -17,7 +17,7 @@ ensure_deps_for_installer() {
   install_pkg tar
   case "$PKG_MANAGER" in
     apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
-    apk) install_pkg ca-certificates ;;
+    apk) install_pkg ca-certificates; install_pkg gcompat ;;
   esac
 }
 

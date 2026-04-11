@@ -595,19 +595,73 @@ view_config_formatted() {
   pause
 }
 
+singbox_status() {
+  clear
+  print_rect_title "sing-box 状态"
+  case "$INIT_SYSTEM" in
+    systemd) systemctl status sing-box --no-pager -l || true ;;
+    openrc)  rc-service sing-box status || true ;;
+    *) warn "未识别的 init 系统，无法查询状态。" ;;
+  esac
+  echo ""
+  pause
+}
+
+singbox_start() {
+  clear
+  print_rect_title "启动 sing-box"
+  case "$INIT_SYSTEM" in
+    systemd)
+      say "执行：systemctl start sing-box"
+      systemctl start sing-box && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      ;;
+    openrc)
+      say "执行：rc-service sing-box start"
+      rc-service sing-box start && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      ;;
+    *) err "未识别的 init 系统，无法启动 sing-box。" ;;
+  esac
+  echo ""
+  pause
+}
+
+singbox_stop() {
+  clear
+  print_rect_title "停止 sing-box"
+  case "$INIT_SYSTEM" in
+    systemd)
+      say "执行：systemctl stop sing-box"
+      systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。"
+      ;;
+    openrc)
+      say "执行：rc-service sing-box stop"
+      rc-service sing-box stop && ok "sing-box 已停止。" || err "停止失败。"
+      ;;
+    *) err "未识别的 init 系统，无法停止 sing-box。" ;;
+  esac
+  echo ""
+  pause
+}
+
 system_tools_menu() {
   while true; do
     clear
     print_rect_title "系统工具"
-    echo -e "  ${C}1.${NC} 一键同步系统时间"
-    echo -e "  ${C}2.${NC} 规范化接管"
-    echo -e "  ${C}3.${NC} 查看实时日志"
+    echo -e "  ${C}1.${NC} 查看 sing-box 状态"
+    echo -e "  ${C}2.${NC} 查看 sing-box 实时日志"
+    echo -e "  ${C}3.${NC} 启动 sing-box"
+    echo -e "  ${C}4.${NC} 停止 sing-box"
+    echo -e "  ${C}5.${NC} 一键校准系统时间"
+    echo -e "  ${C}6.${NC} 规范化接管旧配置"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) sync_system_time_chrony ;;
-      2) normalize_takeover ;;
-      3) view_realtime_log ;;
+      1) singbox_status ;;
+      2) view_realtime_log ;;
+      3) singbox_start ;;
+      4) singbox_stop ;;
+      5) sync_system_time_chrony ;;
+      6) normalize_takeover ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

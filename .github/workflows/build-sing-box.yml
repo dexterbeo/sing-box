@@ -161,3 +161,16 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "$tag" \
             --notes "Auto-built sing-box with with_v2ray_api and with_naive_outbound"
+
+      - name: Delete old releases
+        if: steps.current.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          new_tag="${{ steps.latest.outputs.tag }}"
+          gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '.[].tagName' | \
+            grep -v "^${new_tag}$" | \
+            while read -r old_tag; do
+              echo "Deleting release and tag: $old_tag"
+              gh release delete "$old_tag" --repo "${{ github.repository }}" -y --cleanup-tag || true
+            done

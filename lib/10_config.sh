@@ -100,11 +100,9 @@ restart_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      say "重启服务：systemctl reload sing-box 2>/dev/null || systemctl restart sing-box"
       systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
       ;;
     openrc)
-      say "重启服务：rc-service sing-box restart"
       rc-service sing-box restart
       ;;
     *)
@@ -122,11 +120,9 @@ enable_now_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      say "启用自启并立即启动：systemctl enable --now sing-box"
       systemctl enable --now sing-box
       ;;
     openrc)
-      say "启用自启并立即启动：rc-update add sing-box default && rc-service sing-box start"
       rc-update add sing-box default
       rc-service sing-box start
       ;;

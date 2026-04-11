@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-11 04:53:36 UTC
+# 构建时间: 2026-04-11 05:06:46 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.9"
+SCRIPT_VERSION="5.3.10"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -320,8 +320,8 @@ pkg_update_once() {
   local stamp="/tmp/.sb_pkg_updated"
   [ -f "$stamp" ] && return 0
   case "$PKG_MANAGER" in
-    apt) say "执行 apt-get update"; apt-get update -y ;;
-    apk) say "执行 apk update";     apk update -q ;;
+    apt) say "更新包索引..."; apt-get update -y ;;
+    apk) say "更新包索引..."; apk update -q ;;
   esac
   touch "$stamp"
 }
@@ -621,11 +621,9 @@ restart_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      say "重启服务：systemctl reload sing-box 2>/dev/null || systemctl restart sing-box"
       systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
       ;;
     openrc)
-      say "重启服务：rc-service sing-box restart"
       rc-service sing-box restart
       ;;
     *)
@@ -643,11 +641,9 @@ enable_now_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      say "启用自启并立即启动：systemctl enable --now sing-box"
       systemctl enable --now sing-box
       ;;
     openrc)
-      say "启用自启并立即启动：rc-update add sing-box default && rc-service sing-box start"
       rc-update add sing-box default
       rc-service sing-box start
       ;;
@@ -1610,27 +1606,19 @@ relay_add() {
     pause
     return 1
   }
+  local _relay_ok=0
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    if user_manager_apply_changes "$db_json" "$updated_json"; then
-      ok "中转节点已添加/覆盖：$relay_user"
-      say "  落地地址: $ip:$relay_port"
-      say "  出站标签: $out_tag"
-      say "  加密方式: 2022-blake3-aes-128-gcm"
-    else
-      warn "中转节点添加失败，已返回上一级。"
-    fi
+    user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
   else
-    if config_apply "$updated_json"; then
-      ok "中转节点已添加/覆盖：$relay_user"
-      say "  落地地址: $ip:$relay_port"
-      say "  出站标签: $out_tag"
-      say "  加密方式: 2022-blake3-aes-128-gcm"
-    else
-      warn "中转节点添加失败，已返回上一级。"
-    fi
+    config_apply "$updated_json" && _relay_ok=1
+  fi
+  if [ "$_relay_ok" -eq 1 ]; then
+    ok "中转节点已添加：${relay_user}（落地: ${ip}:${relay_port}）"
+  else
+    warn "中转节点添加失败，已返回上一级。"
   fi
   pause
   return 0
@@ -2199,21 +2187,14 @@ user_manager_apply_changes() {
   local db_json="$1" base_json="${2:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
-  say "更新用户数据库..."
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   user_db_save "$db_json"
-  ok "用户数据库已保存。"
 
-  say "重新生成用户节点关系..."
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
     err "生成用户节点关系失败。"
     return 1
   }
-  ok "用户节点关系已更新。"
-
-  say "重建路由规则..."
-  ok "路由规则已重建。"
 
   if config_apply "$applied_json"; then
     ok "用户变更已应用。"
@@ -2226,9 +2207,7 @@ user_manager_runtime_sync() {
   local db_json current_json desired_json current_norm desired_norm
   db_json="$(user_db_load)"
   if [ ! -s "$USER_DB_FILE" ]; then
-    say "初始化用户数据库..."
     user_db_save "$db_json"
-    ok "用户数据库已初始化。"
   fi
 
   ensure_grpcurl >/dev/null 2>&1 || true
@@ -2242,11 +2221,10 @@ user_manager_runtime_sync() {
   current_norm="$(echo "$current_json" | jq -S .)"
   desired_norm="$(echo "$desired_json" | jq -S .)"
   if [ "$current_norm" != "$desired_norm" ]; then
-    say "检测到用户流量统计配置需要更新..."
     if config_apply "$desired_json"; then
-      ok "用户流量统计配置已更新。"
+      ok "配置已同步。"
     else
-      err "用户流量统计配置更新失败。"
+      err "配置同步失败。"
       return 1
     fi
   fi
@@ -2347,9 +2325,8 @@ init_user_manager_if_needed() {
     mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
   fi
   if ! user_db_exists; then
-    say "首次进入用户管理，已默认启用 admin 用户。"
     user_db_save "$(user_db_min_template)"
-    ok "默认用户 admin 已启用。"
+    ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   user_db_cleanup_current_and_save || true
   user_manager_runtime_sync || true
@@ -3436,7 +3413,6 @@ EOF2
 ensure_sb_shortcut() {
   install_script_self || return 1
   install_sb_shortcut
-  ok "已创建脚本快捷键：s"
 }
 
 # ---------- 日志维护 ----------
@@ -3620,13 +3596,11 @@ is_script_managed_environment() {
 }
 
 prepare_script_runtime() {
-  say "准备脚本运行环境..."
   migrate_legacy_user_db_if_needed
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
   [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
-  ok "脚本运行环境已就绪。"
 }
 
 # ---------- 安装/更新 sing-box ----------
@@ -3704,7 +3678,7 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  say "下载：${download_url}"
+  say "下载 sing-box ${latest_ver}..."
   if ! curl -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
     err "下载失败。"
@@ -3712,7 +3686,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "下载校验文件..."
+  say "校验安装包..."
   if curl -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
@@ -3764,7 +3738,6 @@ install_or_update_singbox() {
     return 1
   fi
 
-  ok "sing-box 安装/更新完成。"
   say "准备流量统计依赖..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
@@ -3777,12 +3750,7 @@ install_or_update_singbox() {
   install_user_watch_cron || true
   install_log_maintain_cron || true
   show_versions
-  echo ""
-  say "已完成以下操作："
-  echo "  - 流量统计依赖（grpcurl + v2ray API proto）"
-  echo "  - 服务配置（${INIT_SYSTEM}）并启动"
-  echo "  - 定时任务（流量同步 + 日志维护）"
-  echo "  - 快捷命令 s"
+  ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
   pause
 }
 

@@ -45,8 +45,8 @@ pkg_update_once() {
   local stamp="/tmp/.sb_pkg_updated"
   [ -f "$stamp" ] && return 0
   case "$PKG_MANAGER" in
-    apt) say "执行 apt-get update"; apt-get update -y ;;
-    apk) say "执行 apk update";     apk update -q ;;
+    apt) say "更新包索引..."; apt-get update -y ;;
+    apk) say "更新包索引..."; apk update -q ;;
   esac
   touch "$stamp"
 }

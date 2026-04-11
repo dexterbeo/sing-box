@@ -149,7 +149,6 @@ EOF2
 ensure_sb_shortcut() {
   install_script_self || return 1
   install_sb_shortcut
-  ok "已创建脚本快捷键：s"
 }
 
 # ---------- 日志维护 ----------
@@ -333,13 +332,11 @@ is_script_managed_environment() {
 }
 
 prepare_script_runtime() {
-  say "准备脚本运行环境..."
   migrate_legacy_user_db_if_needed
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
   [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
-  ok "脚本运行环境已就绪。"
 }
 
 # ---------- 安装/更新 sing-box ----------
@@ -417,7 +414,7 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  say "下载：${download_url}"
+  say "下载 sing-box ${latest_ver}..."
   if ! curl -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
     err "下载失败。"
@@ -425,7 +422,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "下载校验文件..."
+  say "校验安装包..."
   if curl -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
@@ -477,7 +474,6 @@ install_or_update_singbox() {
     return 1
   fi
 
-  ok "sing-box 安装/更新完成。"
   say "准备流量统计依赖..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
@@ -490,12 +486,7 @@ install_or_update_singbox() {
   install_user_watch_cron || true
   install_log_maintain_cron || true
   show_versions
-  echo ""
-  say "已完成以下操作："
-  echo "  - 流量统计依赖（grpcurl + v2ray API proto）"
-  echo "  - 服务配置（${INIT_SYSTEM}）并启动"
-  echo "  - 定时任务（流量同步 + 日志维护）"
-  echo "  - 快捷命令 s"
+  ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
   pause
 }
 

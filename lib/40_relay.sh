@@ -152,27 +152,19 @@ relay_add() {
     pause
     return 1
   }
+  local _relay_ok=0
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    if user_manager_apply_changes "$db_json" "$updated_json"; then
-      ok "中转节点已添加/覆盖：$relay_user"
-      say "  落地地址: $ip:$relay_port"
-      say "  出站标签: $out_tag"
-      say "  加密方式: 2022-blake3-aes-128-gcm"
-    else
-      warn "中转节点添加失败，已返回上一级。"
-    fi
+    user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
   else
-    if config_apply "$updated_json"; then
-      ok "中转节点已添加/覆盖：$relay_user"
-      say "  落地地址: $ip:$relay_port"
-      say "  出站标签: $out_tag"
-      say "  加密方式: 2022-blake3-aes-128-gcm"
-    else
-      warn "中转节点添加失败，已返回上一级。"
-    fi
+    config_apply "$updated_json" && _relay_ok=1
+  fi
+  if [ "$_relay_ok" -eq 1 ]; then
+    ok "中转节点已添加：${relay_user}（落地: ${ip}:${relay_port}）"
+  else
+    warn "中转节点添加失败，已返回上一级。"
   fi
   pause
   return 0

@@ -102,21 +102,14 @@ user_manager_apply_changes() {
   local db_json="$1" base_json="${2:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
-  say "更新用户数据库..."
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   user_db_save "$db_json"
-  ok "用户数据库已保存。"
 
-  say "重新生成用户节点关系..."
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
     err "生成用户节点关系失败。"
     return 1
   }
-  ok "用户节点关系已更新。"
-
-  say "重建路由规则..."
-  ok "路由规则已重建。"
 
   if config_apply "$applied_json"; then
     ok "用户变更已应用。"
@@ -129,9 +122,7 @@ user_manager_runtime_sync() {
   local db_json current_json desired_json current_norm desired_norm
   db_json="$(user_db_load)"
   if [ ! -s "$USER_DB_FILE" ]; then
-    say "初始化用户数据库..."
     user_db_save "$db_json"
-    ok "用户数据库已初始化。"
   fi
 
   ensure_grpcurl >/dev/null 2>&1 || true
@@ -145,11 +136,10 @@ user_manager_runtime_sync() {
   current_norm="$(echo "$current_json" | jq -S .)"
   desired_norm="$(echo "$desired_json" | jq -S .)"
   if [ "$current_norm" != "$desired_norm" ]; then
-    say "检测到用户流量统计配置需要更新..."
     if config_apply "$desired_json"; then
-      ok "用户流量统计配置已更新。"
+      ok "配置已同步。"
     else
-      err "用户流量统计配置更新失败。"
+      err "配置同步失败。"
       return 1
     fi
   fi
@@ -250,9 +240,8 @@ init_user_manager_if_needed() {
     mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
   fi
   if ! user_db_exists; then
-    say "首次进入用户管理，已默认启用 admin 用户。"
     user_db_save "$(user_db_min_template)"
-    ok "默认用户 admin 已启用。"
+    ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   user_db_cleanup_current_and_save || true
   user_manager_runtime_sync || true

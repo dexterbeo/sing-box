@@ -613,11 +613,29 @@ singbox_start() {
   case "$INIT_SYSTEM" in
     systemd)
       say "执行：systemctl start sing-box"
-      systemctl start sing-box && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      if systemctl start sing-box; then
+        sleep 1
+        if systemctl is-active --quiet sing-box 2>/dev/null; then
+          ok "sing-box 已启动并正常运行。"
+        else
+          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
+        fi
+      else
+        err "启动失败，请检查配置或日志。"
+      fi
       ;;
     openrc)
       say "执行：rc-service sing-box start"
-      rc-service sing-box start && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      if rc-service sing-box start; then
+        sleep 1
+        if rc-service sing-box status >/dev/null 2>&1; then
+          ok "sing-box 已启动并正常运行。"
+        else
+          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
+        fi
+      else
+        err "启动失败，请检查配置或日志。"
+      fi
       ;;
     *) err "未识别的 init 系统，无法启动 sing-box。" ;;
   esac

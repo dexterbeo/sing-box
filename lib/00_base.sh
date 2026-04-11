@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.7"
+SCRIPT_VERSION="5.3.8"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"

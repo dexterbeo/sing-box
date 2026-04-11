@@ -217,7 +217,15 @@ config_apply() {
     warn "无旧配置可回滚，已保存失败现场：$backup"
   fi
   rm -f "$prev_tmp" >/dev/null 2>&1 || true
-  restart_singbox_safe || true
+  if ! restart_singbox_safe; then
+    err "回滚后重启仍失败，sing-box 当前处于停止状态。"
+    warn "手动恢复命令："
+    case "$INIT_SYSTEM" in
+      systemd) warn "  systemctl start sing-box" ;;
+      openrc)  warn "  rc-service sing-box start" ;;
+    esac
+    warn "如需恢复到失败前的配置，请检查：$backup"
+  fi
   return 1
 }
 

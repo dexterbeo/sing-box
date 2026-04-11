@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-11 04:23:31 UTC
+# 构建时间: 2026-04-11 04:38:57 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.7"
+SCRIPT_VERSION="5.3.8"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -739,7 +739,15 @@ config_apply() {
     warn "无旧配置可回滚，已保存失败现场：$backup"
   fi
   rm -f "$prev_tmp" >/dev/null 2>&1 || true
-  restart_singbox_safe || true
+  if ! restart_singbox_safe; then
+    err "回滚后重启仍失败，sing-box 当前处于停止状态。"
+    warn "手动恢复命令："
+    case "$INIT_SYSTEM" in
+      systemd) warn "  systemctl start sing-box" ;;
+      openrc)  warn "  rc-service sing-box start" ;;
+    esac
+    warn "如需恢复到失败前的配置，请检查：$backup"
+  fi
   return 1
 }
 
@@ -3463,9 +3471,28 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
+_ensure_crond_running() {
+  # 仅 apk（Alpine）环境需要手动确保 crond 启动；apt 环境 cron 安装后自动运行
+  [ "$PKG_MANAGER" = "apk" ] || return 0
+  install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
+  case "$INIT_SYSTEM" in
+    openrc)
+      if ! rc-service crond status >/dev/null 2>&1 && ! rc-service cron status >/dev/null 2>&1; then
+        rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
+        rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
+      fi
+      ;;
+    systemd)
+      systemctl is-active --quiet crond 2>/dev/null || systemctl is-active --quiet cron 2>/dev/null || \
+        { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
+      ;;
+  esac
+}
+
 _install_cron_job() {
   local mark="$1" schedule="$2" cmd="$3"
   has_cmd crontab || return 1
+  _ensure_crond_running
   local tmp
   tmp="$(mktemp)"
   crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
@@ -3723,6 +3750,9 @@ install_or_update_singbox() {
 
   if ! "$SINGBOX_BIN" version | grep -q 'with_v2ray_api'; then
     err "当前安装的 sing-box 未检测到 with_v2ray_api。"
+    if [ "$PKG_MANAGER" = "apk" ]; then
+      warn "Alpine 环境提示：若报 'cannot execute' 错误，请手动执行：apk add gcompat"
+    fi
     pause
     return 1
   fi
@@ -4461,11 +4491,29 @@ singbox_start() {
   case "$INIT_SYSTEM" in
     systemd)
       say "执行：systemctl start sing-box"
-      systemctl start sing-box && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      if systemctl start sing-box; then
+        sleep 1
+        if systemctl is-active --quiet sing-box 2>/dev/null; then
+          ok "sing-box 已启动并正常运行。"
+        else
+          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
+        fi
+      else
+        err "启动失败，请检查配置或日志。"
+      fi
       ;;
     openrc)
       say "执行：rc-service sing-box start"
-      rc-service sing-box start && ok "sing-box 已启动。" || err "启动失败，请检查配置或日志。"
+      if rc-service sing-box start; then
+        sleep 1
+        if rc-service sing-box status >/dev/null 2>&1; then
+          ok "sing-box 已启动并正常运行。"
+        else
+          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
+        fi
+      else
+        err "启动失败，请检查配置或日志。"
+      fi
       ;;
     *) err "未识别的 init 系统，无法启动 sing-box。" ;;
   esac

@@ -78,11 +78,10 @@ singbox_service_active() {
 }
 
 generate_random_alpha_path() {
-  local s=""
-  while [ ${#s} -lt 7 ]; do
-    s="$(openssl rand -base64 32 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || true)"
-  done
-  echo "/$s"
+  local s
+  s="$(openssl rand -base64 32 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || true)"
+  [ ${#s} -ge 7 ] || s="$(head -c 32 /dev/urandom 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || echo "xBqLmRt")"
+  echo "/${s:0:7}"
 }
 
 normalize_ws_path() {

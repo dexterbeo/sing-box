@@ -598,6 +598,13 @@ view_config_formatted() {
 singbox_status() {
   clear
   print_rect_title "sing-box 状态"
+  # 摘要行（统一 systemd/OpenRC 输出）
+  local _status="未知" _version="未知"
+  if singbox_service_active; then _status="${G}运行中${NC}"; else _status="${R}已停止${NC}"; fi
+  [ -x "$SINGBOX_BIN" ] && _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')" && [ -n "$_version" ] || _version="未知"
+  echo -e "  状态: ${_status}    版本: ${_version}"
+  echo ""
+  # 原始详细输出
   case "$INIT_SYSTEM" in
     systemd) systemctl status sing-box --no-pager -l || true ;;
     openrc)  rc-service sing-box status || true ;;

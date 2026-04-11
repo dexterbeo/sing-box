@@ -584,6 +584,23 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
+    # 配额预警：显示已用 ≥90% 的用户
+    local _warnings
+    _warnings="$(echo "$db_json" | jq -r '
+      .users | to_entries[]
+      | select(.value.quota_gb > 0)
+      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
+      | (.value.quota_gb * 1073741824) as $quota
+      | select($used >= ($quota * 0.9))
+      | .key + " (" + (($used / $quota * 100) | floor | tostring) + "%)"
+    ' 2>/dev/null || true)"
+    if [ -n "$_warnings" ]; then
+      echo -e "  ${Y}[!] 流量即将耗尽:${NC}"
+      while IFS= read -r _w; do
+        echo -e "      ${Y}${_w}${NC}"
+      done <<< "$_warnings"
+      echo ""
+    fi
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"

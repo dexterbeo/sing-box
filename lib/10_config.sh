@@ -195,14 +195,7 @@ config_apply() {
     esac
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
-    local -a old_baks=()
-    mapfile -t old_baks < <(ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null || true)
-    if [ ${#old_baks[@]} -gt 1 ]; then
-      local _i
-      for _i in "${old_baks[@]:1}"; do
-        rm -f "$_i" >/dev/null 2>&1 || true
-      done
-    fi
+    ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
     ok "配置已应用。"
     return 0
   fi

@@ -490,6 +490,12 @@ install_or_update_singbox() {
   install_user_watch_cron || true
   install_log_maintain_cron || true
   show_versions
+  echo ""
+  say "已完成以下操作："
+  echo "  - 流量统计依赖（grpcurl + v2ray API proto）"
+  echo "  - 服务配置（${INIT_SYSTEM}）并启动"
+  echo "  - 定时任务（流量同步 + 日志维护）"
+  echo "  - 快捷命令 s"
   pause
 }
 

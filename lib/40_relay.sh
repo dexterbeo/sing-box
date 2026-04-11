@@ -158,12 +158,18 @@ relay_add() {
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if user_manager_apply_changes "$db_json" "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
+      say "  落地地址: $ip:$relay_port"
+      say "  出站标签: $out_tag"
+      say "  加密方式: 2022-blake3-aes-128-gcm"
     else
       warn "中转节点添加失败，已返回上一级。"
     fi
   else
     if config_apply "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
+      say "  落地地址: $ip:$relay_port"
+      say "  出站标签: $out_tag"
+      say "  加密方式: 2022-blake3-aes-128-gcm"
     else
       warn "中转节点添加失败，已返回上一级。"
     fi
@@ -253,21 +259,13 @@ manage_relay_nodes() {
     local json
     json="$(config_load)"
     print_rect_title "中转节点管理"
-    local _relay_tmp
-    _relay_tmp="$(mktemp)"
-    if relay_list_table "$json" >"$_relay_tmp" && [ -s "$_relay_tmp" ]; then
-      awk -F '\t' 'NF >= 2 {print $2}' "$_relay_tmp" | while IFS= read -r relay_user; do
-        [ -n "$relay_user" ] || continue
-        relay_node="$(user_node_part "$relay_user")"
-        [ -n "$relay_node" ] || continue
-        echo "$relay_node"
-      done | sort -u | sort_node_keys_by_protocol | while IFS= read -r relay_node; do
-        echo -e "  - ${G}${relay_node}${NC}"
-      done
-    else
-      echo -e "  ${Y}当前没有中转节点。${NC}"
-    fi
-    rm -f "$_relay_tmp" >/dev/null 2>&1 || true
+    local _has_relay=0
+    while IFS= read -r relay_node; do
+      [ -n "$relay_node" ] || continue
+      _has_relay=1
+      echo -e "  - ${G}${relay_node}${NC}"
+    done < <(relay_list_table "$json" | awk -F '\t' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
+    [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"
     echo -e "  ${C}2.${NC} 删除中转"

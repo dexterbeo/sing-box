@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-11 04:38:57 UTC
+# 构建时间: 2026-04-11 04:53:36 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.8"
+SCRIPT_VERSION="5.3.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -353,11 +353,10 @@ singbox_service_active() {
 }
 
 generate_random_alpha_path() {
-  local s=""
-  while [ ${#s} -lt 7 ]; do
-    s="$(openssl rand -base64 32 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || true)"
-  done
-  echo "/$s"
+  local s
+  s="$(openssl rand -base64 32 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || true)"
+  [ ${#s} -ge 7 ] || s="$(head -c 32 /dev/urandom 2>/dev/null | tr -dc 'A-Za-z' | head -c 7 || echo "xBqLmRt")"
+  echo "/${s:0:7}"
 }
 
 normalize_ws_path() {
@@ -717,14 +716,7 @@ config_apply() {
     esac
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
-    local -a old_baks=()
-    mapfile -t old_baks < <(ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null || true)
-    if [ ${#old_baks[@]} -gt 1 ]; then
-      local _i
-      for _i in "${old_baks[@]:1}"; do
-        rm -f "$_i" >/dev/null 2>&1 || true
-      done
-    fi
+    ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
     ok "配置已应用。"
     return 0
   fi
@@ -1624,12 +1616,18 @@ relay_add() {
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if user_manager_apply_changes "$db_json" "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
+      say "  落地地址: $ip:$relay_port"
+      say "  出站标签: $out_tag"
+      say "  加密方式: 2022-blake3-aes-128-gcm"
     else
       warn "中转节点添加失败，已返回上一级。"
     fi
   else
     if config_apply "$updated_json"; then
       ok "中转节点已添加/覆盖：$relay_user"
+      say "  落地地址: $ip:$relay_port"
+      say "  出站标签: $out_tag"
+      say "  加密方式: 2022-blake3-aes-128-gcm"
     else
       warn "中转节点添加失败，已返回上一级。"
     fi
@@ -1719,21 +1717,13 @@ manage_relay_nodes() {
     local json
     json="$(config_load)"
     print_rect_title "中转节点管理"
-    local _relay_tmp
-    _relay_tmp="$(mktemp)"
-    if relay_list_table "$json" >"$_relay_tmp" && [ -s "$_relay_tmp" ]; then
-      awk -F '\t' 'NF >= 2 {print $2}' "$_relay_tmp" | while IFS= read -r relay_user; do
-        [ -n "$relay_user" ] || continue
-        relay_node="$(user_node_part "$relay_user")"
-        [ -n "$relay_node" ] || continue
-        echo "$relay_node"
-      done | sort -u | sort_node_keys_by_protocol | while IFS= read -r relay_node; do
-        echo -e "  - ${G}${relay_node}${NC}"
-      done
-    else
-      echo -e "  ${Y}当前没有中转节点。${NC}"
-    fi
-    rm -f "$_relay_tmp" >/dev/null 2>&1 || true
+    local _has_relay=0
+    while IFS= read -r relay_node; do
+      [ -n "$relay_node" ] || continue
+      _has_relay=1
+      echo -e "  - ${G}${relay_node}${NC}"
+    done < <(relay_list_table "$json" | awk -F '\t' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
+    [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"
     echo -e "  ${C}2.${NC} 删除中转"
@@ -2954,6 +2944,23 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
+    # 配额预警：显示已用 ≥90% 的用户
+    local _warnings
+    _warnings="$(echo "$db_json" | jq -r '
+      .users | to_entries[]
+      | select(.value.quota_gb > 0)
+      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
+      | (.value.quota_gb * 1073741824) as $quota
+      | select($used >= ($quota * 0.9))
+      | .key + " (" + (($used / $quota * 100) | floor | tostring) + "%)"
+    ' 2>/dev/null || true)"
+    if [ -n "$_warnings" ]; then
+      echo -e "  ${Y}[!] 流量即将耗尽:${NC}"
+      while IFS= read -r _w; do
+        echo -e "      ${Y}${_w}${NC}"
+      done <<< "$_warnings"
+      echo ""
+    fi
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"
@@ -3770,6 +3777,12 @@ install_or_update_singbox() {
   install_user_watch_cron || true
   install_log_maintain_cron || true
   show_versions
+  echo ""
+  say "已完成以下操作："
+  echo "  - 流量统计依赖（grpcurl + v2ray API proto）"
+  echo "  - 服务配置（${INIT_SYSTEM}）并启动"
+  echo "  - 定时任务（流量同步 + 日志维护）"
+  echo "  - 快捷命令 s"
   pause
 }
 
@@ -4476,6 +4489,13 @@ view_config_formatted() {
 singbox_status() {
   clear
   print_rect_title "sing-box 状态"
+  # 摘要行（统一 systemd/OpenRC 输出）
+  local _status="未知" _version="未知"
+  if singbox_service_active; then _status="${G}运行中${NC}"; else _status="${R}已停止${NC}"; fi
+  [ -x "$SINGBOX_BIN" ] && _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')" && [ -n "$_version" ] || _version="未知"
+  echo -e "  状态: ${_status}    版本: ${_version}"
+  echo ""
+  # 原始详细输出
   case "$INIT_SYSTEM" in
     systemd) systemctl status sing-box --no-pager -l || true ;;
     openrc)  rc-service sing-box status || true ;;

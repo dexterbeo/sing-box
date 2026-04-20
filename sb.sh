@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-20 14:13:47 UTC
+# 构建时间: 2026-04-20 14:51:07 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.11"
+SCRIPT_VERSION="5.3.12"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3355,6 +3355,16 @@ show_versions() {
   echo -e "${W}--------------------------${NC}"
 }
 
+# 完整性探针：所有关键组件都就位才算真正装好
+# 用于区分"版本号匹配"与"组件齐全"，避免半完成状态被误判为已安装
+is_install_complete() {
+  [ -x "$SINGBOX_BIN" ] || return 1
+  [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
+  _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
+  _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  return 0
+}
+
 # ---------- 脚本自身管理 ----------
 
 script_version_of_file() {
@@ -3494,22 +3504,33 @@ _crond_daemon_active() {
 }
 
 _ensure_crond_running() {
-  # Alpine 环境需要主动装 + 启 crond；apt 环境通常随包自启
-  if [ "$PKG_MANAGER" = "apk" ]; then
-    install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
-    case "$INIT_SYSTEM" in
-      openrc)
-        if ! _crond_daemon_active; then
-          rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
-          rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
-        fi
-        ;;
-      systemd)
-        _crond_daemon_active || { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
-        ;;
+  # 1. 确保 crontab 命令可用，不可用时按包管理器装对应包
+  if ! has_cmd crontab; then
+    case "$PKG_MANAGER" in
+      apt) install_pkg cron 2>/dev/null || install_pkg cronie 2>/dev/null || return 1 ;;
+      apk) install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || return 1 ;;
+      *) return 1 ;;
     esac
   fi
-  # 严格验证：所有环境最后都必须 daemon 已运行
+
+  # 2. 已运行直接通过
+  _crond_daemon_active && return 0
+
+  # 3. 启动 daemon（systemd / openrc 兼容 crond 和 cron 两种服务名）
+  case "$INIT_SYSTEM" in
+    systemd)
+      systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true
+      systemctl enable crond >/dev/null 2>&1 || systemctl enable cron >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
+      rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
+      ;;
+    *) return 1 ;;
+  esac
+
+  # 4. 等待 daemon 稳定后再次验证
+  sleep 1
   _crond_daemon_active
 }
 
@@ -3712,9 +3733,12 @@ install_or_update_singbox() {
     echo -e "当前版本：${G}${inst:-未知}${NC}"
     echo -e "最新版本：${G}${latest_ver}${NC}"
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
-      ok "当前已是最新版本。"
-      pause
-      return 0
+      if is_install_complete; then
+        ok "当前已是最新版本。"
+        pause
+        return 0
+      fi
+      warn "版本号匹配但部分组件缺失，将重新安装补齐。"
     fi
     if [ -n "${inst:-}" ]; then
       read -r -p "检测到新版本，是否升级？[Y/n]: " ans
@@ -3783,7 +3807,6 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  echo "$tag" > "$SINGBOX_VERSION_STAMP"
   rm -rf "$tmp_dir"
 
   if ! "$SINGBOX_BIN" version | grep -q 'with_v2ray_api'; then
@@ -3805,15 +3828,21 @@ install_or_update_singbox() {
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
   install_user_watch_cron || {
-    err "用户流量统计定时任务安装失败，请修复 cron 后重新运行安装。"
+    err "cron 定时任务安装失败：用户流量统计。"
+    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
+    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
     pause
     return 1
   }
   install_log_maintain_cron || {
-    err "日志维护定时任务安装失败，请修复 cron 后重新运行安装。"
+    err "cron 定时任务安装失败：日志维护。"
+    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
+    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
     pause
     return 1
   }
+  # 所有关键步骤成功后才写入版本 stamp（事务提交点）
+  echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
   ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
   pause

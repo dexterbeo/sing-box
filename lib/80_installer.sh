@@ -65,8 +65,8 @@ show_versions() {
   inst="$(get_installed_version)"
   cand="$(get_candidate_version)"
   echo -e "${W}-------- 版本信息 --------${NC}"
-  echo -e " Installed : ${inst:-<not installed>}"
-  echo -e " Candidate : ${cand:-<none>}"
+  echo -e " 当前版本 : ${inst:-未安装}"
+  echo -e " 最新版本 : ${cand:-无}"
   echo -e "${W}--------------------------${NC}"
 }
 
@@ -190,34 +190,72 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-_ensure_crond_running() {
-  # 仅 apk（Alpine）环境需要手动确保 crond 启动；apt 环境 cron 安装后自动运行
-  [ "$PKG_MANAGER" = "apk" ] || return 0
-  install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
+_cron_job_installed() {
+  local mark="$1"
+  has_cmd crontab || return 1
+  crontab -l 2>/dev/null | grep -Fq "$mark"
+}
+
+_crond_daemon_active() {
   case "$INIT_SYSTEM" in
-    openrc)
-      if ! rc-service crond status >/dev/null 2>&1 && ! rc-service cron status >/dev/null 2>&1; then
-        rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
-        rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
-      fi
-      ;;
     systemd)
-      systemctl is-active --quiet crond 2>/dev/null || systemctl is-active --quiet cron 2>/dev/null || \
-        { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
+      systemctl is-active --quiet crond 2>/dev/null || systemctl is-active --quiet cron 2>/dev/null
       ;;
+    openrc)
+      rc-service crond status >/dev/null 2>&1 || rc-service cron status >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
   esac
+}
+
+_ensure_crond_running() {
+  # Alpine 环境需要主动装 + 启 crond；apt 环境通常随包自启
+  if [ "$PKG_MANAGER" = "apk" ]; then
+    install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
+    case "$INIT_SYSTEM" in
+      openrc)
+        if ! _crond_daemon_active; then
+          rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
+          rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
+        fi
+        ;;
+      systemd)
+        _crond_daemon_active || { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
+        ;;
+    esac
+  fi
+  # 严格验证：所有环境最后都必须 daemon 已运行
+  _crond_daemon_active
+}
+
+cron_job_status_line() {
+  local label="$1" mark="$2"
+  local installed daemon_state
+  if _cron_job_installed "$mark"; then
+    installed="${G}已安装${NC}"
+  else
+    installed="${R}未安装${NC}"
+  fi
+  if _crond_daemon_active; then
+    daemon_state="${G}运行中${NC}"
+  else
+    daemon_state="${R}未运行${NC}"
+  fi
+  printf '  %b%s%b : %b  daemon %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
 }
 
 _install_cron_job() {
   local mark="$1" schedule="$2" cmd="$3"
-  has_cmd crontab || return 1
-  _ensure_crond_running
+  has_cmd crontab || { err "未找到 crontab 命令，请先安装 cron。"; return 1; }
+  _ensure_crond_running || { err "crond 服务未运行，无法安装定时任务。"; return 1; }
   local tmp
   tmp="$(mktemp)"
   crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
-  crontab "$tmp"
+  crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
+  _cron_job_installed "$mark" || { err "crontab 写入后验证失败：未找到 mark $mark"; return 1; }
+  return 0
 }
 
 _remove_cron_job() {
@@ -343,9 +381,7 @@ prepare_script_runtime() {
 
 install_or_update_singbox() {
   clear
-  echo -e "${B}+----------------------------------------------+${NC}"
-  echo -e "${B}|           Sing-box Installer / Updater       |${NC}"
-  echo -e "${B}+----------------------------------------------+${NC}"
+  print_rect_title "sing-box 安装/更新"
 
   ensure_deps_for_installer
 
@@ -483,8 +519,16 @@ install_or_update_singbox() {
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
-  install_user_watch_cron || true
-  install_log_maintain_cron || true
+  install_user_watch_cron || {
+    err "用户流量统计定时任务安装失败，请修复 cron 后重新运行安装。"
+    pause
+    return 1
+  }
+  install_log_maintain_cron || {
+    err "日志维护定时任务安装失败，请修复 cron 后重新运行安装。"
+    pause
+    return 1
+  }
   show_versions
   ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
   pause

@@ -284,7 +284,7 @@ user_manage_permission_menu() {
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
   done
-  read -r -p "请输入编号（多个用 + 连接，回车返回）: " raw
+  read -r -p "请输入编号（多个用 + 连接，回车返回上一级）: " raw
   [ -z "${raw:-}" ] && return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
@@ -451,7 +451,7 @@ user_manage_single() {
     echo "  4. 手动重置流量"
     echo "  5. 手动添加流量（对齐总量）"
     echo "  6. 查看用户信息"
-    echo "  0. 返回"
+    echo "  0. 返回上一级"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1)
@@ -516,7 +516,7 @@ user_select_and_manage_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择用户（回车返回）: " ans
+  read -r -p "请选择用户（回车返回上一级）: " ans
   [ -z "${ans:-}" ] && return 0
   if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
     warn "无效输入：$ans"
@@ -546,7 +546,7 @@ user_delete_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回）: " ans
+  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回上一级）: " ans
   [ -z "${ans:-}" ] && return 0
   mapfile -t picks < <(parse_plus_selections "$ans")
   [ ${#picks[@]} -eq 0 ] && { warn "未选择任何用户。"; pause; return 1; }

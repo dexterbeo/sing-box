@@ -595,23 +595,19 @@ view_config_formatted() {
   pause
 }
 
-singbox_status() {
-  clear
-  print_rect_title "sing-box 状态"
-  # 摘要行（统一 systemd/OpenRC 输出）
-  local _status="未知" _version="未知"
-  if singbox_service_active; then _status="${G}运行中${NC}"; else _status="${R}已停止${NC}"; fi
-  [ -x "$SINGBOX_BIN" ] && _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')" && [ -n "$_version" ] || _version="未知"
-  echo -e "  状态: ${_status}    版本: ${_version}"
-  echo ""
-  # 原始详细输出
-  case "$INIT_SYSTEM" in
-    systemd) systemctl status sing-box --no-pager -l || true ;;
-    openrc)  rc-service sing-box status || true ;;
-    *) warn "未识别的 init 系统，无法查询状态。" ;;
-  esac
-  echo ""
-  pause
+singbox_status_summary() {
+  local _status _version
+  if singbox_service_active; then
+    _status="${G}运行中${NC}"
+  else
+    _status="${R}已停止${NC}"
+  fi
+  _version=""
+  if [ -x "$SINGBOX_BIN" ]; then
+    _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"
+  fi
+  [ -n "$_version" ] || _version="未知"
+  printf '  %bsing-box%b : %b  版本 %b%s%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC"
 }
 
 singbox_start() {
@@ -619,7 +615,6 @@ singbox_start() {
   print_rect_title "启动 sing-box"
   case "$INIT_SYSTEM" in
     systemd)
-      say "执行：systemctl start sing-box"
       if systemctl start sing-box; then
         sleep 1
         if systemctl is-active --quiet sing-box 2>/dev/null; then
@@ -632,7 +627,6 @@ singbox_start() {
       fi
       ;;
     openrc)
-      say "执行：rc-service sing-box start"
       if rc-service sing-box start; then
         sleep 1
         if rc-service sing-box status >/dev/null 2>&1; then
@@ -655,11 +649,9 @@ singbox_stop() {
   print_rect_title "停止 sing-box"
   case "$INIT_SYSTEM" in
     systemd)
-      say "执行：systemctl stop sing-box"
       systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     openrc)
-      say "执行：rc-service sing-box stop"
       rc-service sing-box stop && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     *) err "未识别的 init 系统，无法停止 sing-box。" ;;
@@ -672,21 +664,23 @@ system_tools_menu() {
   while true; do
     clear
     print_rect_title "系统工具"
-    echo -e "  ${C}1.${NC} 查看 sing-box 状态"
-    echo -e "  ${C}2.${NC} 查看 sing-box 实时日志"
-    echo -e "  ${C}3.${NC} 启动 sing-box"
-    echo -e "  ${C}4.${NC} 停止 sing-box"
-    echo -e "  ${C}5.${NC} 一键校准系统时间"
-    echo -e "  ${C}6.${NC} 规范化接管旧配置"
+    singbox_status_summary
+    cron_job_status_line "流量统计" "$USER_WATCH_CRON_MARK"
+    cron_job_status_line "日志维护" "$LOG_MAINTAIN_CRON_MARK"
+    echo -e "${B}----------------------------------------${NC}"
+    echo -e "  ${C}1.${NC} 查看 sing-box 实时日志"
+    echo -e "  ${C}2.${NC} 启动 sing-box"
+    echo -e "  ${C}3.${NC} 停止 sing-box"
+    echo -e "  ${C}4.${NC} 一键校准系统时间"
+    echo -e "  ${C}5.${NC} 规范化接管旧配置"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) singbox_status ;;
-      2) view_realtime_log ;;
-      3) singbox_start ;;
-      4) singbox_stop ;;
-      5) sync_system_time_chrony ;;
-      6) normalize_takeover ;;
+      1) view_realtime_log ;;
+      2) singbox_start ;;
+      3) singbox_stop ;;
+      4) sync_system_time_chrony ;;
+      5) normalize_takeover ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

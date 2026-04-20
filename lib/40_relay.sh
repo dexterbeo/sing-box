@@ -202,7 +202,7 @@ relay_delete() {
     echo -e " [$i] ${relay_user}"
     i=$((i+1))
   done
-  read -r -p "请输入要删除的编号（支持 1+2+3，回车返回）: " choice
+  read -r -p "请输入要删除的编号（支持 1+2+3，回车返回上一级）: " choice
   [ -z "${choice:-}" ] && return 0
   mapfile -t picks < <(parse_plus_selections "$choice")
   [ ${#picks[@]} -eq 0 ] && { warn "未选择任何条目。"; pause; return 1; }

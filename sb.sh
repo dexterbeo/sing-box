@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-11 05:06:46 UTC
+# 构建时间: 2026-04-20 14:13:47 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.10"
+SCRIPT_VERSION="5.3.11"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -183,6 +183,25 @@ declare -A PROTO_TRANSPORT=(
 # ====================================================
 # 共享 jq 模板 — 消除跨模块重复定义
 # 使用方式：echo "$json" | jq "${JQ_DETECT_PROTOCOL} ..."
+# ====================================================
+#
+# 【项目标准】jq 多字段输出与 bash read 配合规范
+# ----------------------------------------------------
+# 当需要从 jq 输出中用 read 拆分多个字段，且任一字段可能为空时，
+# 必须使用 \x01 (SOH) 作为分隔符，而不是 \t (@tsv)：
+#
+#   ✔ 正确：
+#     jq -r '[...] | join("\u0001")' | {
+#       IFS=$'\x01' read -r a b c d
+#     }
+#
+#   ✘ 错误（已知 bug 源，v5.3.5 修复过）：
+#     jq -r '[...] | @tsv' | {
+#       IFS=$'\t' read -r a b c d   # 连续 tab 被折叠，空字段导致字段左移
+#     }
+#
+# 原因：bash 默认 IFS 包含 tab，遇到连续 tab 会折叠为单个分隔符。
+#       \x01 不在默认 IFS 中，连续 \x01 会严格保留空字段位置。
 # ====================================================
 
 # 协议检测：将 inbound 对象映射为协议标签（唯一定义）
@@ -1656,7 +1675,7 @@ relay_delete() {
     echo -e " [$i] ${relay_user}"
     i=$((i+1))
   done
-  read -r -p "请输入要删除的编号（支持 1+2+3，回车返回）: " choice
+  read -r -p "请输入要删除的编号（支持 1+2+3，回车返回上一级）: " choice
   [ -z "${choice:-}" ] && return 0
   mapfile -t picks < <(parse_plus_selections "$choice")
   [ ${#picks[@]} -eq 0 ] && { warn "未选择任何条目。"; pause; return 1; }
@@ -2621,7 +2640,7 @@ user_manage_permission_menu() {
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
   done
-  read -r -p "请输入编号（多个用 + 连接，回车返回）: " raw
+  read -r -p "请输入编号（多个用 + 连接，回车返回上一级）: " raw
   [ -z "${raw:-}" ] && return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
@@ -2788,7 +2807,7 @@ user_manage_single() {
     echo "  4. 手动重置流量"
     echo "  5. 手动添加流量（对齐总量）"
     echo "  6. 查看用户信息"
-    echo "  0. 返回"
+    echo "  0. 返回上一级"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1)
@@ -2853,7 +2872,7 @@ user_select_and_manage_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择用户（回车返回）: " ans
+  read -r -p "请选择用户（回车返回上一级）: " ans
   [ -z "${ans:-}" ] && return 0
   if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
     warn "无效输入：$ans"
@@ -2883,7 +2902,7 @@ user_delete_menu() {
     echo " [$i] $username"
     i=$((i+1))
   done
-  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回）: " ans
+  read -r -p "请选择要删除的用户（支持 1+2+3，回车返回上一级）: " ans
   [ -z "${ans:-}" ] && return 0
   mapfile -t picks < <(parse_plus_selections "$ans")
   [ ${#picks[@]} -eq 0 ] && { warn "未选择任何用户。"; pause; return 1; }
@@ -3151,10 +3170,12 @@ export_configs() {
             echo -e "\n${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: anytls, server: $ip, port: $port, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
             echo ""
-            echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
+            echo -e " Quantumult X: anytls=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, udp-relay=true, tag=${out_name}"
             echo ""
             v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
           } >> "$target_file"
           ;;
         shadowsocks)
@@ -3166,10 +3187,10 @@ export_configs() {
             echo ""
             echo -e " Quantumult X: shadowsocks=$ip:${port}, method=${method}, password=${pw_out}, udp-relay=true, tag=${out_name}"
             echo ""
-            echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
-            echo ""
             v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
           } >> "$target_file"
           ;;
         trojan)
@@ -3180,10 +3201,10 @@ export_configs() {
             echo ""
             echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=false, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
-            echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
-            echo ""
             v2rayn_link="$(build_v2rayn_trojan_link "$ip" "$port" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
           } >> "$target_file"
           ;;
         vmess-ws)
@@ -3194,10 +3215,10 @@ export_configs() {
             echo ""
             echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
-            echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
-            echo ""
             v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
           } >> "$target_file"
           ;;
         vless-ws)
@@ -3219,10 +3240,10 @@ export_configs() {
             echo -e "\n${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: tuic, server: $ip, port: $port, uuid: $uuid, password: $pass, alpn: [h3], disable-sni: false, reduce-rtt: false, udp-relay-mode: native, congestion-controller: bbr, skip-cert-verify: true, sni: $sni}"
             echo ""
-            echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
-            echo ""
             v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
           } >> "$target_file"
           ;;
       esac
@@ -3329,8 +3350,8 @@ show_versions() {
   inst="$(get_installed_version)"
   cand="$(get_candidate_version)"
   echo -e "${W}-------- 版本信息 --------${NC}"
-  echo -e " Installed : ${inst:-<not installed>}"
-  echo -e " Candidate : ${cand:-<none>}"
+  echo -e " 当前版本 : ${inst:-未安装}"
+  echo -e " 最新版本 : ${cand:-无}"
   echo -e "${W}--------------------------${NC}"
 }
 
@@ -3454,34 +3475,72 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-_ensure_crond_running() {
-  # 仅 apk（Alpine）环境需要手动确保 crond 启动；apt 环境 cron 安装后自动运行
-  [ "$PKG_MANAGER" = "apk" ] || return 0
-  install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
+_cron_job_installed() {
+  local mark="$1"
+  has_cmd crontab || return 1
+  crontab -l 2>/dev/null | grep -Fq "$mark"
+}
+
+_crond_daemon_active() {
   case "$INIT_SYSTEM" in
-    openrc)
-      if ! rc-service crond status >/dev/null 2>&1 && ! rc-service cron status >/dev/null 2>&1; then
-        rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
-        rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
-      fi
-      ;;
     systemd)
-      systemctl is-active --quiet crond 2>/dev/null || systemctl is-active --quiet cron 2>/dev/null || \
-        { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
+      systemctl is-active --quiet crond 2>/dev/null || systemctl is-active --quiet cron 2>/dev/null
       ;;
+    openrc)
+      rc-service crond status >/dev/null 2>&1 || rc-service cron status >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
   esac
+}
+
+_ensure_crond_running() {
+  # Alpine 环境需要主动装 + 启 crond；apt 环境通常随包自启
+  if [ "$PKG_MANAGER" = "apk" ]; then
+    install_pkg cronie 2>/dev/null || install_pkg dcron 2>/dev/null || true
+    case "$INIT_SYSTEM" in
+      openrc)
+        if ! _crond_daemon_active; then
+          rc-service crond start >/dev/null 2>&1 || rc-service cron start >/dev/null 2>&1 || true
+          rc-update add crond default >/dev/null 2>&1 || rc-update add cron default >/dev/null 2>&1 || true
+        fi
+        ;;
+      systemd)
+        _crond_daemon_active || { systemctl start crond >/dev/null 2>&1 || systemctl start cron >/dev/null 2>&1 || true; }
+        ;;
+    esac
+  fi
+  # 严格验证：所有环境最后都必须 daemon 已运行
+  _crond_daemon_active
+}
+
+cron_job_status_line() {
+  local label="$1" mark="$2"
+  local installed daemon_state
+  if _cron_job_installed "$mark"; then
+    installed="${G}已安装${NC}"
+  else
+    installed="${R}未安装${NC}"
+  fi
+  if _crond_daemon_active; then
+    daemon_state="${G}运行中${NC}"
+  else
+    daemon_state="${R}未运行${NC}"
+  fi
+  printf '  %b%s%b : %b  daemon %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
 }
 
 _install_cron_job() {
   local mark="$1" schedule="$2" cmd="$3"
-  has_cmd crontab || return 1
-  _ensure_crond_running
+  has_cmd crontab || { err "未找到 crontab 命令，请先安装 cron。"; return 1; }
+  _ensure_crond_running || { err "crond 服务未运行，无法安装定时任务。"; return 1; }
   local tmp
   tmp="$(mktemp)"
   crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
-  crontab "$tmp"
+  crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
+  _cron_job_installed "$mark" || { err "crontab 写入后验证失败：未找到 mark $mark"; return 1; }
+  return 0
 }
 
 _remove_cron_job() {
@@ -3607,9 +3666,7 @@ prepare_script_runtime() {
 
 install_or_update_singbox() {
   clear
-  echo -e "${B}+----------------------------------------------+${NC}"
-  echo -e "${B}|           Sing-box Installer / Updater       |${NC}"
-  echo -e "${B}+----------------------------------------------+${NC}"
+  print_rect_title "sing-box 安装/更新"
 
   ensure_deps_for_installer
 
@@ -3747,8 +3804,16 @@ install_or_update_singbox() {
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
-  install_user_watch_cron || true
-  install_log_maintain_cron || true
+  install_user_watch_cron || {
+    err "用户流量统计定时任务安装失败，请修复 cron 后重新运行安装。"
+    pause
+    return 1
+  }
+  install_log_maintain_cron || {
+    err "日志维护定时任务安装失败，请修复 cron 后重新运行安装。"
+    pause
+    return 1
+  }
   show_versions
   ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
   pause
@@ -4454,23 +4519,19 @@ view_config_formatted() {
   pause
 }
 
-singbox_status() {
-  clear
-  print_rect_title "sing-box 状态"
-  # 摘要行（统一 systemd/OpenRC 输出）
-  local _status="未知" _version="未知"
-  if singbox_service_active; then _status="${G}运行中${NC}"; else _status="${R}已停止${NC}"; fi
-  [ -x "$SINGBOX_BIN" ] && _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')" && [ -n "$_version" ] || _version="未知"
-  echo -e "  状态: ${_status}    版本: ${_version}"
-  echo ""
-  # 原始详细输出
-  case "$INIT_SYSTEM" in
-    systemd) systemctl status sing-box --no-pager -l || true ;;
-    openrc)  rc-service sing-box status || true ;;
-    *) warn "未识别的 init 系统，无法查询状态。" ;;
-  esac
-  echo ""
-  pause
+singbox_status_summary() {
+  local _status _version
+  if singbox_service_active; then
+    _status="${G}运行中${NC}"
+  else
+    _status="${R}已停止${NC}"
+  fi
+  _version=""
+  if [ -x "$SINGBOX_BIN" ]; then
+    _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"
+  fi
+  [ -n "$_version" ] || _version="未知"
+  printf '  %bsing-box%b : %b  版本 %b%s%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC"
 }
 
 singbox_start() {
@@ -4478,7 +4539,6 @@ singbox_start() {
   print_rect_title "启动 sing-box"
   case "$INIT_SYSTEM" in
     systemd)
-      say "执行：systemctl start sing-box"
       if systemctl start sing-box; then
         sleep 1
         if systemctl is-active --quiet sing-box 2>/dev/null; then
@@ -4491,7 +4551,6 @@ singbox_start() {
       fi
       ;;
     openrc)
-      say "执行：rc-service sing-box start"
       if rc-service sing-box start; then
         sleep 1
         if rc-service sing-box status >/dev/null 2>&1; then
@@ -4514,11 +4573,9 @@ singbox_stop() {
   print_rect_title "停止 sing-box"
   case "$INIT_SYSTEM" in
     systemd)
-      say "执行：systemctl stop sing-box"
       systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     openrc)
-      say "执行：rc-service sing-box stop"
       rc-service sing-box stop && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     *) err "未识别的 init 系统，无法停止 sing-box。" ;;
@@ -4531,21 +4588,23 @@ system_tools_menu() {
   while true; do
     clear
     print_rect_title "系统工具"
-    echo -e "  ${C}1.${NC} 查看 sing-box 状态"
-    echo -e "  ${C}2.${NC} 查看 sing-box 实时日志"
-    echo -e "  ${C}3.${NC} 启动 sing-box"
-    echo -e "  ${C}4.${NC} 停止 sing-box"
-    echo -e "  ${C}5.${NC} 一键校准系统时间"
-    echo -e "  ${C}6.${NC} 规范化接管旧配置"
+    singbox_status_summary
+    cron_job_status_line "流量统计" "$USER_WATCH_CRON_MARK"
+    cron_job_status_line "日志维护" "$LOG_MAINTAIN_CRON_MARK"
+    echo -e "${B}----------------------------------------${NC}"
+    echo -e "  ${C}1.${NC} 查看 sing-box 实时日志"
+    echo -e "  ${C}2.${NC} 启动 sing-box"
+    echo -e "  ${C}3.${NC} 停止 sing-box"
+    echo -e "  ${C}4.${NC} 一键校准系统时间"
+    echo -e "  ${C}5.${NC} 规范化接管旧配置"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) singbox_status ;;
-      2) view_realtime_log ;;
-      3) singbox_start ;;
-      4) singbox_stop ;;
-      5) sync_system_time_chrony ;;
-      6) normalize_takeover ;;
+      1) view_realtime_log ;;
+      2) singbox_start ;;
+      3) singbox_stop ;;
+      4) sync_system_time_chrony ;;
+      5) normalize_takeover ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

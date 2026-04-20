@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-20 14:51:07 UTC
+# 构建时间: 2026-04-20 15:09:15 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.12"
+SCRIPT_VERSION="5.3.13"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3552,8 +3552,9 @@ cron_job_status_line() {
 
 _install_cron_job() {
   local mark="$1" schedule="$2" cmd="$3"
-  has_cmd crontab || { err "未找到 crontab 命令，请先安装 cron。"; return 1; }
-  _ensure_crond_running || { err "crond 服务未运行，无法安装定时任务。"; return 1; }
+  # 先让 _ensure_crond_running 负责装 cron 包 + 启动 daemon
+  _ensure_crond_running || { err "cron 服务不可用（未能自动安装或启动 crond）。"; return 1; }
+  # 到这里 crontab 命令必然可用（_ensure_crond_running 会主动安装）
   local tmp
   tmp="$(mktemp)"
   crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
@@ -3738,9 +3739,12 @@ install_or_update_singbox() {
         pause
         return 0
       fi
-      warn "版本号匹配但部分组件缺失，将重新安装补齐。"
-    fi
-    if [ -n "${inst:-}" ]; then
+      warn "版本号匹配但部分组件缺失。"
+      read -r -p "是否重新安装以补齐组件？[Y/n]: " ans
+      case "${ans:-Y}" in
+        [Nn]*) return 0 ;;
+      esac
+    elif [ -n "${inst:-}" ]; then
       read -r -p "检测到新版本，是否升级？[Y/n]: " ans
       case "${ans:-Y}" in
         [Nn]*) return 0 ;;

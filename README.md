@@ -25,7 +25,7 @@ apk add wget bash && wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/s
 
 ### 1. 用户管理
 支持多用户独立计费与权限控制：
-* 可添加多个用户，并为其分配指定的节点权限（全部节点或特定节点）。
+* 可添加多个用户，并为其分配指定的节点权限。
 * 支持设置用户流量限制，总量=上行流量+下行流量+手动校正流量（经sing-box的流量总量，属于服务器的单向流量）。
 * 支持自定义流量重置日（如每月特定日期或月底）。
 * 支持设置套餐到期日，到期自动停用。
@@ -43,7 +43,7 @@ apk add wget bash && wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/s
 
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
-* 支持一键导出 Clash、Quantumult X、Surge、v2rayN 等格式的节点配置。
+* 支持一键导出 Clash、Quantumult X、v2rayN、Surge 等格式的节点配置。
 
 ---
 

@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.13"
+SCRIPT_VERSION="5.3.14"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -32,6 +32,7 @@ SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
 META_FILE="/etc/sing-box-manager/meta.json"
+SB_LOCK_FILE="/var/lock/singbox-manager.lock"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'

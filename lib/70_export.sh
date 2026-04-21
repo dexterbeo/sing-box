@@ -70,8 +70,11 @@ build_v2rayn_vless_ws_link() {
 
 build_v2rayn_anytls_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  # password 不做 url_encode：AnyTLS 客户端（mihomo/QX）实际未对 userinfo 做
+  # URL 解码，编码后的 %2B/%3D 会被当成字面字符导致密码不匹配。
+  # base64 字符集（A-Za-z0-9+/=）在 URL userinfo 中无歧义，可直接使用。
   printf 'anytls://%s@%s:%s?sni=%s&fp=chrome&alpn=%s&allowInsecure=1#%s' \
-    "$(url_encode "$password")" "$server" "$port" \
+    "$password" "$server" "$port" \
     "$(url_encode "$sni")" \
     "$(url_encode "h2,http/1.1")" \
     "$(url_encode "$name")"

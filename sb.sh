@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-20 15:09:15 UTC
+# 构建时间: 2026-04-21 04:26:53 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.13"
+SCRIPT_VERSION="5.3.14"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -42,6 +42,7 @@ SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
 META_FILE="/etc/sing-box-manager/meta.json"
+SB_LOCK_FILE="/var/lock/singbox-manager.lock"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'
@@ -675,6 +676,30 @@ enable_now_singbox_safe() {
 }
 
 config_apply() {
+  # 并发保护：通过 _CONFIG_LOCK_HELD 哨兵防止重入死锁
+  # - 交互侧（菜单）首次进入：阻塞等待 lock
+  # - cron 的 user_watch_run 已持锁时，内部间接调用 config_apply 会命中哨兵，跳过加锁直接执行
+  if [ "${_CONFIG_LOCK_HELD:-0}" = "1" ]; then
+    _config_apply_body "$@"
+    return $?
+  fi
+  local _lock_fd _rc=0
+  if exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null; then
+    flock "$_lock_fd"
+    _CONFIG_LOCK_HELD=1
+    _config_apply_body "$@"
+    _rc=$?
+    _CONFIG_LOCK_HELD=0
+    exec {_lock_fd}>&- 2>/dev/null || true
+  else
+    # 锁文件不可创建时降级为无锁模式（不阻塞功能）
+    _config_apply_body "$@"
+    _rc=$?
+  fi
+  return $_rc
+}
+
+_config_apply_body() {
   local json="$1"
   local normalized
   normalized="$(config_normalize "$json")"
@@ -763,6 +788,8 @@ config_reset() {
 }
 
 init_manager_env() {
+  # 幂等哨兵：首次执行后标记，避免菜单循环重复跑 require_root/has_cmd/磁盘读
+  [ "${_MANAGER_ENV_READY:-0}" = "1" ] && return 0
   require_root
   has_cmd jq || { err "未找到 jq，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
   has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
@@ -770,6 +797,7 @@ init_manager_env() {
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
   [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
   config_ensure_exists
+  _MANAGER_ENV_READY=1
 }
 
 # >>>>>>>>> END MODULE: 10_config.sh <<<<<<<<<<<
@@ -2330,10 +2358,13 @@ apply_automatic_user_controls() {
 user_watch_run() {
   # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
   local lock_fd
-  exec {lock_fd}>/var/lock/singbox-manager.lock || return 0
+  exec {lock_fd}>"$SB_LOCK_FILE" || return 0
   flock -n "$lock_fd" || return 0
-  init_user_manager_if_needed >/dev/null 2>&1 || { exec {lock_fd}>&-; return 0; }
+  # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
+  _CONFIG_LOCK_HELD=1
+  init_user_manager_if_needed >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
   apply_automatic_user_controls >/dev/null 2>&1 || true
+  _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
 }
 
@@ -3047,8 +3078,11 @@ build_v2rayn_vless_ws_link() {
 
 build_v2rayn_anytls_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  # password 不做 url_encode：AnyTLS 客户端（mihomo/QX）实际未对 userinfo 做
+  # URL 解码，编码后的 %2B/%3D 会被当成字面字符导致密码不匹配。
+  # base64 字符集（A-Za-z0-9+/=）在 URL userinfo 中无歧义，可直接使用。
   printf 'anytls://%s@%s:%s?sni=%s&fp=chrome&alpn=%s&allowInsecure=1#%s' \
-    "$(url_encode "$password")" "$server" "$port" \
+    "$password" "$server" "$port" \
     "$(url_encode "$sni")" \
     "$(url_encode "h2,http/1.1")" \
     "$(url_encode "$name")"

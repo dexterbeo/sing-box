@@ -226,10 +226,13 @@ apply_automatic_user_controls() {
 user_watch_run() {
   # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
   local lock_fd
-  exec {lock_fd}>/var/lock/singbox-manager.lock || return 0
+  exec {lock_fd}>"$SB_LOCK_FILE" || return 0
   flock -n "$lock_fd" || return 0
-  init_user_manager_if_needed >/dev/null 2>&1 || { exec {lock_fd}>&-; return 0; }
+  # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
+  _CONFIG_LOCK_HELD=1
+  init_user_manager_if_needed >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
   apply_automatic_user_controls >/dev/null 2>&1 || true
+  _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
 }
 

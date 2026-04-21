@@ -1,4 +1,4 @@
-# Sing-box 多用户与中转管理脚本
+# Sing-box 多用户与管理脚本
 
 这是一个基于原版 Sing-box 逻辑的一键管理脚本，专为多用户管理场景设计，自编译版本支持 v2ray_api 流量统计。
 
@@ -13,7 +13,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 ```
 **Alpine Linux：**
 ```bash
-apk add wget bash && wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && bash sb.sh
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && bash sb.sh
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。

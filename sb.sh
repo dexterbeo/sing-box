@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-21 04:26:53 UTC
+# 构建时间: 2026-04-21 04:55:57 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.14"
+SCRIPT_VERSION="5.3.15"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -684,13 +684,17 @@ config_apply() {
     return $?
   fi
   local _lock_fd _rc=0
-  if exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null; then
+  # 注意：exec 行的尾部重定向是永久作用于当前 shell 的，不能写成
+  # `exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null`（会把整个 shell 的
+  # stderr 永久关闭到 /dev/null，后续 err/warn/read -p 提示全丢失）。
+  # 必须用命令组 { ... } 2>/dev/null，把重定向锚定在组作用域内。
+  if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
     flock "$_lock_fd"
     _CONFIG_LOCK_HELD=1
     _config_apply_body "$@"
     _rc=$?
     _CONFIG_LOCK_HELD=0
-    exec {_lock_fd}>&- 2>/dev/null || true
+    { exec {_lock_fd}>&-; } 2>/dev/null || true
   else
     # 锁文件不可创建时降级为无锁模式（不阻塞功能）
     _config_apply_body "$@"

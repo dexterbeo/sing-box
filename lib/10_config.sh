@@ -78,6 +78,14 @@ config_ensure_exists() {
   fi
 }
 
+ensure_manager_file_permissions() {
+  mkdir -p /etc/sing-box "$(dirname "$USER_DB_FILE")" "$(dirname "$META_FILE")"
+  chmod 700 /etc/sing-box "$(dirname "$USER_DB_FILE")" "$(dirname "$META_FILE")" 2>/dev/null || true
+  [ -e "$CONFIG_FILE" ] && chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  [ -e "$USER_DB_FILE" ] && chmod 600 "$USER_DB_FILE" 2>/dev/null || true
+  [ -e "$META_FILE" ] && chmod 600 "$META_FILE" 2>/dev/null || true
+}
+
 check_config_or_print() {
   if ! has_cmd sing-box; then
     err "未找到 sing-box 命令。请先安装。"
@@ -88,7 +96,6 @@ check_config_or_print() {
     return 1
   fi
   if sing-box check -c "$CONFIG_FILE" >/dev/null 2>&1; then
-    ok "配置校验通过：sing-box check -c $CONFIG_FILE"
     return 0
   fi
   err "配置校验失败：sing-box check -c $CONFIG_FILE"
@@ -113,7 +120,7 @@ restart_singbox_safe() {
       return 1
       ;;
   esac
-  ok "sing-box 已重启。"
+  [ "${_RESTART_SINGBOX_QUIET_OK:-0}" = "1" ] || ok "sing-box 已重启。"
 }
 
 enable_now_singbox_safe() {
@@ -137,15 +144,14 @@ enable_now_singbox_safe() {
   ok "sing-box 已启用自启并启动。"
 }
 
-config_apply() {
-  # 并发保护：通过 _CONFIG_LOCK_HELD 哨兵防止重入死锁
-  # - 交互侧（菜单）首次进入：阻塞等待 lock
-  # - cron 的 user_watch_run 已持锁时，内部间接调用 config_apply 会命中哨兵，跳过加锁直接执行
-  if [ "${_CONFIG_LOCK_HELD:-0}" = "1" ]; then
-    _config_apply_body "$@"
-    return $?
-  fi
+with_manager_lock() {
   local _lock_fd _rc=0
+
+  # 并发保护：通过 _CONFIG_LOCK_HELD 哨兵防止重入死锁
+  if [ "${_CONFIG_LOCK_HELD:-0}" = "1" ]; then
+    if "$@"; then return 0; else return $?; fi
+  fi
+
   # 注意：exec 行的尾部重定向是永久作用于当前 shell 的，不能写成
   # `exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null`（会把整个 shell 的
   # stderr 永久关闭到 /dev/null，后续 err/warn/read -p 提示全丢失）。
@@ -153,16 +159,22 @@ config_apply() {
   if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
     flock "$_lock_fd"
     _CONFIG_LOCK_HELD=1
-    _config_apply_body "$@"
-    _rc=$?
+    if "$@"; then _rc=0; else _rc=$?; fi
     _CONFIG_LOCK_HELD=0
     { exec {_lock_fd}>&-; } 2>/dev/null || true
   else
     # 锁文件不可创建时降级为无锁模式（不阻塞功能）
-    _config_apply_body "$@"
-    _rc=$?
+    if "$@"; then _rc=0; else _rc=$?; fi
   fi
   return $_rc
+}
+
+config_apply() {
+  with_manager_lock _config_apply_body "$@"
+}
+
+config_apply_no_usage_sync() {
+  _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$@"
 }
 
 _config_apply_body() {
@@ -183,7 +195,9 @@ _config_apply_body() {
     return 1
   fi
 
-  sync_user_usage_counters || true
+  if [ "${_CONFIG_SKIP_USAGE_SYNC:-0}" != "1" ]; then
+    sync_user_usage_counters || true
+  fi
 
   local tmp_file
   tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
@@ -224,7 +238,7 @@ _config_apply_body() {
   mv -f "$tmp_file" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if restart_singbox_safe; then
+  if _RESTART_SINGBOX_QUIET_OK=1 restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  rc-update add sing-box default >/dev/null 2>&1 || true ;;
@@ -232,7 +246,7 @@ _config_apply_body() {
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
     ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
-    ok "配置已应用。"
+    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已应用。"
     return 0
   fi
 
@@ -272,5 +286,6 @@ init_manager_env() {
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
   [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
   config_ensure_exists
+  ensure_manager_file_permissions
   _MANAGER_ENV_READY=1
 }

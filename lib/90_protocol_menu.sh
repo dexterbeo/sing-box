@@ -88,7 +88,7 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("")')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("\u0001")')
     mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
@@ -406,29 +406,32 @@ protocol_install_menu() {
   done
 
   updated_json="$(route_rebuild "$updated_json")"
+  local _install_ok=0
   if user_db_exists; then
     local db_json node_key
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
-      warn "核心模块安装/更新失败，已返回上一级。"
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+      _install_ok=1
     else
-      local i
-      for i in "${!reality_meta_tags[@]}"; do
-        meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-      done
+      warn "核心模块安装/更新失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
-      warn "核心模块安装/更新失败，已返回上一级。"
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      _install_ok=1
     else
-      local i
-      for i in "${!reality_meta_tags[@]}"; do
-        meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-      done
+      warn "核心模块安装/更新失败，已返回上一级。"
     fi
+  fi
+  if [ "$_install_ok" -eq 1 ]; then
+    local i
+    for i in "${!reality_meta_tags[@]}"; do
+      meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
+    done
+    ok "核心模块已安装/更新。"
   fi
   pause
   return 0
@@ -501,14 +504,15 @@ protocol_remove_menu() {
   local _apply_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
-    if user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _apply_ok=1
     else
       warn "核心模块卸载失败，已返回上一级。"
     fi
   else
-    if config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
       _apply_ok=1
     else
       warn "核心模块卸载失败，已返回上一级。"
@@ -519,6 +523,7 @@ protocol_remove_menu() {
       rm -f "$_f" >/dev/null 2>&1 || true
     done
   fi
+  [ "$_apply_ok" -eq 1 ] && ok "核心模块已卸载。"
   pause
   return 0
 }

@@ -148,7 +148,7 @@ choose_tls_domain() {
     1)
       read -r -p "请输入${proto_label}域名: " manual
       if [ -z "${manual:-}" ]; then
-        warn "[WARN] 输入无效，已返回上一级。"
+        warn "输入无效，已返回上一级。"
         pause >&2
         return 1
       fi

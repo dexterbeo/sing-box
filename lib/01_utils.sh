@@ -53,7 +53,7 @@ pkg_update_once() {
 
 install_pkg() {
   local pkg="$1"
-  pkg_installed "$pkg" && { ok "依赖已存在: $pkg"; return 0; }
+  pkg_installed "$pkg" && return 0
   pkg_update_once
   say "安装依赖: $pkg"
   case "$PKG_MANAGER" in

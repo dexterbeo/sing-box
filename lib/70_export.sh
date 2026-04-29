@@ -131,7 +131,7 @@ export_configs() {
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
   IFS=$'\x01' read -r ip ws_domain vm_domain < <(
-    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("")'
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("\u0001")'
   )
   relay_users_nl="$(relay_list_table "$json" | awk -F '\x01' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 

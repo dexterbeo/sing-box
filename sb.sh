@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-29 14:25:47 UTC
+# 构建时间: 2026-04-29 15:55:37 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.1"
+SCRIPT_VERSION="5.4.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -275,8 +275,8 @@ sort_node_keys_by_protocol() {
   done | sort -t$'\t' -k1,1 -k2,2 | cut -f2
 }
 
-# 从 stdin 读取 TSV 行，按指定字段的协议顺序排序
-# 用法：some_command | sort_tsv_by_protocol 1  （按第1列排序）
+# 从 stdin 读取 SOH(\x01) 分隔行，按指定字段的协议顺序排序
+# 保留旧函数名以兼容已有调用；用法：some_command | sort_tsv_by_protocol 1
 sort_tsv_by_protocol() {
   local field="${1:-1}"
   while IFS= read -r line; do
@@ -344,7 +344,7 @@ pkg_update_once() {
 
 install_pkg() {
   local pkg="$1"
-  pkg_installed "$pkg" && { ok "依赖已存在: $pkg"; return 0; }
+  pkg_installed "$pkg" && return 0
   pkg_update_once
   say "安装依赖: $pkg"
   case "$PKG_MANAGER" in
@@ -615,6 +615,14 @@ config_ensure_exists() {
   fi
 }
 
+ensure_manager_file_permissions() {
+  mkdir -p /etc/sing-box "$(dirname "$USER_DB_FILE")" "$(dirname "$META_FILE")"
+  chmod 700 /etc/sing-box "$(dirname "$USER_DB_FILE")" "$(dirname "$META_FILE")" 2>/dev/null || true
+  [ -e "$CONFIG_FILE" ] && chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  [ -e "$USER_DB_FILE" ] && chmod 600 "$USER_DB_FILE" 2>/dev/null || true
+  [ -e "$META_FILE" ] && chmod 600 "$META_FILE" 2>/dev/null || true
+}
+
 check_config_or_print() {
   if ! has_cmd sing-box; then
     err "未找到 sing-box 命令。请先安装。"
@@ -625,7 +633,6 @@ check_config_or_print() {
     return 1
   fi
   if sing-box check -c "$CONFIG_FILE" >/dev/null 2>&1; then
-    ok "配置校验通过：sing-box check -c $CONFIG_FILE"
     return 0
   fi
   err "配置校验失败：sing-box check -c $CONFIG_FILE"
@@ -650,7 +657,7 @@ restart_singbox_safe() {
       return 1
       ;;
   esac
-  ok "sing-box 已重启。"
+  [ "${_RESTART_SINGBOX_QUIET_OK:-0}" = "1" ] || ok "sing-box 已重启。"
 }
 
 enable_now_singbox_safe() {
@@ -674,15 +681,14 @@ enable_now_singbox_safe() {
   ok "sing-box 已启用自启并启动。"
 }
 
-config_apply() {
-  # 并发保护：通过 _CONFIG_LOCK_HELD 哨兵防止重入死锁
-  # - 交互侧（菜单）首次进入：阻塞等待 lock
-  # - cron 的 user_watch_run 已持锁时，内部间接调用 config_apply 会命中哨兵，跳过加锁直接执行
-  if [ "${_CONFIG_LOCK_HELD:-0}" = "1" ]; then
-    _config_apply_body "$@"
-    return $?
-  fi
+with_manager_lock() {
   local _lock_fd _rc=0
+
+  # 并发保护：通过 _CONFIG_LOCK_HELD 哨兵防止重入死锁
+  if [ "${_CONFIG_LOCK_HELD:-0}" = "1" ]; then
+    if "$@"; then return 0; else return $?; fi
+  fi
+
   # 注意：exec 行的尾部重定向是永久作用于当前 shell 的，不能写成
   # `exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null`（会把整个 shell 的
   # stderr 永久关闭到 /dev/null，后续 err/warn/read -p 提示全丢失）。
@@ -690,16 +696,22 @@ config_apply() {
   if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
     flock "$_lock_fd"
     _CONFIG_LOCK_HELD=1
-    _config_apply_body "$@"
-    _rc=$?
+    if "$@"; then _rc=0; else _rc=$?; fi
     _CONFIG_LOCK_HELD=0
     { exec {_lock_fd}>&-; } 2>/dev/null || true
   else
     # 锁文件不可创建时降级为无锁模式（不阻塞功能）
-    _config_apply_body "$@"
-    _rc=$?
+    if "$@"; then _rc=0; else _rc=$?; fi
   fi
   return $_rc
+}
+
+config_apply() {
+  with_manager_lock _config_apply_body "$@"
+}
+
+config_apply_no_usage_sync() {
+  _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$@"
 }
 
 _config_apply_body() {
@@ -720,7 +732,9 @@ _config_apply_body() {
     return 1
   fi
 
-  sync_user_usage_counters || true
+  if [ "${_CONFIG_SKIP_USAGE_SYNC:-0}" != "1" ]; then
+    sync_user_usage_counters || true
+  fi
 
   local tmp_file
   tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
@@ -761,7 +775,7 @@ _config_apply_body() {
   mv -f "$tmp_file" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if restart_singbox_safe; then
+  if _RESTART_SINGBOX_QUIET_OK=1 restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  rc-update add sing-box default >/dev/null 2>&1 || true ;;
@@ -769,7 +783,7 @@ _config_apply_body() {
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
     ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
-    ok "配置已应用。"
+    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已应用。"
     return 0
   fi
 
@@ -809,6 +823,7 @@ init_manager_env() {
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
   [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
   config_ensure_exists
+  ensure_manager_file_permissions
   _MANAGER_ENV_READY=1
 }
 
@@ -964,7 +979,7 @@ choose_tls_domain() {
     1)
       read -r -p "请输入${proto_label}域名: " manual
       if [ -z "${manual:-}" ]; then
-        warn "[WARN] 输入无效，已返回上一级。"
+        warn "输入无效，已返回上一级。"
         pause >&2
         return 1
       fi
@@ -1251,7 +1266,7 @@ protocol_entry_inventory() {
     | (detect_protocol) as $proto
     | select($proto != "")
     | [(.tag // ""), $proto, ((.listen_port // 0) | tostring)]
-    | join("")
+    | join("\u0001")
   '
 }
 
@@ -1265,7 +1280,7 @@ protocol_entry_inventory_ext() {
     | ($ib | detect_protocol) as $proto
     | select($proto != "")
     | [$idx, ($ib.tag // ""), $proto, (($ib.listen_port // 0) | tostring)]
-    | join("")
+    | join("\u0001")
   '
 }
 
@@ -1348,7 +1363,7 @@ route_rebuild(){
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("")')
+    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("\u0001")')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({
@@ -1548,7 +1563,7 @@ relay_list_table() {
       ]
     | unique
     | .[]
-    | join("")
+    | join("\u0001")
   ' || return 1
 }
 
@@ -1673,11 +1688,12 @@ relay_add() {
   local _relay_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
+    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
   else
-    config_apply "$updated_json" && _relay_ok=1
+    _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json" && _relay_ok=1
   fi
   if [ "$_relay_ok" -eq 1 ]; then
     ok "中转节点已添加：${relay_user}（落地: ${ip}:${relay_port}）"
@@ -1746,18 +1762,25 @@ relay_delete() {
     }
   done
 
+  local _delete_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+      _delete_ok=1
+    else
       warn "删除中转失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      _delete_ok=1
+    else
       warn "删除中转失败，已返回上一级。"
     fi
   fi
+  [ "$_delete_ok" -eq 1 ] && ok "中转节点已删除。"
   pause
   return 0
 }
@@ -1879,7 +1902,6 @@ ensure_grpcurl() {
 
 ensure_grpcurl_logged() {
   if [ -x "$GRPCURL_BIN" ]; then
-    ok "grpcurl 已就绪。"
     return 0
   fi
   say "安装 grpcurl..."
@@ -1959,6 +1981,10 @@ build_live_usage_object() {
 }
 
 sync_user_usage_counters() {
+  with_manager_lock _sync_user_usage_counters_body
+}
+
+_sync_user_usage_counters_body() {
   user_db_exists || return 0
   [ -x "$GRPCURL_BIN" ] || return 0
   singbox_service_active || return 0
@@ -1999,7 +2025,7 @@ meta_save() {
   mkdir -p "$(dirname "$META_FILE")"
   chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
   local tmp_file
-  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")"
+  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
   if echo "$meta_json" | jq . > "$tmp_file"; then
     mv -f "$tmp_file" "$META_FILE"
     chmod 600 "$META_FILE" 2>/dev/null || true
@@ -2029,7 +2055,7 @@ meta_get_reality_public_key() {
 # ============================================================
 # 模块: 60_user_db.sh
 # 职责: 用户数据库 CRUD（纯数据操作，不含 UI）
-# 依赖: 00_base.sh, 01_utils.sh
+# 依赖: 00_base.sh, 01_utils.sh, 10_config.sh (with_manager_lock)
 # ============================================================
 
 user_db_min_template() {
@@ -2070,11 +2096,15 @@ user_db_load() {
 }
 
 user_db_save() {
+  with_manager_lock _user_db_save_body "$@"
+}
+
+_user_db_save_body() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
   chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
   local tmp_file
-  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")"
+  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
   if echo "$db_json" | jq . > "$tmp_file"; then
     mv -f "$tmp_file" "$USER_DB_FILE"
     chmod 600 "$USER_DB_FILE" 2>/dev/null || true
@@ -2267,6 +2297,10 @@ filter_disabled_auth_users() {
 }
 
 user_manager_apply_changes() {
+  with_manager_lock _user_manager_apply_changes_body "$@"
+}
+
+_user_manager_apply_changes_body() {
   local db_json="$1" base_json="${2:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
@@ -2278,9 +2312,12 @@ user_manager_apply_changes() {
     return 1
   }
 
-  if config_apply "$applied_json"; then
-    user_db_save "$db_json"
-    ok "用户变更已应用。"
+  if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
+    user_db_save "$db_json" || {
+      err "用户数据库保存失败，用户变更未完整落盘。"
+      return 1
+    }
+    [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
     return 0
   fi
   return 1
@@ -2290,7 +2327,7 @@ user_manager_runtime_sync() {
   local db_json current_json desired_json current_norm desired_norm
   db_json="$(user_db_load)"
   if [ ! -s "$USER_DB_FILE" ]; then
-    user_db_save "$db_json"
+    user_db_save "$db_json" || return 1
   fi
 
   ensure_grpcurl >/dev/null 2>&1 || true
@@ -2304,7 +2341,7 @@ user_manager_runtime_sync() {
   current_norm="$(echo "$current_json" | jq -S .)"
   desired_norm="$(echo "$desired_json" | jq -S .)"
   if [ "$current_norm" != "$desired_norm" ]; then
-    if config_apply "$desired_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$desired_json"; then
       ok "配置已同步。"
     else
       err "配置同步失败。"
@@ -2417,7 +2454,7 @@ init_user_manager_if_needed() {
     mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
   fi
   if ! user_db_exists; then
-    user_db_save "$(user_db_min_template)"
+    user_db_save "$(user_db_min_template)" || return 1
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   user_db_cleanup_current_and_save || true
@@ -2464,7 +2501,7 @@ show_user_status_table() {
           ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
-        ] | join("")
+        ] | join("\u0001")
     ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
@@ -2593,7 +2630,7 @@ user_show_info() {
       | (.users[$u].manual_added_bytes // 0) as $manual
       | [($up | tostring), ($down | tostring), ($manual | tostring),
          (($up + $down + $manual) | tostring),
-         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("")
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("\u0001")
     '
   )
   used_up_text="$(format_traffic_auto "$used_up")"
@@ -2630,6 +2667,7 @@ user_show_info() {
 
 user_add_menu() {
   local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
+  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -2649,7 +2687,7 @@ user_add_menu() {
   fi
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
   read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
-  [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
+  [[ "$quota" =~ ^[0-9]+$ ]] || { warn "输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
 
@@ -2689,7 +2727,7 @@ user_manage_permission_menu() {
   local cleaned_db_json
   cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
   if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
-    user_db_save "$cleaned_db_json"
+    user_db_save "$cleaned_db_json" || return 1
   fi
   db_json="$cleaned_db_json"
   local current_nodes_json
@@ -2765,7 +2803,7 @@ user_manage_package_menu() {
     echo "$db_json" | jq -r --arg u "$username" '
       [((.users[$u].quota_gb // 0) | tostring),
        ((.users[$u].reset_day // 0) | tostring),
-       (.users[$u].expire_at // "0")] | join("")
+       (.users[$u].expire_at // "0")] | join("\u0001")
     '
   )
 
@@ -2816,7 +2854,7 @@ user_manage_package_menu() {
   fi
 
   if [ "$quota_val" = "$current_quota" ] && [ "$reset_val" = "$current_reset" ] && [ "$expire_val" = "$current_expire" ]; then
-    ui_echo "[INFO] 未检测到改动，按任意键返回。"
+    ui_echo "${C}[INFO]${NC} 未检测到改动，按任意键返回。"
     pause >&2
     return 1
   fi
@@ -2874,6 +2912,7 @@ user_manage_single() {
   local db_json json act new_db is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
+    sync_user_usage_counters || true
     user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
     json="$(config_load)"
@@ -2942,6 +2981,7 @@ user_manage_single() {
 
 user_select_and_manage_menu() {
   local db_json usernames=() ans idx username
+  sync_user_usage_counters >/dev/null 2>&1 || true
   user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   db_json="$(user_db_load)"
   clear
@@ -3189,7 +3229,7 @@ export_configs() {
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
   IFS=$'\x01' read -r ip ws_domain vm_domain < <(
-    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("")'
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("\u0001")'
   )
   relay_users_nl="$(relay_list_table "$json" | awk -F '\x01' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 
@@ -3825,7 +3865,7 @@ install_or_update_singbox() {
   fi
 
   if [ "${managed_env}" != "1" ] && command -v sing-box >/dev/null 2>&1; then
-    ui_echo "[WARN] 检测到已有非本脚本安装的 sing-box 环境，请先执行"卸载 sing-box"后再安装。"
+    warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
     pause >&2
     return 0
   fi
@@ -3974,9 +4014,7 @@ sync_system_time_chrony() {
     systemd) [ "$(systemctl is-active chrony 2>/dev/null)" = "active" ] && chrony_running=1 ;;
     openrc)  rc-service chrony status >/dev/null 2>&1 && chrony_running=1 ;;
   esac
-  if chronyc tracking >/dev/null 2>&1 && [ "$chrony_running" = "1" ]; then
-    ok "chrony 已正常运行。"
-  else
+  if ! chronyc tracking >/dev/null 2>&1 || [ "$chrony_running" != "1" ]; then
     warn "开始修复 chrony 服务状态..."
     case "$INIT_SYSTEM" in
       systemd)
@@ -4147,7 +4185,7 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("")')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("\u0001")')
     mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
@@ -4465,29 +4503,32 @@ protocol_install_menu() {
   done
 
   updated_json="$(route_rebuild "$updated_json")"
+  local _install_ok=0
   if user_db_exists; then
     local db_json node_key
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
-      warn "核心模块安装/更新失败，已返回上一级。"
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+      _install_ok=1
     else
-      local i
-      for i in "${!reality_meta_tags[@]}"; do
-        meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-      done
+      warn "核心模块安装/更新失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
-      warn "核心模块安装/更新失败，已返回上一级。"
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      _install_ok=1
     else
-      local i
-      for i in "${!reality_meta_tags[@]}"; do
-        meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-      done
+      warn "核心模块安装/更新失败，已返回上一级。"
     fi
+  fi
+  if [ "$_install_ok" -eq 1 ]; then
+    local i
+    for i in "${!reality_meta_tags[@]}"; do
+      meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
+    done
+    ok "核心模块已安装/更新。"
   fi
   pause
   return 0
@@ -4560,14 +4601,15 @@ protocol_remove_menu() {
   local _apply_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
-    if user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _apply_ok=1
     else
       warn "核心模块卸载失败，已返回上一级。"
     fi
   else
-    if config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
       _apply_ok=1
     else
       warn "核心模块卸载失败，已返回上一级。"
@@ -4578,6 +4620,7 @@ protocol_remove_menu() {
       rm -f "$_f" >/dev/null 2>&1 || true
     done
   fi
+  [ "$_apply_ok" -eq 1 ] && ok "核心模块已卸载。"
   pause
   return 0
 }

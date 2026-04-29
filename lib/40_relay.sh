@@ -35,7 +35,7 @@ relay_list_table() {
       ]
     | unique
     | .[]
-    | join("")
+    | join("\u0001")
   ' || return 1
 }
 
@@ -160,11 +160,12 @@ relay_add() {
   local _relay_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
+    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
   else
-    config_apply "$updated_json" && _relay_ok=1
+    _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json" && _relay_ok=1
   fi
   if [ "$_relay_ok" -eq 1 ]; then
     ok "中转节点已添加：${relay_user}（落地: ${ip}:${relay_port}）"
@@ -233,18 +234,25 @@ relay_delete() {
     }
   done
 
+  local _delete_ok=0
   if user_db_exists; then
     local db_json
+    sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+      _delete_ok=1
+    else
       warn "删除中转失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      _delete_ok=1
+    else
       warn "删除中转失败，已返回上一级。"
     fi
   fi
+  [ "$_delete_ok" -eq 1 ] && ok "中转节点已删除。"
   pause
   return 0
 }

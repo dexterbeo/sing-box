@@ -99,6 +99,10 @@ filter_disabled_auth_users() {
 }
 
 user_manager_apply_changes() {
+  with_manager_lock _user_manager_apply_changes_body "$@"
+}
+
+_user_manager_apply_changes_body() {
   local db_json="$1" base_json="${2:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
@@ -110,9 +114,12 @@ user_manager_apply_changes() {
     return 1
   }
 
-  if config_apply "$applied_json"; then
-    user_db_save "$db_json"
-    ok "用户变更已应用。"
+  if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
+    user_db_save "$db_json" || {
+      err "用户数据库保存失败，用户变更未完整落盘。"
+      return 1
+    }
+    [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
     return 0
   fi
   return 1
@@ -122,7 +129,7 @@ user_manager_runtime_sync() {
   local db_json current_json desired_json current_norm desired_norm
   db_json="$(user_db_load)"
   if [ ! -s "$USER_DB_FILE" ]; then
-    user_db_save "$db_json"
+    user_db_save "$db_json" || return 1
   fi
 
   ensure_grpcurl >/dev/null 2>&1 || true
@@ -136,7 +143,7 @@ user_manager_runtime_sync() {
   current_norm="$(echo "$current_json" | jq -S .)"
   desired_norm="$(echo "$desired_json" | jq -S .)"
   if [ "$current_norm" != "$desired_norm" ]; then
-    if config_apply "$desired_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$desired_json"; then
       ok "配置已同步。"
     else
       err "配置同步失败。"
@@ -249,7 +256,7 @@ init_user_manager_if_needed() {
     mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
   fi
   if ! user_db_exists; then
-    user_db_save "$(user_db_min_template)"
+    user_db_save "$(user_db_min_template)" || return 1
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   user_db_cleanup_current_and_save || true

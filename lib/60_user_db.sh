@@ -2,7 +2,7 @@
 # ============================================================
 # 模块: 60_user_db.sh
 # 职责: 用户数据库 CRUD（纯数据操作，不含 UI）
-# 依赖: 00_base.sh, 01_utils.sh
+# 依赖: 00_base.sh, 01_utils.sh, 10_config.sh (with_manager_lock)
 # ============================================================
 
 user_db_min_template() {
@@ -43,11 +43,15 @@ user_db_load() {
 }
 
 user_db_save() {
+  with_manager_lock _user_db_save_body "$@"
+}
+
+_user_db_save_body() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
   chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
   local tmp_file
-  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")"
+  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
   if echo "$db_json" | jq . > "$tmp_file"; then
     mv -f "$tmp_file" "$USER_DB_FILE"
     chmod 600 "$USER_DB_FILE" 2>/dev/null || true

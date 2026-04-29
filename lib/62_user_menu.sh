@@ -35,7 +35,7 @@ show_user_status_table() {
           ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
-        ] | join("")
+        ] | join("\u0001")
     ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
@@ -164,7 +164,7 @@ user_show_info() {
       | (.users[$u].manual_added_bytes // 0) as $manual
       | [($up | tostring), ($down | tostring), ($manual | tostring),
          (($up + $down + $manual) | tostring),
-         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("")
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("\u0001")
     '
   )
   used_up_text="$(format_traffic_auto "$used_up")"
@@ -201,6 +201,7 @@ user_show_info() {
 
 user_add_menu() {
   local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
+  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -220,7 +221,7 @@ user_add_menu() {
   fi
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
   read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
-  [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
+  [[ "$quota" =~ ^[0-9]+$ ]] || { warn "输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
 
@@ -260,7 +261,7 @@ user_manage_permission_menu() {
   local cleaned_db_json
   cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
   if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
-    user_db_save "$cleaned_db_json"
+    user_db_save "$cleaned_db_json" || return 1
   fi
   db_json="$cleaned_db_json"
   local current_nodes_json
@@ -336,7 +337,7 @@ user_manage_package_menu() {
     echo "$db_json" | jq -r --arg u "$username" '
       [((.users[$u].quota_gb // 0) | tostring),
        ((.users[$u].reset_day // 0) | tostring),
-       (.users[$u].expire_at // "0")] | join("")
+       (.users[$u].expire_at // "0")] | join("\u0001")
     '
   )
 
@@ -387,7 +388,7 @@ user_manage_package_menu() {
   fi
 
   if [ "$quota_val" = "$current_quota" ] && [ "$reset_val" = "$current_reset" ] && [ "$expire_val" = "$current_expire" ]; then
-    ui_echo "[INFO] 未检测到改动，按任意键返回。"
+    ui_echo "${C}[INFO]${NC} 未检测到改动，按任意键返回。"
     pause >&2
     return 1
   fi
@@ -445,6 +446,7 @@ user_manage_single() {
   local db_json json act new_db is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
+    sync_user_usage_counters || true
     user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
     json="$(config_load)"
@@ -513,6 +515,7 @@ user_manage_single() {
 
 user_select_and_manage_menu() {
   local db_json usernames=() ans idx username
+  sync_user_usage_counters >/dev/null 2>&1 || true
   user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   db_json="$(user_db_load)"
   clear

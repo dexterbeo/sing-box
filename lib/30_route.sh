@@ -30,7 +30,7 @@ protocol_entry_inventory() {
     | (detect_protocol) as $proto
     | select($proto != "")
     | [(.tag // ""), $proto, ((.listen_port // 0) | tostring)]
-    | join("")
+    | join("\u0001")
   '
 }
 
@@ -44,7 +44,7 @@ protocol_entry_inventory_ext() {
     | ($ib | detect_protocol) as $proto
     | select($proto != "")
     | [$idx, ($ib.tag // ""), $proto, (($ib.listen_port // 0) | tostring)]
-    | join("")
+    | join("\u0001")
   '
 }
 
@@ -127,7 +127,7 @@ route_rebuild(){
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("")')
+    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("\u0001")')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({

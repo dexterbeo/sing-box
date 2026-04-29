@@ -85,7 +85,6 @@ ensure_grpcurl() {
 
 ensure_grpcurl_logged() {
   if [ -x "$GRPCURL_BIN" ]; then
-    ok "grpcurl 已就绪。"
     return 0
   fi
   say "安装 grpcurl..."
@@ -165,6 +164,10 @@ build_live_usage_object() {
 }
 
 sync_user_usage_counters() {
+  with_manager_lock _sync_user_usage_counters_body
+}
+
+_sync_user_usage_counters_body() {
   user_db_exists || return 0
   [ -x "$GRPCURL_BIN" ] || return 0
   singbox_service_active || return 0
@@ -205,7 +208,7 @@ meta_save() {
   mkdir -p "$(dirname "$META_FILE")"
   chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
   local tmp_file
-  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")"
+  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
   if echo "$meta_json" | jq . > "$tmp_file"; then
     mv -f "$tmp_file" "$META_FILE"
     chmod 600 "$META_FILE" 2>/dev/null || true

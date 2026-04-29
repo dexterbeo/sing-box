@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.1"
+SCRIPT_VERSION="5.4.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -265,8 +265,8 @@ sort_node_keys_by_protocol() {
   done | sort -t$'\t' -k1,1 -k2,2 | cut -f2
 }
 
-# 从 stdin 读取 TSV 行，按指定字段的协议顺序排序
-# 用法：some_command | sort_tsv_by_protocol 1  （按第1列排序）
+# 从 stdin 读取 SOH(\x01) 分隔行，按指定字段的协议顺序排序
+# 保留旧函数名以兼容已有调用；用法：some_command | sort_tsv_by_protocol 1
 sort_tsv_by_protocol() {
   local field="${1:-1}"
   while IFS= read -r line; do

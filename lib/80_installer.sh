@@ -456,7 +456,7 @@ install_or_update_singbox() {
   fi
 
   if [ "${managed_env}" != "1" ] && command -v sing-box >/dev/null 2>&1; then
-    ui_echo "[WARN] 检测到已有非本脚本安装的 sing-box 环境，请先执行"卸载 sing-box"后再安装。"
+    warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
     pause >&2
     return 0
   fi
@@ -605,9 +605,7 @@ sync_system_time_chrony() {
     systemd) [ "$(systemctl is-active chrony 2>/dev/null)" = "active" ] && chrony_running=1 ;;
     openrc)  rc-service chrony status >/dev/null 2>&1 && chrony_running=1 ;;
   esac
-  if chronyc tracking >/dev/null 2>&1 && [ "$chrony_running" = "1" ]; then
-    ok "chrony 已正常运行。"
-  else
+  if ! chronyc tracking >/dev/null 2>&1 || [ "$chrony_running" != "1" ]; then
     warn "开始修复 chrony 服务状态..."
     case "$INIT_SYSTEM" in
       systemd)

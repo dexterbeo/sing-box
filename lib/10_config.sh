@@ -186,22 +186,27 @@ _config_apply_body() {
   sync_user_usage_counters || true
 
   local tmp_file
-  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)"
-  trap 'rm -f "$tmp_file"' RETURN
+  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
+    err "创建临时配置文件失败。"
+    return 1
+  }
 
   echo "$normalized" | jq . > "$tmp_file" || {
     err "JSON 格式化失败，未写入配置。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   }
 
   if ! has_cmd sing-box; then
     err "未找到 sing-box，无法校验配置。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   fi
 
   if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
     err "sing-box check 校验未通过，未写入配置。"
     sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   fi
 

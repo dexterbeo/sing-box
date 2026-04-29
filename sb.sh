@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-29 13:59:38 UTC
+# 构建时间: 2026-04-29 14:25:47 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.0"
+SCRIPT_VERSION="5.4.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -723,22 +723,27 @@ _config_apply_body() {
   sync_user_usage_counters || true
 
   local tmp_file
-  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)"
-  trap 'rm -f "$tmp_file"' RETURN
+  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
+    err "创建临时配置文件失败。"
+    return 1
+  }
 
   echo "$normalized" | jq . > "$tmp_file" || {
     err "JSON 格式化失败，未写入配置。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   }
 
   if ! has_cmd sing-box; then
     err "未找到 sing-box，无法校验配置。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   fi
 
   if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
     err "sing-box check 校验未通过，未写入配置。"
     sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -3198,7 +3203,7 @@ export_configs() {
     rm -rf "$user_dir" >/dev/null 2>&1 || true
     rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   }
-  trap _export_cleanup RETURN
+  trap '_export_cleanup; trap - RETURN' RETURN
 
   while read -r inbound; do
     IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(

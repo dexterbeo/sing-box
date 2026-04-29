@@ -145,7 +145,7 @@ export_configs() {
     rm -rf "$user_dir" >/dev/null 2>&1 || true
     rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   }
-  trap _export_cleanup RETURN
+  trap '_export_cleanup; trap - RETURN' RETURN
 
   while read -r inbound; do
     IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(

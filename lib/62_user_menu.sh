@@ -35,8 +35,8 @@ show_user_status_table() {
           ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
-        ] | @tsv
-    ' | while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
+        ] | join("")
+    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
             "$c2" \
@@ -104,6 +104,10 @@ prompt_expire_date() {
     return 0
   fi
   if [[ "$val" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    if ! date -d "$val" +%Y-%m-%d >/dev/null 2>&1; then
+      ui_echo "${Y}[WARN]${NC} 日期不合法（如月份或日期超出范围），未作修改，已返回上一级。"
+      return 1
+    fi
     printf -v "$outvar" '%s' "$val"
     return 0
   fi
@@ -153,14 +157,14 @@ user_show_info() {
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  IFS=$'\t' read -r used_up used_down manual_added total_used quota_bytes < <(
+  IFS=$'\x01' read -r used_up used_down manual_added total_used quota_bytes < <(
     echo "$db_json" | jq -r --arg u "$username" '
       (.users[$u].used_up_bytes // 0) as $up
       | (.users[$u].used_down_bytes // 0) as $down
       | (.users[$u].manual_added_bytes // 0) as $manual
       | [($up | tostring), ($down | tostring), ($manual | tostring),
          (($up + $down + $manual) | tostring),
-         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | @tsv
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("")
     '
   )
   used_up_text="$(format_traffic_auto "$used_up")"
@@ -175,7 +179,7 @@ user_show_info() {
   echo "$db_json" | jq -r     --arg u "$username"     --arg up "$used_up_text"     --arg down "$used_down_text"     --arg manual "$manual_text"     --arg total "$total_text"     --arg quota "$quota_text" '
     .users[$u] as $x
     | "用户名：" + $u + "\n"
-      + "状态：" + (if $x.enabled then "开启" else "关闭" end) + "\n"
+      + "状态：" + (if $x.enabled then "开启" else ("关闭" + (if ($x.disabled_reason // null) == "manual" then "（手动）" elif ($x.disabled_reason // null) == "quota_exceeded" then "（超额）" elif ($x.disabled_reason // null) == "expired" then "（到期）" else "" end)) end) + "\n"
       + "上传流量：" + $up + "\n"
       + "下载流量：" + $down + "\n"
       + "手动补正流量：" + $manual + "\n"
@@ -233,6 +237,7 @@ user_add_menu() {
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
+      disabled_reason: null,
       quota_gb: $quota,
       used_up_bytes: 0,
       used_down_bytes: 0,
@@ -327,11 +332,11 @@ user_manage_package_menu() {
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
 
-  IFS=$'\t' read -r current_quota current_reset current_expire < <(
+  IFS=$'\x01' read -r current_quota current_reset current_expire < <(
     echo "$db_json" | jq -r --arg u "$username" '
       [((.users[$u].quota_gb // 0) | tostring),
        ((.users[$u].reset_day // 0) | tostring),
-       (.users[$u].expire_at // "0")] | @tsv
+       (.users[$u].expire_at // "0")] | join("")
     '
   )
 
@@ -373,6 +378,9 @@ user_manage_package_menu() {
   elif [ "$expire_in" = "0" ]; then
     expire_val="0"
   elif [[ "$expire_in" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    if ! date -d "$expire_in" +%Y-%m-%d >/dev/null 2>&1; then
+      user_package_invalid_return; pause >&2; return 1
+    fi
     expire_val="$expire_in"
   else
     user_package_invalid_return; pause >&2; return 1
@@ -456,9 +464,9 @@ user_manage_single() {
     case "${act:-}" in
       1)
         if user_db_user_is_enabled "$db_json" "$username"; then
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
+          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
         else
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true')"
+          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
         user_manager_apply_changes "$new_db" "$json" || true
         ;;

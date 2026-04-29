@@ -108,11 +108,11 @@ export_collect_context() {
   vm_domain="example.com"
   inventory="$(protocol_entry_inventory "$json")"
 
-  if printf '%s\n' "$inventory" | awk -F '\t' '$2 == "vless-ws" {found=1} END{exit !found}'; then
+  if printf '%s\n' "$inventory" | awk -F '\x01' '$2 == "vless-ws" {found=1} END{exit !found}'; then
     read -r -p "请输入 vless-ws 域名（默认: example.com）: " ws_domain
     ws_domain="${ws_domain:-example.com}"
   fi
-  if printf '%s\n' "$inventory" | awk -F '\t' '$2 == "vmess-ws" {found=1} END{exit !found}'; then
+  if printf '%s\n' "$inventory" | awk -F '\x01' '$2 == "vmess-ws" {found=1} END{exit !found}'; then
     read -r -p "请输入 vmess-ws 域名（默认: example.com）: " vm_domain
     vm_domain="${vm_domain:-example.com}"
   fi
@@ -130,10 +130,10 @@ export_configs() {
   local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
-  IFS=$'\t' read -r ip ws_domain vm_domain < <(
-    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | @tsv'
+  IFS=$'\x01' read -r ip ws_domain vm_domain < <(
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("")'
   )
-  relay_users_nl="$(relay_list_table "$json" | awk -F '\t' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
+  relay_users_nl="$(relay_list_table "$json" | awk -F '\x01' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
 

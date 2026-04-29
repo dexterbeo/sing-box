@@ -58,9 +58,11 @@ config_load() {
 
 config_ensure_exists() {
   mkdir -p /etc/sing-box
+  chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
     config_min_template | jq . > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 
@@ -71,6 +73,7 @@ config_ensure_exists() {
     cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
     warn "检测到配置文件不是合法 JSON，已备份到：$broken"
     config_min_template | jq . > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 }
@@ -182,7 +185,11 @@ _config_apply_body() {
 
   sync_user_usage_counters || true
 
-  echo "$normalized" | jq . > "$TEMP_FILE" || {
+  local tmp_file
+  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)"
+  trap 'rm -f "$tmp_file"' RETURN
+
+  echo "$normalized" | jq . > "$tmp_file" || {
     err "JSON 格式化失败，未写入配置。"
     return 1
   }
@@ -192,10 +199,9 @@ _config_apply_body() {
     return 1
   fi
 
-  if ! sing-box check -c "$TEMP_FILE" >/dev/null 2>&1; then
+  if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
     err "sing-box check 校验未通过，未写入配置。"
-    sing-box check -c "$TEMP_FILE" 2>&1 | sed 's/^/  /'
-    rm -f "$TEMP_FILE"
+    sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
     return 1
   fi
 
@@ -210,7 +216,8 @@ _config_apply_body() {
     : > "$prev_tmp"
   fi
 
-  mv -f "$TEMP_FILE" "$CONFIG_FILE"
+  mv -f "$tmp_file" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
   if restart_singbox_safe; then
     case "$INIT_SYSTEM" in

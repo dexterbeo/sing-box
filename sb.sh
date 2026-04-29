@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-21 04:55:57 UTC
+# 构建时间: 2026-04-29 13:59:38 UTC
 # ============================================================
 
 
@@ -17,13 +17,12 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.15"
+SCRIPT_VERSION="5.4.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
-TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
-SB_TARGET_SCRIPT="/root/sing-box.sh"
+SB_TARGET_SCRIPT="/root/sb.sh"
 SB_SHORTCUT="/usr/local/bin/s"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
@@ -34,9 +33,9 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
+USER_WATCH_CRON_MARK="sb.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
-LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
+LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
@@ -141,9 +140,6 @@ table_print_row() {
   done
   printf '%s\n' "$out"
 }
-
-cleanup() { rm -f "$TEMP_FILE"; }
-trap cleanup EXIT
 
 # ====================================================
 # 协议注册表 — 所有协议定义的唯一权威来源
@@ -286,7 +282,7 @@ sort_tsv_by_protocol() {
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     local fval
-    fval="$(echo "$line" | cut -f"$field")"
+    fval="$(echo "$line" | cut -d$'\x01' -f"$field")"
     printf '%s\t%s\n' "$(node_protocol_sort_key "$fval")" "$line"
   done | sort -t$'\t' -k1,1 | cut -f2-
 }
@@ -599,9 +595,11 @@ config_load() {
 
 config_ensure_exists() {
   mkdir -p /etc/sing-box
+  chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
     config_min_template | jq . > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 
@@ -612,6 +610,7 @@ config_ensure_exists() {
     cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
     warn "检测到配置文件不是合法 JSON，已备份到：$broken"
     config_min_template | jq . > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 }
@@ -723,7 +722,11 @@ _config_apply_body() {
 
   sync_user_usage_counters || true
 
-  echo "$normalized" | jq . > "$TEMP_FILE" || {
+  local tmp_file
+  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)"
+  trap 'rm -f "$tmp_file"' RETURN
+
+  echo "$normalized" | jq . > "$tmp_file" || {
     err "JSON 格式化失败，未写入配置。"
     return 1
   }
@@ -733,10 +736,9 @@ _config_apply_body() {
     return 1
   fi
 
-  if ! sing-box check -c "$TEMP_FILE" >/dev/null 2>&1; then
+  if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
     err "sing-box check 校验未通过，未写入配置。"
-    sing-box check -c "$TEMP_FILE" 2>&1 | sed 's/^/  /'
-    rm -f "$TEMP_FILE"
+    sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
     return 1
   fi
 
@@ -751,7 +753,8 @@ _config_apply_body() {
     : > "$prev_tmp"
   fi
 
-  mv -f "$TEMP_FILE" "$CONFIG_FILE"
+  mv -f "$tmp_file" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
   if restart_singbox_safe; then
     case "$INIT_SYSTEM" in
@@ -1243,7 +1246,7 @@ protocol_entry_inventory() {
     | (detect_protocol) as $proto
     | select($proto != "")
     | [(.tag // ""), $proto, ((.listen_port // 0) | tostring)]
-    | @tsv
+    | join("")
   '
 }
 
@@ -1257,7 +1260,7 @@ protocol_entry_inventory_ext() {
     | ($ib | detect_protocol) as $proto
     | select($proto != "")
     | [$idx, ($ib.tag // ""), $proto, (($ib.listen_port // 0) | tostring)]
-    | @tsv
+    | join("")
   '
 }
 
@@ -1335,16 +1338,16 @@ route_rebuild(){
   normalized="$(config_normalize "$json")" || return 1
 
   core_users_json="$({
-    while IFS=$'\t' read -r entry user_name; do
+    while IFS=$'\x01' read -r entry user_name; do
       [ -n "$user_name" ] || continue
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | @tsv')
+    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("")')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({
-    while IFS=$'\t' read -r entry relay_user out_tag; do
+    while IFS=$'\x01' read -r entry relay_user out_tag; do
       [ -z "${relay_user:-}" ] && continue
       [ -z "${out_tag:-}" ] && continue
       if echo "$normalized" | jq -e --arg ot "$out_tag" '.outbounds[]? | select((.tag // "") == $ot)' >/dev/null 2>&1; then
@@ -1540,7 +1543,7 @@ relay_list_table() {
       ]
     | unique
     | .[]
-    | @tsv
+    | join("")
   ' || return 1
 }
 
@@ -1551,7 +1554,7 @@ show_managed_relay_lines() {
   local found=0
   local seen=""
   local relay_node
-  while IFS=$'\t' read -r entry relay_user out_tag; do
+  while IFS=$'\x01' read -r entry relay_user out_tag; do
     [ -z "${relay_user:-}" ] && continue
     relay_node="$(user_node_part "$relay_user")"
     [ -n "$relay_node" ] || continue
@@ -1584,7 +1587,7 @@ relay_add() {
   echo -e "${C}请选择主入站：${NC}"
   local i=1 tag port
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r tag proto port <<< "$line"
+    IFS=$'\x01' read -r tag proto port <<< "$line"
     echo -e "  [$i] ${G}${tag}${NC}"
     i=$((i+1))
   done
@@ -1602,11 +1605,16 @@ relay_add() {
     pause
     return 0
   fi
-  IFS=$'\t' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
+  IFS=$'\x01' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
   inbound="$(find_inbound_by_entry_key "$json" "$entry_key")"
 
   read -r -p "落地标识 (如 sg01): " land
   [ -z "${land:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
+  if ! [[ "$land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    warn "落地标识仅允许字母、数字、点、下划线、短横线。"
+    pause
+    return 0
+  fi
   read -r -p "落地 IP 地址: " ip
   [ -z "${ip:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
   read -r -p "落地端口（默认: 8080）: " relay_port
@@ -1688,13 +1696,13 @@ relay_delete() {
   fi
 
   mapfile -t node_lines < <(
-    printf '%s\n' "${lines[@]}" | awk -F '\t' '
+    printf '%s\n' "${lines[@]}" | awk -F '\x01' '
       function node_part(s) { sub(/@.*/, "", s); return s }
       {
         node=node_part($2)
         if (!(node in seen)) {
           seen[node]=1
-          print $1 "\t" node "\t" $3
+          print $1 "\001" node "\001" $3
         }
       }' | sort_tsv_by_protocol 2
   )
@@ -1703,7 +1711,7 @@ relay_delete() {
   echo -e "${R}--- 删除中转节点 ---${NC}"
   local i=1
   for line in "${node_lines[@]}"; do
-    IFS=$'\t' read -r entry relay_user out_tag <<< "$line"
+    IFS=$'\x01' read -r entry relay_user out_tag <<< "$line"
     echo -e " [$i] ${relay_user}"
     i=$((i+1))
   done
@@ -1720,9 +1728,9 @@ relay_delete() {
       return 1
     fi
     idx=$((part-1))
-    IFS=$'\t' read -r entry node_key out_tag <<< "${node_lines[$idx]}"
+    IFS=$'\x01' read -r entry node_key out_tag <<< "${node_lines[$idx]}"
     users_json="$({
-      printf '%s\n' "${lines[@]}" | awk -F '\t' -v n="$node_key" '
+      printf '%s\n' "${lines[@]}" | awk -F '\x01' -v n="$node_key" '
         function node_part(s) { sub(/@.*/, "", s); return s }
         node_part($2)==n { print $2 }'
     } | awk 'NF' | sort -u | jq -R . | jq -s '.')"
@@ -1761,7 +1769,7 @@ manage_relay_nodes() {
       [ -n "$relay_node" ] || continue
       _has_relay=1
       echo -e "  - ${G}${relay_node}${NC}"
-    done < <(relay_list_table "$json" | awk -F '\t' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
+    done < <(relay_list_table "$json" | awk -F '\x01' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
     [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"
@@ -1906,7 +1914,7 @@ ensure_v2ray_api_on_json() {
 # ---------- 流量查询 ----------
 
 query_v2ray_api_stats_json() {
-  ensure_grpcurl >/dev/null 2>&1 || { echo '[]'; return 0; }
+  ensure_grpcurl >/dev/null 2>&1 || return 1
   ensure_v2ray_api_proto_files
   local payload out stats
   payload='{"patterns":["user>>>"],"reset":false,"regexp":false}'
@@ -1922,7 +1930,7 @@ query_v2ray_api_stats_json() {
       echo "$stats"; return 0
     }
   fi
-  echo '[]'
+  return 1
 }
 
 build_live_usage_object() {
@@ -1951,7 +1959,7 @@ sync_user_usage_counters() {
   singbox_service_active || return 0
 
   local stats_json usage_json db_json
-  stats_json="$(query_v2ray_api_stats_json)"
+  stats_json="$(query_v2ray_api_stats_json)" || return 0
   echo "$stats_json" | jq -e 'type=="array"' >/dev/null 2>&1 || return 0
   usage_json="$(build_live_usage_object "$stats_json")" || return 0
   db_json="$(user_db_load)"
@@ -1984,7 +1992,16 @@ meta_load() {
 meta_save() {
   local meta_json="$1"
   mkdir -p "$(dirname "$META_FILE")"
-  echo "$meta_json" | jq . > "${META_FILE}.tmp" && mv -f "${META_FILE}.tmp" "$META_FILE"
+  chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")"
+  if echo "$meta_json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$META_FILE"
+    chmod 600 "$META_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+    return 1
+  fi
 }
 
 meta_set_reality_public_key() {
@@ -2017,6 +2034,7 @@ user_db_min_template() {
   "users": {
     "admin": {
       "enabled": true,
+      "disabled_reason": null,
       "quota_gb": 0,
       "used_up_bytes": 0,
       "used_down_bytes": 0,
@@ -2049,7 +2067,16 @@ user_db_load() {
 user_db_save() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  echo "$db_json" | jq . > "${USER_DB_FILE}.tmp" && mv -f "${USER_DB_FILE}.tmp" "$USER_DB_FILE"
+  chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")"
+  if echo "$db_json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$USER_DB_FILE"
+    chmod 600 "$USER_DB_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+    return 1
+  fi
 }
 
 user_billable_bytes() {
@@ -2149,7 +2176,7 @@ user_manager_apply_to_json() {
   work_json="$(config_normalize "$work_json")" || return 1
   mapfile -t inv_lines < <(protocol_entry_inventory_ext "$work_json")
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx entry_key proto port <<< "$line"
+    IFS=$'\x01' read -r idx entry_key proto port <<< "$line"
     inbound="$(find_inbound_by_entry_key "$work_json" "$entry_key")"
     [ -n "$inbound" ] || continue
 
@@ -2239,7 +2266,6 @@ user_manager_apply_changes() {
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
-  user_db_save "$db_json"
 
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
@@ -2248,6 +2274,7 @@ user_manager_apply_changes() {
   }
 
   if config_apply "$applied_json"; then
+    user_db_save "$db_json"
     ok "用户变更已应用。"
     return 0
   fi
@@ -2319,11 +2346,13 @@ apply_automatic_user_controls() {
       | ($v.last_reset_period // "") as $last_reset
       | ($v.enabled // false) as $enabled
       | ($v.quota_gb // 0) as $quota
+      | ($v.disabled_reason // null) as $reason
       | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
       # 1. 到期检查
       | if ($expire != "0" and ($today >= $expire)) then
           .value.enabled = false
+          | .value.disabled_reason = "expired"
         else
           # 2. 重置检查
           (
@@ -2338,13 +2367,17 @@ apply_automatic_user_controls() {
               | .value.last_live_up_bytes = 0
               | .value.last_live_down_bytes = 0
               | .value.last_reset_period = $period
-              | .value.enabled = true
+              | if ($reason == "quota_exceeded") then
+                  .value.enabled = true
+                  | .value.disabled_reason = null
+                else . end
             else . end
           # 3. 超额检查（重置后 billable 已清零，不会误判）
           | if ($quota > 0 and .value.enabled == true) then
               ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
               | if ($current_billable >= ($quota * 1073741824)) then
                   .value.enabled = false
+                  | .value.disabled_reason = "quota_exceeded"
                 else . end
             else . end
         end
@@ -2426,8 +2459,8 @@ show_user_status_table() {
           ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
-        ] | @tsv
-    ' | while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
+        ] | join("")
+    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
             "$c2" \
@@ -2495,6 +2528,10 @@ prompt_expire_date() {
     return 0
   fi
   if [[ "$val" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    if ! date -d "$val" +%Y-%m-%d >/dev/null 2>&1; then
+      ui_echo "${Y}[WARN]${NC} 日期不合法（如月份或日期超出范围），未作修改，已返回上一级。"
+      return 1
+    fi
     printf -v "$outvar" '%s' "$val"
     return 0
   fi
@@ -2544,14 +2581,14 @@ user_show_info() {
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  IFS=$'\t' read -r used_up used_down manual_added total_used quota_bytes < <(
+  IFS=$'\x01' read -r used_up used_down manual_added total_used quota_bytes < <(
     echo "$db_json" | jq -r --arg u "$username" '
       (.users[$u].used_up_bytes // 0) as $up
       | (.users[$u].used_down_bytes // 0) as $down
       | (.users[$u].manual_added_bytes // 0) as $manual
       | [($up | tostring), ($down | tostring), ($manual | tostring),
          (($up + $down + $manual) | tostring),
-         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | @tsv
+         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("")
     '
   )
   used_up_text="$(format_traffic_auto "$used_up")"
@@ -2566,7 +2603,7 @@ user_show_info() {
   echo "$db_json" | jq -r     --arg u "$username"     --arg up "$used_up_text"     --arg down "$used_down_text"     --arg manual "$manual_text"     --arg total "$total_text"     --arg quota "$quota_text" '
     .users[$u] as $x
     | "用户名：" + $u + "\n"
-      + "状态：" + (if $x.enabled then "开启" else "关闭" end) + "\n"
+      + "状态：" + (if $x.enabled then "开启" else ("关闭" + (if ($x.disabled_reason // null) == "manual" then "（手动）" elif ($x.disabled_reason // null) == "quota_exceeded" then "（超额）" elif ($x.disabled_reason // null) == "expired" then "（到期）" else "" end)) end) + "\n"
       + "上传流量：" + $up + "\n"
       + "下载流量：" + $down + "\n"
       + "手动补正流量：" + $manual + "\n"
@@ -2624,6 +2661,7 @@ user_add_menu() {
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
+      disabled_reason: null,
       quota_gb: $quota,
       used_up_bytes: 0,
       used_down_bytes: 0,
@@ -2718,11 +2756,11 @@ user_manage_package_menu() {
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
 
-  IFS=$'\t' read -r current_quota current_reset current_expire < <(
+  IFS=$'\x01' read -r current_quota current_reset current_expire < <(
     echo "$db_json" | jq -r --arg u "$username" '
       [((.users[$u].quota_gb // 0) | tostring),
        ((.users[$u].reset_day // 0) | tostring),
-       (.users[$u].expire_at // "0")] | @tsv
+       (.users[$u].expire_at // "0")] | join("")
     '
   )
 
@@ -2764,6 +2802,9 @@ user_manage_package_menu() {
   elif [ "$expire_in" = "0" ]; then
     expire_val="0"
   elif [[ "$expire_in" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    if ! date -d "$expire_in" +%Y-%m-%d >/dev/null 2>&1; then
+      user_package_invalid_return; pause >&2; return 1
+    fi
     expire_val="$expire_in"
   else
     user_package_invalid_return; pause >&2; return 1
@@ -2847,9 +2888,9 @@ user_manage_single() {
     case "${act:-}" in
       1)
         if user_db_user_is_enabled "$db_json" "$username"; then
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
+          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
         else
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true')"
+          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
         user_manager_apply_changes "$new_db" "$json" || true
         ;;
@@ -3120,11 +3161,11 @@ export_collect_context() {
   vm_domain="example.com"
   inventory="$(protocol_entry_inventory "$json")"
 
-  if printf '%s\n' "$inventory" | awk -F '\t' '$2 == "vless-ws" {found=1} END{exit !found}'; then
+  if printf '%s\n' "$inventory" | awk -F '\x01' '$2 == "vless-ws" {found=1} END{exit !found}'; then
     read -r -p "请输入 vless-ws 域名（默认: example.com）: " ws_domain
     ws_domain="${ws_domain:-example.com}"
   fi
-  if printf '%s\n' "$inventory" | awk -F '\t' '$2 == "vmess-ws" {found=1} END{exit !found}'; then
+  if printf '%s\n' "$inventory" | awk -F '\x01' '$2 == "vmess-ws" {found=1} END{exit !found}'; then
     read -r -p "请输入 vmess-ws 域名（默认: example.com）: " vm_domain
     vm_domain="${vm_domain:-example.com}"
   fi
@@ -3142,10 +3183,10 @@ export_configs() {
   local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
-  IFS=$'\t' read -r ip ws_domain vm_domain < <(
-    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | @tsv'
+  IFS=$'\x01' read -r ip ws_domain vm_domain < <(
+    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("")'
   )
-  relay_users_nl="$(relay_list_table "$json" | awk -F '\t' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
+  relay_users_nl="$(relay_list_table "$json" | awk -F '\x01' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
 
@@ -3474,7 +3515,7 @@ install_script_self() {
 install_sb_shortcut() {
   cat > "$SB_SHORTCUT" <<'EOF2'
 #!/bin/sh
-exec bash /root/sing-box.sh "$@"
+exec bash /root/sb.sh "$@"
 EOF2
   chmod +x "$SB_SHORTCUT" >/dev/null 2>&1 || true
 }
@@ -3698,6 +3739,21 @@ migrate_legacy_user_db_if_needed() {
   fi
 }
 
+migrate_legacy_script_name() {
+  if [ -f /root/sing-box.sh ]; then
+    rm -f /root/sing-box.sh
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)"
+    crontab -l 2>/dev/null | grep -v 'sing-box\.sh --user-watch\|sing-box\.sh --maintain-logs' > "$tmp" || true
+    if [ -s "$tmp" ]; then
+      crontab "$tmp"
+    fi
+    rm -f "$tmp"
+  fi
+}
+
 is_script_managed_environment() {
   case "$INIT_SYSTEM" in
     systemd)
@@ -3710,12 +3766,13 @@ is_script_managed_environment() {
       ;;
     *) return 1 ;;
   esac
-  [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
+  [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sb.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
   return 0
 }
 
 prepare_script_runtime() {
   migrate_legacy_user_db_if_needed
+  migrate_legacy_script_name
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
@@ -3883,6 +3940,8 @@ install_or_update_singbox() {
     pause
     return 1
   }
+  init_user_manager_if_needed >/dev/null 2>&1 || true
+
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
@@ -4009,7 +4068,7 @@ protocol_status_summary() {
 
   for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
     label="$proto"
-    ports="$(printf '%s\n' "$all_lines" | awk -F '\t' -v p="$proto" 'NF >= 3 && $2 == p { print $3 }' | sort -n | uniq | paste -sd'|' -)"
+    ports="$(printf '%s\n' "$all_lines" | awk -F '\x01' -v p="$proto" 'NF >= 3 && $2 == p { print $3 }' | sort -n | uniq | paste -sd'|' -)"
 
     if [ -n "$ports" ]; then
       printf '%s\t%s\t%s\n' "$label" "已安装" "$ports"
@@ -4048,13 +4107,13 @@ normalize_takeover(){
 
   local line idx oldtag proto port target current_count
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx oldtag proto port <<< "$line"
+    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
     target="$(entry_key_from_parts "$proto" "$port")" || continue
     target_seen["$target"]=$(( ${target_seen["$target"]:-0} + 1 ))
   done
 
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx oldtag proto port <<< "$line"
+    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
     target="$(entry_key_from_parts "$proto" "$port")" || continue
 
     if [ "${target_seen[$target]:-0}" -gt 1 ]; then
@@ -4083,11 +4142,11 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | @tsv')
-    mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\t' -v ek="$target" '$1 == ek {print $2}')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("")')
+    mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
-      IFS=$'\t' read -r uidx uname <<< "$user_line"
+      IFS=$'\x01' read -r uidx uname <<< "$user_line"
       local is_relay=0 rn
       for rn in "${relay_names[@]}"; do
         if [ "$uname" = "$rn" ] && [ -n "$uname" ]; then
@@ -4128,7 +4187,7 @@ normalize_takeover(){
       skipped=$((skipped+1))
     fi
 
-    while IFS=$'\t' read -r _ relay_user out_tag; do
+    while IFS=$'\x01' read -r _ relay_user out_tag; do
       [ -z "${relay_user:-}" ] && continue
       [[ "$relay_user" == *"@"* ]] && continue
       land=""
@@ -4189,7 +4248,7 @@ normalize_takeover(){
           relay_out_updates=$((relay_out_updates+1))
         fi
       fi
-    done < <(relay_list_table "$work_json" | awk -F '\t' -v ek="$target" '$1 == ek {print $1"\t"$2"\t"$3}')
+    done < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $1"\001"$2"\001"$3}')
   done
 
   echo -e "${B}--------------------------------------------------------${NC}"
@@ -4295,6 +4354,13 @@ protocol_install_menu() {
           echo "已自动生成 Reality 密钥对。"
           echo "Private Key: $priv"
           echo "Public Key : $pub"
+        else
+          read -r -p "Public Key（必填，与 Private Key 配对）: " pub
+          if [ -z "$pub" ]; then
+            warn "手动输入 Private Key 时必须同时提供 Public Key，已返回上一级。"
+            pause
+            return 0
+          fi
         fi
         read -r -p "Short ID (回车随机生成8位hex): " sid
         if [ -z "$sid" ]; then
@@ -4436,7 +4502,7 @@ protocol_remove_menu() {
   echo -e "\n${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
   local i=1
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r entry_key type port <<< "$line"
+    IFS=$'\x01' read -r entry_key type port <<< "$line"
     echo -e " [$i] ${entry_key}"
     i=$((i+1))
   done
@@ -4452,9 +4518,10 @@ protocol_remove_menu() {
     fi
   done
 
+  local _cert_files_to_clean=()
   for c in "${choice_arr[@]}"; do
-    IFS=$'\t' read -r entry_key _ <<< "${lines[$((c-1))]}"
-    related="$(relay_list_table "$updated_json" | awk -F '\t' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
+    IFS=$'\x01' read -r entry_key _ <<< "${lines[$((c-1))]}"
+    related="$(relay_list_table "$updated_json" | awk -F '\x01' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
       err "读取关联中转失败，已中止卸载。"
       pause
       return 1
@@ -4468,7 +4535,11 @@ protocol_remove_menu() {
       pause
       return 1
     }
-    cleanup_inbound_generated_cert_files "$updated_json" "$entry_key"
+    local _crt _key
+    _crt="$(echo "$updated_json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
+    _key="$(echo "$updated_json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
+    [ -n "$_crt" ] && [[ "$_crt" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_crt")
+    [ -n "$_key" ] && [[ "$_key" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_key")
     updated_json="$(remove_inbound_by_entry_key "$updated_json" "$entry_key")" || {
       err "删除核心模块失败，已中止，未写入配置。"
       pause
@@ -4481,16 +4552,26 @@ protocol_remove_menu() {
     pause
     return 1
   }
+  local _apply_ok=0
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
+    if user_manager_apply_changes "$db_json" "$updated_json"; then
+      _apply_ok=1
+    else
       warn "核心模块卸载失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
+    if config_apply "$updated_json"; then
+      _apply_ok=1
+    else
       warn "核心模块卸载失败，已返回上一级。"
     fi
+  fi
+  if [ "$_apply_ok" -eq 1 ] && [ ${#_cert_files_to_clean[@]} -gt 0 ]; then
+    for _f in "${_cert_files_to_clean[@]}"; do
+      rm -f "$_f" >/dev/null 2>&1 || true
+    done
   fi
   pause
   return 0

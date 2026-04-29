@@ -35,7 +35,7 @@ relay_list_table() {
       ]
     | unique
     | .[]
-    | @tsv
+    | join("")
   ' || return 1
 }
 
@@ -46,7 +46,7 @@ show_managed_relay_lines() {
   local found=0
   local seen=""
   local relay_node
-  while IFS=$'\t' read -r entry relay_user out_tag; do
+  while IFS=$'\x01' read -r entry relay_user out_tag; do
     [ -z "${relay_user:-}" ] && continue
     relay_node="$(user_node_part "$relay_user")"
     [ -n "$relay_node" ] || continue
@@ -79,7 +79,7 @@ relay_add() {
   echo -e "${C}请选择主入站：${NC}"
   local i=1 tag port
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r tag proto port <<< "$line"
+    IFS=$'\x01' read -r tag proto port <<< "$line"
     echo -e "  [$i] ${G}${tag}${NC}"
     i=$((i+1))
   done
@@ -97,11 +97,16 @@ relay_add() {
     pause
     return 0
   fi
-  IFS=$'\t' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
+  IFS=$'\x01' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
   inbound="$(find_inbound_by_entry_key "$json" "$entry_key")"
 
   read -r -p "落地标识 (如 sg01): " land
   [ -z "${land:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
+  if ! [[ "$land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    warn "落地标识仅允许字母、数字、点、下划线、短横线。"
+    pause
+    return 0
+  fi
   read -r -p "落地 IP 地址: " ip
   [ -z "${ip:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
   read -r -p "落地端口（默认: 8080）: " relay_port
@@ -183,13 +188,13 @@ relay_delete() {
   fi
 
   mapfile -t node_lines < <(
-    printf '%s\n' "${lines[@]}" | awk -F '\t' '
+    printf '%s\n' "${lines[@]}" | awk -F '\x01' '
       function node_part(s) { sub(/@.*/, "", s); return s }
       {
         node=node_part($2)
         if (!(node in seen)) {
           seen[node]=1
-          print $1 "\t" node "\t" $3
+          print $1 "\001" node "\001" $3
         }
       }' | sort_tsv_by_protocol 2
   )
@@ -198,7 +203,7 @@ relay_delete() {
   echo -e "${R}--- 删除中转节点 ---${NC}"
   local i=1
   for line in "${node_lines[@]}"; do
-    IFS=$'\t' read -r entry relay_user out_tag <<< "$line"
+    IFS=$'\x01' read -r entry relay_user out_tag <<< "$line"
     echo -e " [$i] ${relay_user}"
     i=$((i+1))
   done
@@ -215,9 +220,9 @@ relay_delete() {
       return 1
     fi
     idx=$((part-1))
-    IFS=$'\t' read -r entry node_key out_tag <<< "${node_lines[$idx]}"
+    IFS=$'\x01' read -r entry node_key out_tag <<< "${node_lines[$idx]}"
     users_json="$({
-      printf '%s\n' "${lines[@]}" | awk -F '\t' -v n="$node_key" '
+      printf '%s\n' "${lines[@]}" | awk -F '\x01' -v n="$node_key" '
         function node_part(s) { sub(/@.*/, "", s); return s }
         node_part($2)==n { print $2 }'
     } | awk 'NF' | sort -u | jq -R . | jq -s '.')"
@@ -256,7 +261,7 @@ manage_relay_nodes() {
       [ -n "$relay_node" ] || continue
       _has_relay=1
       echo -e "  - ${G}${relay_node}${NC}"
-    done < <(relay_list_table "$json" | awk -F '\t' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
+    done < <(relay_list_table "$json" | awk -F '\x01' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
     [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
     echo -e "${B}----------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 添加/覆盖中转"

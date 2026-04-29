@@ -13,7 +13,7 @@ user_manager_apply_to_json() {
   work_json="$(config_normalize "$work_json")" || return 1
   mapfile -t inv_lines < <(protocol_entry_inventory_ext "$work_json")
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx entry_key proto port <<< "$line"
+    IFS=$'\x01' read -r idx entry_key proto port <<< "$line"
     inbound="$(find_inbound_by_entry_key "$work_json" "$entry_key")"
     [ -n "$inbound" ] || continue
 
@@ -103,7 +103,6 @@ user_manager_apply_changes() {
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
-  user_db_save "$db_json"
 
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
@@ -112,6 +111,7 @@ user_manager_apply_changes() {
   }
 
   if config_apply "$applied_json"; then
+    user_db_save "$db_json"
     ok "用户变更已应用。"
     return 0
   fi
@@ -183,11 +183,13 @@ apply_automatic_user_controls() {
       | ($v.last_reset_period // "") as $last_reset
       | ($v.enabled // false) as $enabled
       | ($v.quota_gb // 0) as $quota
+      | ($v.disabled_reason // null) as $reason
       | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
       # 1. 到期检查
       | if ($expire != "0" and ($today >= $expire)) then
           .value.enabled = false
+          | .value.disabled_reason = "expired"
         else
           # 2. 重置检查
           (
@@ -202,13 +204,17 @@ apply_automatic_user_controls() {
               | .value.last_live_up_bytes = 0
               | .value.last_live_down_bytes = 0
               | .value.last_reset_period = $period
-              | .value.enabled = true
+              | if ($reason == "quota_exceeded") then
+                  .value.enabled = true
+                  | .value.disabled_reason = null
+                else . end
             else . end
           # 3. 超额检查（重置后 billable 已清零，不会误判）
           | if ($quota > 0 and .value.enabled == true) then
               ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
               | if ($current_billable >= ($quota * 1073741824)) then
                   .value.enabled = false
+                  | .value.disabled_reason = "quota_exceeded"
                 else . end
             else . end
         end

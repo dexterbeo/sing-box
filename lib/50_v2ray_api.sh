@@ -125,7 +125,7 @@ ensure_v2ray_api_on_json() {
 # ---------- 流量查询 ----------
 
 query_v2ray_api_stats_json() {
-  ensure_grpcurl >/dev/null 2>&1 || { echo '[]'; return 0; }
+  ensure_grpcurl >/dev/null 2>&1 || return 1
   ensure_v2ray_api_proto_files
   local payload out stats
   payload='{"patterns":["user>>>"],"reset":false,"regexp":false}'
@@ -141,7 +141,7 @@ query_v2ray_api_stats_json() {
       echo "$stats"; return 0
     }
   fi
-  echo '[]'
+  return 1
 }
 
 build_live_usage_object() {
@@ -170,7 +170,7 @@ sync_user_usage_counters() {
   singbox_service_active || return 0
 
   local stats_json usage_json db_json
-  stats_json="$(query_v2ray_api_stats_json)"
+  stats_json="$(query_v2ray_api_stats_json)" || return 0
   echo "$stats_json" | jq -e 'type=="array"' >/dev/null 2>&1 || return 0
   usage_json="$(build_live_usage_object "$stats_json")" || return 0
   db_json="$(user_db_load)"
@@ -203,7 +203,16 @@ meta_load() {
 meta_save() {
   local meta_json="$1"
   mkdir -p "$(dirname "$META_FILE")"
-  echo "$meta_json" | jq . > "${META_FILE}.tmp" && mv -f "${META_FILE}.tmp" "$META_FILE"
+  chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")"
+  if echo "$meta_json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$META_FILE"
+    chmod 600 "$META_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+    return 1
+  fi
 }
 
 meta_set_reality_public_key() {

@@ -7,13 +7,12 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.3.15"
+SCRIPT_VERSION="5.4.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
-TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
-SB_TARGET_SCRIPT="/root/sing-box.sh"
+SB_TARGET_SCRIPT="/root/sb.sh"
 SB_SHORTCUT="/usr/local/bin/s"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
@@ -24,9 +23,9 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
+USER_WATCH_CRON_MARK="sb.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
-LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
+LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
@@ -131,9 +130,6 @@ table_print_row() {
   done
   printf '%s\n' "$out"
 }
-
-cleanup() { rm -f "$TEMP_FILE"; }
-trap cleanup EXIT
 
 # ====================================================
 # 协议注册表 — 所有协议定义的唯一权威来源
@@ -276,7 +272,7 @@ sort_tsv_by_protocol() {
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     local fval
-    fval="$(echo "$line" | cut -f"$field")"
+    fval="$(echo "$line" | cut -d$'\x01' -f"$field")"
     printf '%s\t%s\n' "$(node_protocol_sort_key "$fval")" "$line"
   done | sort -t$'\t' -k1,1 | cut -f2-
 }

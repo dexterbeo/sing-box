@@ -30,7 +30,7 @@ protocol_entry_inventory() {
     | (detect_protocol) as $proto
     | select($proto != "")
     | [(.tag // ""), $proto, ((.listen_port // 0) | tostring)]
-    | @tsv
+    | join("")
   '
 }
 
@@ -44,7 +44,7 @@ protocol_entry_inventory_ext() {
     | ($ib | detect_protocol) as $proto
     | select($proto != "")
     | [$idx, ($ib.tag // ""), $proto, (($ib.listen_port // 0) | tostring)]
-    | @tsv
+    | join("")
   '
 }
 
@@ -122,16 +122,16 @@ route_rebuild(){
   normalized="$(config_normalize "$json")" || return 1
 
   core_users_json="$({
-    while IFS=$'\t' read -r entry user_name; do
+    while IFS=$'\x01' read -r entry user_name; do
       [ -n "$user_name" ] || continue
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | @tsv')
+    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("")')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({
-    while IFS=$'\t' read -r entry relay_user out_tag; do
+    while IFS=$'\x01' read -r entry relay_user out_tag; do
       [ -z "${relay_user:-}" ] && continue
       [ -z "${out_tag:-}" ] && continue
       if echo "$normalized" | jq -e --arg ot "$out_tag" '.outbounds[]? | select((.tag // "") == $ot)' >/dev/null 2>&1; then

@@ -12,6 +12,7 @@ user_db_min_template() {
   "users": {
     "admin": {
       "enabled": true,
+      "disabled_reason": null,
       "quota_gb": 0,
       "used_up_bytes": 0,
       "used_down_bytes": 0,
@@ -44,7 +45,16 @@ user_db_load() {
 user_db_save() {
   local db_json="$1"
   mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  echo "$db_json" | jq . > "${USER_DB_FILE}.tmp" && mv -f "${USER_DB_FILE}.tmp" "$USER_DB_FILE"
+  chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")"
+  if echo "$db_json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$USER_DB_FILE"
+    chmod 600 "$USER_DB_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+    return 1
+  fi
 }
 
 user_billable_bytes() {

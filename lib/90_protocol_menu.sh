@@ -14,7 +14,7 @@ protocol_status_summary() {
 
   for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
     label="$proto"
-    ports="$(printf '%s\n' "$all_lines" | awk -F '\t' -v p="$proto" 'NF >= 3 && $2 == p { print $3 }' | sort -n | uniq | paste -sd'|' -)"
+    ports="$(printf '%s\n' "$all_lines" | awk -F '\x01' -v p="$proto" 'NF >= 3 && $2 == p { print $3 }' | sort -n | uniq | paste -sd'|' -)"
 
     if [ -n "$ports" ]; then
       printf '%s\t%s\t%s\n' "$label" "已安装" "$ports"
@@ -53,13 +53,13 @@ normalize_takeover(){
 
   local line idx oldtag proto port target current_count
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx oldtag proto port <<< "$line"
+    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
     target="$(entry_key_from_parts "$proto" "$port")" || continue
     target_seen["$target"]=$(( ${target_seen["$target"]:-0} + 1 ))
   done
 
   for line in "${inv_lines[@]}"; do
-    IFS=$'\t' read -r idx oldtag proto port <<< "$line"
+    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
     target="$(entry_key_from_parts "$proto" "$port")" || continue
 
     if [ "${target_seen[$target]:-0}" -gt 1 ]; then
@@ -88,11 +88,11 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | @tsv')
-    mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\t' -v ek="$target" '$1 == ek {print $2}')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("")')
+    mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
-      IFS=$'\t' read -r uidx uname <<< "$user_line"
+      IFS=$'\x01' read -r uidx uname <<< "$user_line"
       local is_relay=0 rn
       for rn in "${relay_names[@]}"; do
         if [ "$uname" = "$rn" ] && [ -n "$uname" ]; then
@@ -133,7 +133,7 @@ normalize_takeover(){
       skipped=$((skipped+1))
     fi
 
-    while IFS=$'\t' read -r _ relay_user out_tag; do
+    while IFS=$'\x01' read -r _ relay_user out_tag; do
       [ -z "${relay_user:-}" ] && continue
       [[ "$relay_user" == *"@"* ]] && continue
       land=""
@@ -194,7 +194,7 @@ normalize_takeover(){
           relay_out_updates=$((relay_out_updates+1))
         fi
       fi
-    done < <(relay_list_table "$work_json" | awk -F '\t' -v ek="$target" '$1 == ek {print $1"\t"$2"\t"$3}')
+    done < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $1"\001"$2"\001"$3}')
   done
 
   echo -e "${B}--------------------------------------------------------${NC}"
@@ -300,6 +300,13 @@ protocol_install_menu() {
           echo "已自动生成 Reality 密钥对。"
           echo "Private Key: $priv"
           echo "Public Key : $pub"
+        else
+          read -r -p "Public Key（必填，与 Private Key 配对）: " pub
+          if [ -z "$pub" ]; then
+            warn "手动输入 Private Key 时必须同时提供 Public Key，已返回上一级。"
+            pause
+            return 0
+          fi
         fi
         read -r -p "Short ID (回车随机生成8位hex): " sid
         if [ -z "$sid" ]; then
@@ -441,7 +448,7 @@ protocol_remove_menu() {
   echo -e "\n${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
   local i=1
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r entry_key type port <<< "$line"
+    IFS=$'\x01' read -r entry_key type port <<< "$line"
     echo -e " [$i] ${entry_key}"
     i=$((i+1))
   done
@@ -457,9 +464,10 @@ protocol_remove_menu() {
     fi
   done
 
+  local _cert_files_to_clean=()
   for c in "${choice_arr[@]}"; do
-    IFS=$'\t' read -r entry_key _ <<< "${lines[$((c-1))]}"
-    related="$(relay_list_table "$updated_json" | awk -F '\t' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
+    IFS=$'\x01' read -r entry_key _ <<< "${lines[$((c-1))]}"
+    related="$(relay_list_table "$updated_json" | awk -F '\x01' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
       err "读取关联中转失败，已中止卸载。"
       pause
       return 1
@@ -473,7 +481,11 @@ protocol_remove_menu() {
       pause
       return 1
     }
-    cleanup_inbound_generated_cert_files "$updated_json" "$entry_key"
+    local _crt _key
+    _crt="$(echo "$updated_json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
+    _key="$(echo "$updated_json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
+    [ -n "$_crt" ] && [[ "$_crt" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_crt")
+    [ -n "$_key" ] && [[ "$_key" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_key")
     updated_json="$(remove_inbound_by_entry_key "$updated_json" "$entry_key")" || {
       err "删除核心模块失败，已中止，未写入配置。"
       pause
@@ -486,16 +498,26 @@ protocol_remove_menu() {
     pause
     return 1
   }
+  local _apply_ok=0
   if user_db_exists; then
     local db_json
     db_json="$(user_db_load)"
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
+    if user_manager_apply_changes "$db_json" "$updated_json"; then
+      _apply_ok=1
+    else
       warn "核心模块卸载失败，已返回上一级。"
     fi
   else
-    if ! config_apply "$updated_json"; then
+    if config_apply "$updated_json"; then
+      _apply_ok=1
+    else
       warn "核心模块卸载失败，已返回上一级。"
     fi
+  fi
+  if [ "$_apply_ok" -eq 1 ] && [ ${#_cert_files_to_clean[@]} -gt 0 ]; then
+    for _f in "${_cert_files_to_clean[@]}"; do
+      rm -f "$_f" >/dev/null 2>&1 || true
+    done
   fi
   pause
   return 0

@@ -151,7 +151,7 @@ install_script_self() {
 install_sb_shortcut() {
   cat > "$SB_SHORTCUT" <<'EOF2'
 #!/bin/sh
-exec bash /root/sing-box.sh "$@"
+exec bash /root/sb.sh "$@"
 EOF2
   chmod +x "$SB_SHORTCUT" >/dev/null 2>&1 || true
 }
@@ -375,6 +375,21 @@ migrate_legacy_user_db_if_needed() {
   fi
 }
 
+migrate_legacy_script_name() {
+  if [ -f /root/sing-box.sh ]; then
+    rm -f /root/sing-box.sh
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)"
+    crontab -l 2>/dev/null | grep -v 'sing-box\.sh --user-watch\|sing-box\.sh --maintain-logs' > "$tmp" || true
+    if [ -s "$tmp" ]; then
+      crontab "$tmp"
+    fi
+    rm -f "$tmp"
+  fi
+}
+
 is_script_managed_environment() {
   case "$INIT_SYSTEM" in
     systemd)
@@ -387,12 +402,13 @@ is_script_managed_environment() {
       ;;
     *) return 1 ;;
   esac
-  [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
+  [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sb.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
   return 0
 }
 
 prepare_script_runtime() {
   migrate_legacy_user_db_if_needed
+  migrate_legacy_script_name
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
@@ -560,6 +576,8 @@ install_or_update_singbox() {
     pause
     return 1
   }
+  init_user_manager_if_needed >/dev/null 2>&1 || true
+
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions

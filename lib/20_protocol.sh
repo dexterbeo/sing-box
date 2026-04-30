@@ -159,7 +159,7 @@ choose_tls_domain() {
       if [ -n "$picked" ]; then
         picked_ms="${picked#*$'\t'}"
         picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
+        printf '已自动选择域名：%b%s%b（%s ms）\n' "$C" "$picked" "$NC" "$picked_ms" >&2
         echo "$picked"
       else
         warn "自动测速失败，已返回上一级。"

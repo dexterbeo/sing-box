@@ -664,7 +664,8 @@ sync_system_time_chrony() {
   chrony_service="$(chrony_service_name)"
   if [ -z "$chrony_service" ]; then
     err "chrony 已安装，但未找到可用服务（OpenRC 通常应为 chronyd）。"
-    warn "当前 Alpine/LXC 环境可能裁剪了 OpenRC 服务脚本，请检查 /etc/init.d/chronyd。"
+    warn "当前可能是 Alpine/LXC 精简环境，缺少 chrony 的 OpenRC 服务脚本。"
+    warn "如果这是 LXC 容器，请在宿主机校准时间，容器会跟随宿主机时间。"
     pause
     return 1
   fi
@@ -696,7 +697,8 @@ sync_system_time_chrony() {
 
   if ! chrony_service_running "$chrony_service"; then
     err "chrony 服务未能启动：${chrony_service}"
-    warn "如果这是 LXC 容器，请确认容器允许运行 OpenRC 服务。"
+    warn "当前可能是 LXC 容器环境，容器通常无法独立启动 chrony 或校准系统时间。"
+    warn "请在宿主机校准时间，容器会跟随宿主机时间。"
     chrony_service_status "$chrony_service"
     pause
     return 1
@@ -704,7 +706,8 @@ sync_system_time_chrony() {
 
   if ! chronyc tracking >/dev/null 2>&1; then
     err "chrony 服务已启动，但无法读取同步状态。"
-    warn "如果这是 LXC 容器，可能只能跟随宿主机时间，请在宿主机校准。"
+    warn "当前可能是 LXC 容器环境，容器通常只能跟随宿主机时间。"
+    warn "请在宿主机校准时间，容器会跟随宿主机时间。"
     chrony_service_status "$chrony_service"
     pause
     return 1
@@ -715,7 +718,7 @@ sync_system_time_chrony() {
     ok "时间同步完成。"
   else
     warn "chrony 已运行，但当前环境不允许主动校准系统时间。"
-    warn "如果这是 LXC 容器，通常需要在宿主机校准时间，容器会跟随宿主机。"
+    warn "当前可能是 LXC 容器环境，请在宿主机校准时间，容器会跟随宿主机时间。"
     [ -n "$step_out" ] && ui_echo "$step_out"
   fi
   chrony_service_status "$chrony_service"

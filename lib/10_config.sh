@@ -147,19 +147,28 @@ restart_singbox_safe() {
     err "已阻止重启：请先修复配置。"
     return 1
   fi
+  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
   case "$INIT_SYSTEM" in
     systemd)
-      systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+      if [ "$quiet" = "1" ]; then
+        systemctl reload sing-box >/dev/null 2>&1 || systemctl restart sing-box >/dev/null 2>&1
+      else
+        systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+      fi
       ;;
     openrc)
-      rc-service sing-box restart
+      if [ "$quiet" = "1" ]; then
+        rc-service sing-box restart >/dev/null 2>&1
+      else
+        rc-service sing-box restart
+      fi
       ;;
     *)
       err "未识别的 init 系统，无法重启 sing-box。"
       return 1
       ;;
   esac
-  [ "${_RESTART_SINGBOX_QUIET_OK:-0}" = "1" ] || ok "sing-box 已重启。"
+  [ "$quiet" = "1" ] || ok "sing-box 已重启。"
 }
 
 enable_now_singbox_safe() {
@@ -172,8 +181,8 @@ enable_now_singbox_safe() {
       systemctl enable --now sing-box
       ;;
     openrc)
-      openrc_enable_service sing-box default
-      openrc_start_service sing-box
+      openrc_enable_service sing-box default >/dev/null 2>&1
+      openrc_start_service sing-box >/dev/null 2>&1
       ;;
     *)
       err "未识别的 init 系统，无法启动 sing-box。"

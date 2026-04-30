@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 02:30:17 UTC
+# 构建时间: 2026-04-30 02:51:37 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.3"
+SCRIPT_VERSION="5.4.4"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -54,6 +54,11 @@ warn() { echo -e "${Y}[WARN]${NC} $*" >&2; }
 err()  { echo -e "${R}[ERR ]${NC} $*" >&2; }
 pause(){ read -r -n 1 -p "按任意键继续..." || true; echo ""; }
 ui_echo(){ printf '%b\n' "$*" >&2; }
+
+param_echo() {
+  local label="$1" value="$2"
+  printf '  %b%s%b: %b%s%b\n' "$W" "$label" "$NC" "$C" "$value" "$NC"
+}
 
 text_display_width() {
   local s="${1:-}"
@@ -684,19 +689,28 @@ restart_singbox_safe() {
     err "已阻止重启：请先修复配置。"
     return 1
   fi
+  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
   case "$INIT_SYSTEM" in
     systemd)
-      systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+      if [ "$quiet" = "1" ]; then
+        systemctl reload sing-box >/dev/null 2>&1 || systemctl restart sing-box >/dev/null 2>&1
+      else
+        systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+      fi
       ;;
     openrc)
-      rc-service sing-box restart
+      if [ "$quiet" = "1" ]; then
+        rc-service sing-box restart >/dev/null 2>&1
+      else
+        rc-service sing-box restart
+      fi
       ;;
     *)
       err "未识别的 init 系统，无法重启 sing-box。"
       return 1
       ;;
   esac
-  [ "${_RESTART_SINGBOX_QUIET_OK:-0}" = "1" ] || ok "sing-box 已重启。"
+  [ "$quiet" = "1" ] || ok "sing-box 已重启。"
 }
 
 enable_now_singbox_safe() {
@@ -709,8 +723,8 @@ enable_now_singbox_safe() {
       systemctl enable --now sing-box
       ;;
     openrc)
-      openrc_enable_service sing-box default
-      openrc_start_service sing-box
+      openrc_enable_service sing-box default >/dev/null 2>&1
+      openrc_start_service sing-box >/dev/null 2>&1
       ;;
     *)
       err "未识别的 init 系统，无法启动 sing-box。"
@@ -1029,7 +1043,7 @@ choose_tls_domain() {
       if [ -n "$picked" ]; then
         picked_ms="${picked#*$'\t'}"
         picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
+        printf '已自动选择域名：%b%s%b（%s ms）\n' "$C" "$picked" "$NC" "$picked_ms" >&2
         echo "$picked"
       else
         warn "自动测速失败，已返回上一级。"
@@ -4112,7 +4126,8 @@ sync_system_time_chrony() {
   chrony_service="$(chrony_service_name)"
   if [ -z "$chrony_service" ]; then
     err "chrony 已安装，但未找到可用服务（OpenRC 通常应为 chronyd）。"
-    warn "当前 Alpine/LXC 环境可能裁剪了 OpenRC 服务脚本，请检查 /etc/init.d/chronyd。"
+    warn "当前可能是 Alpine/LXC 精简环境，缺少 chrony 的 OpenRC 服务脚本。"
+    warn "如果这是 LXC 容器，请在宿主机校准时间，容器会跟随宿主机时间。"
     pause
     return 1
   fi
@@ -4144,7 +4159,8 @@ sync_system_time_chrony() {
 
   if ! chrony_service_running "$chrony_service"; then
     err "chrony 服务未能启动：${chrony_service}"
-    warn "如果这是 LXC 容器，请确认容器允许运行 OpenRC 服务。"
+    warn "当前可能是 LXC 容器环境，容器通常无法独立启动 chrony 或校准系统时间。"
+    warn "请在宿主机校准时间，容器会跟随宿主机时间。"
     chrony_service_status "$chrony_service"
     pause
     return 1
@@ -4152,7 +4168,8 @@ sync_system_time_chrony() {
 
   if ! chronyc tracking >/dev/null 2>&1; then
     err "chrony 服务已启动，但无法读取同步状态。"
-    warn "如果这是 LXC 容器，可能只能跟随宿主机时间，请在宿主机校准。"
+    warn "当前可能是 LXC 容器环境，容器通常只能跟随宿主机时间。"
+    warn "请在宿主机校准时间，容器会跟随宿主机时间。"
     chrony_service_status "$chrony_service"
     pause
     return 1
@@ -4163,7 +4180,7 @@ sync_system_time_chrony() {
     ok "时间同步完成。"
   else
     warn "chrony 已运行，但当前环境不允许主动校准系统时间。"
-    warn "如果这是 LXC 容器，通常需要在宿主机校准时间，容器会跟随宿主机。"
+    warn "当前可能是 LXC 容器环境，请在宿主机校准时间，容器会跟随宿主机时间。"
     [ -n "$step_out" ] && ui_echo "$step_out"
   fi
   chrony_service_status "$chrony_service"
@@ -4476,6 +4493,7 @@ protocol_install_menu() {
   local -a added_node_keys=()
   local -a reality_meta_tags=()
   local -a reality_meta_pubs=()
+  local -a install_param_lines=()
   echo -e "\n${C}可安装模块（多个用 + 连接，如 1+3+5）:${NC}"
   echo -e "  [1] vless-reality"
   echo -e "  [2] anytls"
@@ -4488,7 +4506,7 @@ protocol_install_menu() {
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何模块，已返回上一级。"; pause; return 0; }
 
-  local c port listen sni path priv sid entry_key inbound pub generated_pair
+  local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass
   for c in "${choice_arr[@]}"; do
     if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 7 ]; then
       warn "无效模块编号：$c，已返回上一级。"
@@ -4518,9 +4536,7 @@ protocol_install_menu() {
             pause
             return 0
           fi
-          echo "已自动生成 Reality 密钥对。"
-          echo "Private Key: $priv"
-          echo "Public Key : $pub"
+          ui_echo "已自动生成 Reality 密钥对。"
         else
           read -r -p "Public Key（必填，与 Private Key 配对）: " pub
           if [ -z "$pub" ]; then
@@ -4533,12 +4549,19 @@ protocol_install_menu() {
         if [ -z "$sid" ]; then
           sid="$(openssl rand -hex 4 2>/dev/null || true)"
           if [ -z "$sid" ]; then sid="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-8)"; fi
-          echo "已生成 Short ID: $sid"
+          ui_echo "已生成 Short ID。"
         fi
         sni="$(choose_tls_domain "Reality")" || return 0
         inbound="$(build_vless_reality_inbound "$port" "$sni" "$priv" "$sid")"
+        uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("vless-reality 端口"$'\t'"$port")
+        install_param_lines+=("vless-reality UUID"$'\t'"$uuid")
+        install_param_lines+=("vless-reality SNI"$'\t'"$sni")
+        install_param_lines+=("vless-reality Private Key"$'\t'"$priv")
+        install_param_lines+=("vless-reality Public Key"$'\t'"$pub")
+        install_param_lines+=("vless-reality Short ID"$'\t'"$sid")
         if [ -n "$pub" ]; then
           reality_meta_tags+=("$entry_key")
           reality_meta_pubs+=("$pub")
@@ -4554,8 +4577,12 @@ protocol_install_menu() {
         done
         sni="$(choose_tls_domain "AnyTLS")" || return 0
         inbound="$(build_anytls_inbound "$port" "$sni")"
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("anytls 端口"$'\t'"$port")
+        install_param_lines+=("anytls SNI"$'\t'"$sni")
+        install_param_lines+=("anytls Password"$'\t'"$pass")
         ;;
       3)
         ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
@@ -4566,8 +4593,19 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts shadowsocks "$port")"
         done
         inbound="$(build_ss_inbound "$port")"
+        method="$(echo "$inbound" | jq -r '.method // empty')"
+        server_pass="$(echo "$inbound" | jq -r '.password // empty')"
+        user_pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
+        if [ -n "$server_pass" ] && [ "$server_pass" != "$user_pass" ]; then
+          pass="${server_pass}:${user_pass}"
+        else
+          pass="$user_pass"
+        fi
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("shadowsocks 端口"$'\t'"$port")
+        install_param_lines+=("shadowsocks Method"$'\t'"$method")
+        install_param_lines+=("shadowsocks Password"$'\t'"$pass")
         ;;
       4)
         ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
@@ -4579,8 +4617,12 @@ protocol_install_menu() {
         done
         sni="$(choose_tls_domain "Trojan")" || return 0
         inbound="$(build_trojan_inbound "$port" "$sni")"
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("trojan 端口"$'\t'"$port")
+        install_param_lines+=("trojan SNI"$'\t'"$sni")
+        install_param_lines+=("trojan Password"$'\t'"$pass")
         ;;
       5)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
@@ -4593,8 +4635,12 @@ protocol_install_menu() {
         done
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         inbound="$(build_vmess_ws_inbound "$port" "$listen" "$path")"
+        uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("vmess-ws 端口"$'\t'"$port")
+        install_param_lines+=("vmess-ws UUID"$'\t'"$uuid")
+        install_param_lines+=("vmess-ws WS Path"$'\t'"$path")
         ;;
       6)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
@@ -4607,8 +4653,12 @@ protocol_install_menu() {
         done
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         inbound="$(build_vless_ws_inbound "$port" "$listen" "$path")"
+        uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("vless-ws 端口"$'\t'"$port")
+        install_param_lines+=("vless-ws UUID"$'\t'"$uuid")
+        install_param_lines+=("vless-ws WS Path"$'\t'"$path")
         ;;
       7)
         ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
@@ -4620,8 +4670,14 @@ protocol_install_menu() {
         done
         sni="$(choose_tls_domain "TUIC")" || return 0
         inbound="$(build_tuic_inbound "$port" "$sni")"
+        uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
+        install_param_lines+=("tuic 端口"$'\t'"$port")
+        install_param_lines+=("tuic UUID"$'\t'"$uuid")
+        install_param_lines+=("tuic Password"$'\t'"$pass")
+        install_param_lines+=("tuic SNI"$'\t'"$sni")
         ;;
     esac
   done
@@ -4652,6 +4708,14 @@ protocol_install_menu() {
     for i in "${!reality_meta_tags[@]}"; do
       meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
     done
+    if [ ${#install_param_lines[@]} -gt 0 ]; then
+      echo -e "${C}本次生成参数${NC}"
+      local line label value
+      for line in "${install_param_lines[@]}"; do
+        IFS=$'\t' read -r label value <<< "$line"
+        param_echo "$label" "$value"
+      done
+    fi
     ok "核心模块已安装/更新。"
   fi
   pause
@@ -4875,9 +4939,9 @@ singbox_start() {
       fi
       ;;
     openrc)
-      if rc-service sing-box start; then
+      if openrc_start_service sing-box >/dev/null 2>&1; then
         sleep 1
-        if rc-service sing-box status >/dev/null 2>&1; then
+        if openrc_service_running sing-box; then
           ok "sing-box 已启动并正常运行。"
         else
           err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
@@ -4900,7 +4964,7 @@ singbox_stop() {
       systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     openrc)
-      rc-service sing-box stop && ok "sing-box 已停止。" || err "停止失败。"
+      openrc_stop_service sing-box >/dev/null 2>&1 && ok "sing-box 已停止。" || err "停止失败。"
       ;;
     *) err "未识别的 init 系统，无法停止 sing-box。" ;;
   esac

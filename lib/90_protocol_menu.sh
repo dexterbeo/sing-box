@@ -255,7 +255,7 @@ protocol_install_menu() {
   local -a added_node_keys=()
   local -a reality_meta_tags=()
   local -a reality_meta_pubs=()
-  echo -e "\n${C}可安装模块（多个用 + 连接，如 1+3+5）:${NC}"
+  echo -e "\n${C}可安装协议（多个用 + 连接，如 1+3+5）:${NC}"
   echo -e "  [1] vless-reality"
   echo -e "  [2] anytls"
   echo -e "  [3] shadowsocks"
@@ -263,14 +263,14 @@ protocol_install_menu() {
   echo -e "  [5] vmess-ws"
   echo -e "  [6] vless-ws"
   echo -e "  [7] tuic"
-  read -r -p "请输入要安装的模块编号: " sel
+  read -r -p "请输入要安装的协议编号: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
-  [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何模块，已返回上一级。"; pause; return 0; }
+  [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
   local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass
   for c in "${choice_arr[@]}"; do
     if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 7 ]; then
-      warn "无效模块编号：$c，已返回上一级。"
+      warn "无效协议编号：$c，已返回上一级。"
       pause
       return 0
     fi
@@ -454,13 +454,13 @@ protocol_install_menu() {
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _install_ok=1
     else
-      warn "核心模块安装/更新失败，已返回上一级。"
+      warn "协议安装/更新失败，已返回上一级。"
     fi
   else
     if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
       _install_ok=1
     else
-      warn "核心模块安装/更新失败，已返回上一级。"
+      warn "协议安装/更新失败，已返回上一级。"
     fi
   fi
   if [ "$_install_ok" -eq 1 ]; then
@@ -468,7 +468,7 @@ protocol_install_menu() {
     for i in "${!reality_meta_tags[@]}"; do
       meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
     done
-    ok "核心模块已安装/更新。"
+    ok "协议已安装/更新。"
   fi
   pause
   return 0
@@ -481,24 +481,24 @@ protocol_remove_menu() {
   local lines=() choice_arr updated_json="$json" c entry_key related sel
   mapfile -t lines < <(protocol_entry_table "$json")
   if [ ${#lines[@]} -eq 0 ]; then
-    warn "当前没有可卸载的核心模块。"
+    warn "当前没有可卸载的协议。"
     pause
     return 0
   fi
-  echo -e "\n${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
+  echo -e "\n${R}已安装协议如下（多个用 + 连接，如 1+2）:${NC}"
   local i=1
   for line in "${lines[@]}"; do
     IFS=$'\x01' read -r entry_key type port <<< "$line"
     echo -e " [$i] ${entry_key}"
     i=$((i+1))
   done
-  read -r -p "请输入要卸载的模块编号: " sel
+  read -r -p "请输入要卸载的协议编号: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
-  [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何模块。"; pause; return 0; }
+  [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议。"; pause; return 0; }
 
   for c in "${choice_arr[@]}"; do
     if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt "${#lines[@]}" ]; then
-      warn "无效模块编号：$c，已返回上一级。"
+      warn "无效协议编号：$c，已返回上一级。"
       pause
       return 0
     fi
@@ -527,7 +527,7 @@ protocol_remove_menu() {
     [ -n "$_crt" ] && [[ "$_crt" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_crt")
     [ -n "$_key" ] && [[ "$_key" == /etc/sing-box/* ]] && _cert_files_to_clean+=("$_key")
     updated_json="$(remove_inbound_by_entry_key "$updated_json" "$entry_key")" || {
-      err "删除核心模块失败，已中止，未写入配置。"
+      err "删除协议失败，已中止，未写入配置。"
       pause
       return 1
     }
@@ -546,13 +546,13 @@ protocol_remove_menu() {
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _apply_ok=1
     else
-      warn "核心模块卸载失败，已返回上一级。"
+      warn "协议卸载失败，已返回上一级。"
     fi
   else
     if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
       _apply_ok=1
     else
-      warn "核心模块卸载失败，已返回上一级。"
+      warn "协议卸载失败，已返回上一级。"
     fi
   fi
   if [ "$_apply_ok" -eq 1 ] && [ ${#_cert_files_to_clean[@]} -gt 0 ]; then
@@ -560,7 +560,7 @@ protocol_remove_menu() {
       rm -f "$_f" >/dev/null 2>&1 || true
     done
   fi
-  [ "$_apply_ok" -eq 1 ] && ok "核心模块已卸载。"
+  [ "$_apply_ok" -eq 1 ] && ok "协议已卸载。"
   pause
   return 0
 }
@@ -573,7 +573,7 @@ protocol_manager() {
     clear
     local json
     json="$(config_load)"
-    print_rect_title "核心模块管理"
+    print_rect_title "协议管理"
     local _proto_tmp
     _proto_tmp="$(mktemp)"
     if protocol_status_summary "$json" >"$_proto_tmp" && [ -s "$_proto_tmp" ]; then
@@ -595,12 +595,12 @@ protocol_manager() {
         fi
       done < "$_proto_tmp"
     else
-      echo -e "${Y}当前没有任何核心模块。${NC}"
+      echo -e "${Y}当前没有任何协议。${NC}"
     fi
     rm -f "$_proto_tmp" >/dev/null 2>&1 || true
     echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 安装核心模块"
-    echo -e "  ${C}2.${NC} 卸载核心模块"
+    echo -e "  ${C}1.${NC} 安装协议"
+    echo -e "  ${C}2.${NC} 卸载协议"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in

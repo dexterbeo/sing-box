@@ -69,7 +69,7 @@ relay_add() {
 
   mapfile -t lines < <(protocol_entry_inventory "$json" | sort_tsv_by_protocol 1 | head -100)
   if [ ${#lines[@]} -eq 0 ]; then
-    err "当前没有任何主入站，请先在核心模块管理里安装协议。"
+    err "当前没有任何主入站，请先在协议管理里安装协议。"
     pause
     return 1
   fi
@@ -116,8 +116,9 @@ relay_add() {
     pause
     return 0
   fi
-  read -r -p "落地 SS 2022 密钥（回车随机生成）: " pw
+  read -r -p "落地 SS2022 Password（格式：server_password:user_password，回车随机生成）: " pw
   normalized_pw="$(ss2022_normalize_password_pair "$pw")"
+  param_echo "Password" "$normalized_pw"
 
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
@@ -263,7 +264,7 @@ manage_relay_nodes() {
     clear
     local json
     json="$(config_load)"
-    print_rect_title "中转节点管理"
+    print_rect_title "中转管理"
     local _has_relay=0
     while IFS= read -r relay_node; do
       [ -n "$relay_node" ] || continue
@@ -272,8 +273,8 @@ manage_relay_nodes() {
     done < <(relay_list_table "$json" | awk -F '\x01' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
     [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
     echo -e "${B}----------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 添加/覆盖中转"
-    echo -e "  ${C}2.${NC} 删除中转"
+    echo -e "  ${C}1.${NC} 添加/覆盖中转节点"
+    echo -e "  ${C}2.${NC} 删除中转节点"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in

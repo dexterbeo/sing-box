@@ -297,7 +297,6 @@ protocol_install_menu() {
             pause
             return 0
           fi
-          ui_echo "已自动生成 Reality 密钥对："
           param_echo "Private Key" "$priv"
           param_echo "Public Key" "$pub"
         else
@@ -312,12 +311,12 @@ protocol_install_menu() {
         if [ -z "$sid" ]; then
           sid="$(openssl rand -hex 4 2>/dev/null || true)"
           if [ -z "$sid" ]; then sid="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-8)"; fi
-          param_echo "已生成 Short ID" "$sid"
+          param_echo "Short ID" "$sid"
         fi
         sni="$(choose_tls_domain "Reality")" || return 0
         inbound="$(build_vless_reality_inbound "$port" "$sni" "$priv" "$sid")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
-        param_echo "已自动生成 UUID" "$uuid"
+        param_echo "UUID" "$uuid"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         if [ -n "$pub" ]; then
@@ -336,7 +335,7 @@ protocol_install_menu() {
         sni="$(choose_tls_domain "AnyTLS")" || return 0
         inbound="$(build_anytls_inbound "$port" "$sni")"
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
-        param_echo "已自动生成 Password" "$pass"
+        param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
@@ -357,8 +356,8 @@ protocol_install_menu() {
         else
           pass="$user_pass"
         fi
-        param_echo "默认 Method" "$method"
-        param_echo "已自动生成 Password" "$pass"
+        param_echo "Method" "$method"
+        param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
@@ -373,7 +372,7 @@ protocol_install_menu() {
         sni="$(choose_tls_domain "Trojan")" || return 0
         inbound="$(build_trojan_inbound "$port" "$sni")"
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
-        param_echo "已自动生成 Password" "$pass"
+        param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
@@ -390,7 +389,7 @@ protocol_install_menu() {
         param_echo "WS Path" "$path"
         inbound="$(build_vmess_ws_inbound "$port" "$listen" "$path")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
-        param_echo "已自动生成 UUID" "$uuid"
+        param_echo "UUID" "$uuid"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
@@ -407,7 +406,7 @@ protocol_install_menu() {
         param_echo "WS Path" "$path"
         inbound="$(build_vless_ws_inbound "$port" "$listen" "$path")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
-        param_echo "已自动生成 UUID" "$uuid"
+        param_echo "UUID" "$uuid"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
@@ -423,8 +422,8 @@ protocol_install_menu() {
         inbound="$(build_tuic_inbound "$port" "$sni")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
-        param_echo "已自动生成 UUID" "$uuid"
-        param_echo "已自动生成 Password" "$pass"
+        param_echo "UUID" "$uuid"
+        param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;

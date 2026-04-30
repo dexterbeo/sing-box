@@ -441,6 +441,11 @@ user_date_add_months() {
   '
 }
 
+user_expire_is_past() {
+  local today="$1" expire_at="$2"
+  [ "$expire_at" != "0" ] && [[ "$today" > "$expire_at" ]]
+}
+
 user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
@@ -448,7 +453,6 @@ user_renew_menu() {
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
-  show_user_allowed_nodes "$db_json" "$username"
 
   current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
   if [ "$current_expire" = "0" ]; then
@@ -458,7 +462,7 @@ user_renew_menu() {
   fi
 
   today="$(date +%F)"
-  if [[ "$today" > "$current_expire" || "$today" == "$current_expire" ]]; then
+  if user_expire_is_past "$today" "$current_expire"; then
     expired=1
     base_date="$today"
     warn "用户已过期：按今天续期，并重置流量。"
@@ -498,6 +502,11 @@ user_renew_menu() {
     return 1
   }
   param_echo "续期后到期时间" "$new_expire"
+  ask_confirm_yn "确认续期吗？(y/N): " || {
+    warn "已取消续期。"
+    pause >&2
+    return 1
+  }
 
   echo "$db_json" | jq --arg u "$username" --arg exp "$new_expire" --argjson expired "$expired" '
     .users[$u].expire_at = $exp

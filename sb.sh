@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 07:55:15 UTC
+# 构建时间: 2026-04-30 08:18:22 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.5.0"
+SCRIPT_VERSION="5.5.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -426,6 +426,14 @@ ask_confirm_yes() {
   local ans
   read -r -p "$prompt" ans
   [ "$ans" = "YES" ]
+}
+
+ask_confirm_yn() {
+  local prompt="${1:-确认继续吗？(y/N): }"
+  local ans
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ "$ans" =~ ^[Yy]$ ]]
 }
 
 is_valid_port() {
@@ -2447,8 +2455,8 @@ apply_automatic_user_controls() {
       | ($v.disabled_reason // null) as $reason
       | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
-      # 1. 到期检查
-      | if ($expire != "0" and ($today >= $expire)) then
+      # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
+      | if ($expire != "0" and ($today > $expire)) then
           .value.enabled = false
           | .value.disabled_reason = "expired"
         else
@@ -2963,6 +2971,11 @@ user_date_add_months() {
   '
 }
 
+user_expire_is_past() {
+  local today="$1" expire_at="$2"
+  [ "$expire_at" != "0" ] && [[ "$today" > "$expire_at" ]]
+}
+
 user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
@@ -2970,7 +2983,6 @@ user_renew_menu() {
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
-  show_user_allowed_nodes "$db_json" "$username"
 
   current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
   if [ "$current_expire" = "0" ]; then
@@ -2980,7 +2992,7 @@ user_renew_menu() {
   fi
 
   today="$(date +%F)"
-  if [[ "$today" > "$current_expire" || "$today" == "$current_expire" ]]; then
+  if user_expire_is_past "$today" "$current_expire"; then
     expired=1
     base_date="$today"
     warn "用户已过期：按今天续期，并重置流量。"
@@ -3020,6 +3032,11 @@ user_renew_menu() {
     return 1
   }
   param_echo "续期后到期时间" "$new_expire"
+  ask_confirm_yn "确认续期吗？(y/N): " || {
+    warn "已取消续期。"
+    pause >&2
+    return 1
+  }
 
   echo "$db_json" | jq --arg u "$username" --arg exp "$new_expire" --argjson expired "$expired" '
     .users[$u].expire_at = $exp

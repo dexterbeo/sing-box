@@ -132,6 +132,14 @@ ask_confirm_yes() {
   [ "$ans" = "YES" ]
 }
 
+ask_confirm_yn() {
+  local prompt="${1:-确认继续吗？(y/N): }"
+  local ans
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
 is_valid_port() {
   local v="$1"
   [[ "$v" =~ ^[0-9]+$ ]] || return 1

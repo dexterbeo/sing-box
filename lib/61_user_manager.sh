@@ -193,8 +193,8 @@ apply_automatic_user_controls() {
       | ($v.disabled_reason // null) as $reason
       | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
 
-      # 1. 到期检查
-      | if ($expire != "0" and ($today >= $expire)) then
+      # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
+      | if ($expire != "0" and ($today > $expire)) then
           .value.enabled = false
           | .value.disabled_reason = "expired"
         else

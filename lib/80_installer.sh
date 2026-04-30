@@ -603,12 +603,27 @@ chrony_service_enable() {
   esac
 }
 
+chrony_timeout() {
+  local seconds="$1"
+  shift
+  if has_cmd timeout; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+chronyc_tracking_ready() {
+  chrony_timeout 3 chronyc tracking >/dev/null 2>&1
+}
+
 chrony_service_status() {
   local service="$1"
-  case "$INIT_SYSTEM" in
-    systemd) systemctl status "$service" --no-pager -l || true ;;
-    openrc)  rc-service "$service" status || true ;;
-  esac
+  if chrony_service_running "$service"; then
+    ok "chrony 服务运行中：${service}"
+  else
+    warn "chrony 服务未运行：${service}"
+  fi
 }
 
 sync_system_time_chrony() {
@@ -637,7 +652,7 @@ sync_system_time_chrony() {
     systemctl disable systemd-timesyncd >/dev/null 2>&1 || true
   fi
 
-  if ! chrony_service_running "$chrony_service" || ! chronyc tracking >/dev/null 2>&1; then
+  if ! chrony_service_running "$chrony_service" || ! chronyc_tracking_ready; then
     warn "开始修复 chrony 服务状态..."
     case "$INIT_SYSTEM" in
       systemd)
@@ -652,7 +667,7 @@ sync_system_time_chrony() {
         ;;
     esac
     chrony_service_start "$chrony_service" >/dev/null 2>&1 || true
-    sleep 2
+    sleep 1
   fi
   chrony_service_enable "$chrony_service"
 
@@ -665,7 +680,7 @@ sync_system_time_chrony() {
     return 1
   fi
 
-  if ! chronyc tracking >/dev/null 2>&1; then
+  if ! chronyc_tracking_ready; then
     err "chrony 服务已启动，但无法读取同步状态。"
     warn "当前可能是 LXC 容器环境，容器通常只能跟随宿主机时间。"
     warn "请在宿主机校准时间，容器会跟随宿主机时间。"
@@ -675,7 +690,7 @@ sync_system_time_chrony() {
   fi
 
   local step_out
-  if step_out="$(chronyc -a makestep 2>&1)"; then
+  if step_out="$(chrony_timeout 5 chronyc -a makestep 2>&1)"; then
     ok "时间同步完成。"
   else
     warn "chrony 已运行，但当前环境不允许主动校准系统时间。"

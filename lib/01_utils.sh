@@ -140,6 +140,24 @@ ask_confirm_yn() {
   [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+is_valid_ymd_date() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  awk -v value="$value" '
+    function leap(y) { return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) }
+    function dim(y, m) {
+      if (m == 2) return leap(y) ? 29 : 28
+      if (m == 4 || m == 6 || m == 9 || m == 11) return 30
+      return 31
+    }
+    BEGIN {
+      split(value, a, "-")
+      y = a[1] + 0; m = a[2] + 0; d = a[3] + 0
+      if (y < 1 || m < 1 || m > 12 || d < 1 || d > dim(y, m)) exit 1
+    }
+  '
+}
+
 is_valid_port() {
   local v="$1"
   [[ "$v" =~ ^[0-9]+$ ]] || return 1

@@ -105,15 +105,11 @@ prompt_expire_date() {
     printf -v "$outvar" '%s' '0'
     return 0
   fi
-  if [[ "$val" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    if ! date -d "$val" +%Y-%m-%d >/dev/null 2>&1; then
-      ui_echo "${Y}[WARN]${NC} 日期不合法（如月份或日期超出范围），未作修改，已返回上一级。"
-      return 1
-    fi
+  if is_valid_ymd_date "$val"; then
     printf -v "$outvar" '%s' "$val"
     return 0
   fi
-  ui_echo "${Y}[WARN]${NC} 输入无效，未作修改，已返回上一级。"
+  ui_echo "${Y}[WARN]${NC} 日期不合法，未作修改，已返回上一级。"
   return 1
 }
 
@@ -354,10 +350,7 @@ user_manage_package_menu() {
     expire_val="$current_expire"
   elif [ "$expire_in" = "0" ]; then
     expire_val="0"
-  elif [[ "$expire_in" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    if ! date -d "$expire_in" +%Y-%m-%d >/dev/null 2>&1; then
-      user_package_invalid_return; pause >&2; return 1
-    fi
+  elif is_valid_ymd_date "$expire_in"; then
     expire_val="$expire_in"
   else
     user_package_invalid_return; pause >&2; return 1
@@ -533,8 +526,6 @@ user_manage_single() {
   local db_json json act new_db is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
-    sync_user_usage_counters || true
-    user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
@@ -602,8 +593,6 @@ user_manage_single() {
 
 user_select_and_manage_menu() {
   local db_json usernames=() ans idx username
-  sync_user_usage_counters >/dev/null 2>&1 || true
-  user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   db_json="$(user_db_load)"
   clear
   print_rect_title "管理用户"
@@ -675,8 +664,6 @@ user_delete_menu() {
 
 user_manager_menu() {
   init_user_manager_if_needed || return 0
-  sync_user_usage_counters >/dev/null 2>&1 || true
-  user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   while true; do
     local db_json
     db_json="$(user_db_load)"

@@ -243,7 +243,7 @@ user_watch_run() {
   flock -n "$lock_fd" || return 0
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
-  init_user_manager_if_needed >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
+  user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
   apply_automatic_user_controls >/dev/null 2>&1 || true
   _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
@@ -259,6 +259,11 @@ init_user_manager_if_needed() {
     user_db_save "$(user_db_min_template)" || return 1
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
+  return 0
+}
+
+user_manager_background_sync() {
+  init_user_manager_if_needed || return 1
   user_db_cleanup_current_and_save || true
   user_manager_runtime_sync || true
   return 0

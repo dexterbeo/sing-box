@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 08:18:22 UTC
+# 构建时间: 2026-04-30 08:49:57 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.5.1"
+SCRIPT_VERSION="5.5.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -434,6 +434,24 @@ ask_confirm_yn() {
   printf '%s' "$prompt" >&2
   read -r ans || ans=""
   [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+is_valid_ymd_date() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  awk -v value="$value" '
+    function leap(y) { return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) }
+    function dim(y, m) {
+      if (m == 2) return leap(y) ? 29 : 28
+      if (m == 4 || m == 6 || m == 9 || m == 11) return 30
+      return 31
+    }
+    BEGIN {
+      split(value, a, "-")
+      y = a[1] + 0; m = a[2] + 0; d = a[3] + 0
+      if (y < 1 || m < 1 || m > 12 || d < 1 || d > dim(y, m)) exit 1
+    }
+  '
 }
 
 is_valid_port() {
@@ -2505,7 +2523,7 @@ user_watch_run() {
   flock -n "$lock_fd" || return 0
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
-  init_user_manager_if_needed >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
+  user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
   apply_automatic_user_controls >/dev/null 2>&1 || true
   _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
@@ -2521,6 +2539,11 @@ init_user_manager_if_needed() {
     user_db_save "$(user_db_min_template)" || return 1
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
+  return 0
+}
+
+user_manager_background_sync() {
+  init_user_manager_if_needed || return 1
   user_db_cleanup_current_and_save || true
   user_manager_runtime_sync || true
   return 0
@@ -2635,15 +2658,11 @@ prompt_expire_date() {
     printf -v "$outvar" '%s' '0'
     return 0
   fi
-  if [[ "$val" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    if ! date -d "$val" +%Y-%m-%d >/dev/null 2>&1; then
-      ui_echo "${Y}[WARN]${NC} 日期不合法（如月份或日期超出范围），未作修改，已返回上一级。"
-      return 1
-    fi
+  if is_valid_ymd_date "$val"; then
     printf -v "$outvar" '%s' "$val"
     return 0
   fi
-  ui_echo "${Y}[WARN]${NC} 输入无效，未作修改，已返回上一级。"
+  ui_echo "${Y}[WARN]${NC} 日期不合法，未作修改，已返回上一级。"
   return 1
 }
 
@@ -2884,10 +2903,7 @@ user_manage_package_menu() {
     expire_val="$current_expire"
   elif [ "$expire_in" = "0" ]; then
     expire_val="0"
-  elif [[ "$expire_in" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    if ! date -d "$expire_in" +%Y-%m-%d >/dev/null 2>&1; then
-      user_package_invalid_return; pause >&2; return 1
-    fi
+  elif is_valid_ymd_date "$expire_in"; then
     expire_val="$expire_in"
   else
     user_package_invalid_return; pause >&2; return 1
@@ -3063,8 +3079,6 @@ user_manage_single() {
   local db_json json act new_db is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
-    sync_user_usage_counters || true
-    user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
@@ -3132,8 +3146,6 @@ user_manage_single() {
 
 user_select_and_manage_menu() {
   local db_json usernames=() ans idx username
-  sync_user_usage_counters >/dev/null 2>&1 || true
-  user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   db_json="$(user_db_load)"
   clear
   print_rect_title "管理用户"
@@ -3205,8 +3217,6 @@ user_delete_menu() {
 
 user_manager_menu() {
   init_user_manager_if_needed || return 0
-  sync_user_usage_counters >/dev/null 2>&1 || true
-  user_db_cleanup_current_and_save >/dev/null 2>&1 || true
   while true; do
     local db_json
     db_json="$(user_db_load)"
@@ -4139,7 +4149,7 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  init_user_manager_if_needed >/dev/null 2>&1 || true
+  user_manager_background_sync >/dev/null 2>&1 || true
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"

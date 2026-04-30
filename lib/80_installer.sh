@@ -579,7 +579,7 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  init_user_manager_if_needed >/dev/null 2>&1 || true
+  user_manager_background_sync >/dev/null 2>&1 || true
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"

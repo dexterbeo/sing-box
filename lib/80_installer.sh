@@ -313,8 +313,11 @@ remove_all_singbox_service_units() {
       systemctl daemon-reload >/dev/null 2>&1 || true
       ;;
     openrc)
-      rc-service sing-box stop >/dev/null 2>&1 || true
-      rc-update del sing-box default >/dev/null 2>&1 || true
+      if openrc_service_exists sing-box; then
+        openrc_stop_service sing-box >/dev/null 2>&1 || true
+      fi
+      openrc_disable_service sing-box default >/dev/null 2>&1 || true
+      find /etc/runlevels -type l -name sing-box -exec rm -f {} + 2>/dev/null || true
       rm -f /etc/init.d/sing-box >/dev/null 2>&1 || true
       ;;
   esac
@@ -587,6 +590,66 @@ install_or_update_singbox() {
 
 # ---------- 时间同步 ----------
 
+chrony_service_name() {
+  case "$INIT_SYSTEM" in
+    systemd)
+      if systemctl cat chrony >/dev/null 2>&1; then
+        echo "chrony"
+      elif systemctl cat chronyd >/dev/null 2>&1; then
+        echo "chronyd"
+      else
+        echo "chrony"
+      fi
+      ;;
+    openrc)
+      if openrc_service_exists chronyd; then
+        echo "chronyd"
+      elif openrc_service_exists chrony; then
+        echo "chrony"
+      fi
+      ;;
+  esac
+}
+
+chrony_service_running() {
+  local service="$1"
+  case "$INIT_SYSTEM" in
+    systemd) systemctl is-active --quiet "$service" 2>/dev/null ;;
+    openrc)  openrc_service_running "$service" ;;
+    *)       return 1 ;;
+  esac
+}
+
+chrony_service_start() {
+  local service="$1"
+  case "$INIT_SYSTEM" in
+    systemd)
+      systemctl reset-failed "$service" >/dev/null 2>&1 || true
+      systemctl start "$service"
+      ;;
+    openrc)
+      openrc_start_service "$service"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+chrony_service_enable() {
+  local service="$1"
+  case "$INIT_SYSTEM" in
+    systemd) systemctl enable "$service" >/dev/null 2>&1 || true ;;
+    openrc)  openrc_enable_service "$service" default >/dev/null 2>&1 || true ;;
+  esac
+}
+
+chrony_service_status() {
+  local service="$1"
+  case "$INIT_SYSTEM" in
+    systemd) systemctl status "$service" --no-pager -l || true ;;
+    openrc)  rc-service "$service" status || true ;;
+  esac
+}
+
 sync_system_time_chrony() {
   require_root
   clear
@@ -595,45 +658,67 @@ sync_system_time_chrony() {
     warn "未检测到 chrony，开始安装..."
     install_pkg chrony || { err "chrony 安装失败。"; pause; return 1; }
   fi
+  has_cmd chronyc || { err "chrony 安装后仍未找到 chronyc，无法继续校时。"; pause; return 1; }
+
+  local chrony_service
+  chrony_service="$(chrony_service_name)"
+  if [ -z "$chrony_service" ]; then
+    err "chrony 已安装，但未找到可用服务（OpenRC 通常应为 chronyd）。"
+    warn "当前 Alpine/LXC 环境可能裁剪了 OpenRC 服务脚本，请检查 /etc/init.d/chronyd。"
+    pause
+    return 1
+  fi
+
   # 停用系统自带 timesyncd（仅 systemd 有此服务）
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     systemctl stop systemd-timesyncd >/dev/null 2>&1 || true
     systemctl disable systemd-timesyncd >/dev/null 2>&1 || true
   fi
-  local chrony_running=0
-  case "$INIT_SYSTEM" in
-    systemd) [ "$(systemctl is-active chrony 2>/dev/null)" = "active" ] && chrony_running=1 ;;
-    openrc)  rc-service chrony status >/dev/null 2>&1 && chrony_running=1 ;;
-  esac
-  if ! chronyc tracking >/dev/null 2>&1 || [ "$chrony_running" != "1" ]; then
+
+  if ! chrony_service_running "$chrony_service" || ! chronyc tracking >/dev/null 2>&1; then
     warn "开始修复 chrony 服务状态..."
     case "$INIT_SYSTEM" in
       systemd)
-        systemctl stop chrony >/dev/null 2>&1 || true
+        systemctl stop "$chrony_service" >/dev/null 2>&1 || true
         pkill -9 chronyd >/dev/null 2>&1 || true
         rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
-        systemctl reset-failed chrony >/dev/null 2>&1 || true
-        systemctl start chrony >/dev/null 2>&1 || true
         ;;
       openrc)
-        rc-service chrony stop >/dev/null 2>&1 || true
+        openrc_stop_service "$chrony_service" >/dev/null 2>&1 || true
         pkill -9 chronyd >/dev/null 2>&1 || true
         rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
-        rc-service chrony start >/dev/null 2>&1 || true
         ;;
     esac
+    chrony_service_start "$chrony_service" >/dev/null 2>&1 || true
     sleep 2
   fi
-  case "$INIT_SYSTEM" in
-    systemd) systemctl enable chrony >/dev/null 2>&1 || true ;;
-    openrc)  rc-update add chrony default >/dev/null 2>&1 || true ;;
-  esac
-  chronyc -a makestep >/dev/null 2>&1 || true
-  ok "时间同步完成。"
-  case "$INIT_SYSTEM" in
-    systemd) systemctl status chrony --no-pager -l || true ;;
-    openrc)  rc-service chrony status || true ;;
-  esac
+  chrony_service_enable "$chrony_service"
+
+  if ! chrony_service_running "$chrony_service"; then
+    err "chrony 服务未能启动：${chrony_service}"
+    warn "如果这是 LXC 容器，请确认容器允许运行 OpenRC 服务。"
+    chrony_service_status "$chrony_service"
+    pause
+    return 1
+  fi
+
+  if ! chronyc tracking >/dev/null 2>&1; then
+    err "chrony 服务已启动，但无法读取同步状态。"
+    warn "如果这是 LXC 容器，可能只能跟随宿主机时间，请在宿主机校准。"
+    chrony_service_status "$chrony_service"
+    pause
+    return 1
+  fi
+
+  local step_out
+  if step_out="$(chronyc -a makestep 2>&1)"; then
+    ok "时间同步完成。"
+  else
+    warn "chrony 已运行，但当前环境不允许主动校准系统时间。"
+    warn "如果这是 LXC 容器，通常需要在宿主机校准时间，容器会跟随宿主机。"
+    [ -n "$step_out" ] && ui_echo "$step_out"
+  fi
+  chrony_service_status "$chrony_service"
   pause
 }
 

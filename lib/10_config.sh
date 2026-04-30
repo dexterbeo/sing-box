@@ -103,6 +103,45 @@ check_config_or_print() {
   return 1
 }
 
+openrc_service_exists() {
+  local service="$1"
+  [ -e "/etc/init.d/$service" ] || rc-service -e "$service" >/dev/null 2>&1
+}
+
+openrc_service_enabled() {
+  local service="$1" runlevel="${2:-default}"
+  rc-update show "$runlevel" 2>/dev/null | awk -v svc="$service" '$1 == svc {found=1} END {exit !found}'
+}
+
+openrc_enable_service() {
+  local service="$1" runlevel="${2:-default}"
+  openrc_service_enabled "$service" "$runlevel" && return 0
+  rc-update add "$service" "$runlevel"
+}
+
+openrc_disable_service() {
+  local service="$1" runlevel="${2:-default}"
+  openrc_service_enabled "$service" "$runlevel" || return 0
+  rc-update del "$service" "$runlevel"
+}
+
+openrc_service_running() {
+  local service="$1"
+  rc-service "$service" status >/dev/null 2>&1
+}
+
+openrc_start_service() {
+  local service="$1"
+  openrc_service_running "$service" && return 0
+  rc-service "$service" start
+}
+
+openrc_stop_service() {
+  local service="$1"
+  openrc_service_running "$service" || return 0
+  rc-service "$service" stop
+}
+
 restart_singbox_safe() {
   if ! check_config_or_print; then
     err "已阻止重启：请先修复配置。"
@@ -133,8 +172,8 @@ enable_now_singbox_safe() {
       systemctl enable --now sing-box
       ;;
     openrc)
-      rc-update add sing-box default
-      rc-service sing-box start
+      openrc_enable_service sing-box default
+      openrc_start_service sing-box
       ;;
     *)
       err "未识别的 init 系统，无法启动 sing-box。"
@@ -241,7 +280,7 @@ _config_apply_body() {
   if _RESTART_SINGBOX_QUIET_OK=1 restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
-      openrc)  rc-update add sing-box default >/dev/null 2>&1 || true ;;
+      openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
     esac
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个

@@ -16,7 +16,7 @@ show_user_status_table() {
   local -a rows=()
   local -a cols=()
 
-  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}已用总量${sep}套餐${sep}重置日${sep}到期时间"
+  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}补正流量${sep}已用总量${sep}套餐${sep}重置日${sep}到期时间"
   rows+=("$header")
 
   while IFS= read -r row_line; do
@@ -31,21 +31,23 @@ show_user_status_table() {
           (if (.value.enabled == true) then "开启" else "关闭" end),
           ((.value.used_up_bytes // 0) | tostring),
           ((.value.used_down_bytes // 0) | tostring),
+          ((.value.manual_added_bytes // 0) | tostring),
           (((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) | tostring),
           ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
         ] | join("\u0001")
-    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8 c9; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c1" \
             "$c2" \
             "$(format_bytes_human "$c3")" \
             "$(format_bytes_human "$c4")" \
             "$(format_bytes_human "$c5")" \
-            "$c6" \
+            "$(format_bytes_human "$c6")" \
             "$c7" \
-            "$c8"
+            "$c8" \
+            "$c9"
       done
   )
 
@@ -152,51 +154,25 @@ select_nodes_multi() {
   fi
 }
 
-user_show_info() {
+show_user_allowed_nodes() {
   local db_json="$1" username="$2"
-  local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
-  IFS=$'\x01' read -r used_up used_down manual_added total_used quota_bytes < <(
-    echo "$db_json" | jq -r --arg u "$username" '
-      (.users[$u].used_up_bytes // 0) as $up
-      | (.users[$u].used_down_bytes // 0) as $down
-      | (.users[$u].manual_added_bytes // 0) as $manual
-      | [($up | tostring), ($down | tostring), ($manual | tostring),
-         (($up + $down + $manual) | tostring),
-         (((.users[$u].quota_gb // 0) * 1073741824) | tostring)] | join("\u0001")
-    '
-  )
-  used_up_text="$(format_traffic_auto "$used_up")"
-  used_down_text="$(format_traffic_auto "$used_down")"
-  manual_text="$(format_traffic_auto "$manual_added")"
-  total_text="$(format_traffic_auto "$total_used")"
-  if [ "$quota_bytes" -eq 0 ]; then
-    quota_text="不限"
-  else
-    quota_text="$(format_traffic_auto "$quota_bytes")"
-  fi
-  echo "$db_json" | jq -r     --arg u "$username"     --arg up "$used_up_text"     --arg down "$used_down_text"     --arg manual "$manual_text"     --arg total "$total_text"     --arg quota "$quota_text" '
-    .users[$u] as $x
-    | "用户名：" + $u + "\n"
-      + "状态：" + (if $x.enabled then "开启" else ("关闭" + (if ($x.disabled_reason // null) == "manual" then "（手动）" elif ($x.disabled_reason // null) == "quota_exceeded" then "（超额）" elif ($x.disabled_reason // null) == "expired" then "（到期）" else "" end)) end) + "\n"
-      + "上传流量：" + $up + "\n"
-      + "下载流量：" + $down + "\n"
-      + "手动补正流量：" + $manual + "\n"
-      + "已用总量：" + $total + "\n"
-      + "套餐总量：" + $quota + "\n"
-      + "重置日：" + (if (($x.reset_day // 0) == 0) then "不重置" elif (($x.reset_day // 0) == 32) then "月底" else (($x.reset_day|tostring)+"号") end) + "\n"
-      + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end)
-  '
-  echo "允许节点："
-  echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sed 's/^/  - /'
-  if ! echo "$db_json" | jq -e --arg u "$username" '(.users[$u].nodes // []) | length > 0' >/dev/null 2>&1; then
-    if echo "$db_json" | jq -e --arg u "$username" '.users[$u].allow_all_nodes == true' >/dev/null 2>&1; then
-      echo "  - 全部节点（admin）"
+  ui_echo "允许节点："
+  if echo "$db_json" | jq -e --arg u "$username" '.users[$u].allow_all_nodes == true' >/dev/null 2>&1; then
+    if [ "$username" = "admin" ]; then
+      ui_echo "  - 全部节点（admin）"
     else
-      echo "  - （无）"
+      ui_echo "  - 全部节点"
     fi
+    return 0
   fi
+
+  local has_node=0 node
+  while IFS= read -r node; do
+    [ -n "$node" ] || continue
+    ui_echo "  - $node"
+    has_node=1
+  done < <(echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sort_node_keys_by_protocol)
+  [ "$has_node" -eq 1 ] || ui_echo "  - （无）"
 }
 
 user_add_menu() {
@@ -441,6 +417,108 @@ user_reset_usage_menu() {
   '
 }
 
+user_date_add_months() {
+  local base_date="$1" months="$2"
+  awk -v base="$base_date" -v add="$months" '
+    function leap(y) { return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) }
+    function dim(y, m) {
+      if (m == 2) return leap(y) ? 29 : 28
+      if (m == 4 || m == 6 || m == 9 || m == 11) return 30
+      return 31
+    }
+    BEGIN {
+      split(base, a, "-")
+      y = a[1] + 0; m = a[2] + 0; d = a[3] + 0; add += 0
+      if (y < 1 || m < 1 || m > 12 || d < 1 || d > dim(y, m) || add < 1) exit 1
+      is_eom = (d == dim(y, m))
+      total = y * 12 + (m - 1) + add
+      ty = int(total / 12)
+      tm = (total % 12) + 1
+      td = is_eom ? dim(ty, tm) : d
+      if (td > dim(ty, tm)) td = dim(ty, tm)
+      printf "%04d-%02d-%02d\n", ty, tm, td
+    }
+  '
+}
+
+user_renew_menu() {
+  local db_json="$1" username="$2"
+  local current_expire today base_date expired=0 choice months custom_months new_expire
+
+  clear >&2
+  print_rect_title "一键续期" >&2
+  show_user_status_table "$db_json" >&2
+  show_user_allowed_nodes "$db_json" "$username"
+
+  current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
+  if [ "$current_expire" = "0" ]; then
+    warn "永久用户无需续期。"
+    pause >&2
+    return 1
+  fi
+
+  today="$(date +%F)"
+  if [[ "$today" > "$current_expire" || "$today" == "$current_expire" ]]; then
+    expired=1
+    base_date="$today"
+    warn "用户已过期：按今天续期，并重置流量。"
+  else
+    base_date="$current_expire"
+  fi
+
+  ui_echo "当前到期时间：$(expire_text "$current_expire")"
+  ui_echo "续期起点：$base_date"
+  ui_echo "1. 续期一个月"
+  ui_echo "2. 续期一个季度"
+  ui_echo "3. 自定义续期月数"
+  read -r -p "请选择操作（回车返回上一级）: " choice
+  case "${choice:-}" in
+    1) months=1 ;;
+    2) months=3 ;;
+    3)
+      read -r -p "填写需要续期的月数: " custom_months
+      if ! [[ "$custom_months" =~ ^[0-9]+$ ]] || [ "$custom_months" -lt 1 ]; then
+        user_package_invalid_return
+        pause >&2
+        return 1
+      fi
+      months="$custom_months"
+      ;;
+    "") return 1 ;;
+    *)
+      user_package_invalid_return
+      pause >&2
+      return 1
+      ;;
+  esac
+
+  new_expire="$(user_date_add_months "$base_date" "$months")" || {
+    err "续期日期计算失败，未作修改。"
+    pause >&2
+    return 1
+  }
+  param_echo "续期后到期时间" "$new_expire"
+
+  echo "$db_json" | jq --arg u "$username" --arg exp "$new_expire" --argjson expired "$expired" '
+    .users[$u].expire_at = $exp
+    | if $expired == 1 then
+        .users[$u].used_up_bytes = 0
+        | .users[$u].used_down_bytes = 0
+        | .users[$u].manual_added_bytes = 0
+        | .users[$u].last_live_up_bytes = 0
+        | .users[$u].last_live_down_bytes = 0
+        | .users[$u].last_reset_period = ""
+        | if (.users[$u].disabled_reason // null) == "manual" then .
+          else .users[$u].enabled = true | .users[$u].disabled_reason = null
+          end
+      else
+        if (.users[$u].disabled_reason // null) == "expired" then
+          .users[$u].enabled = true | .users[$u].disabled_reason = null
+        else . end
+      end
+  '
+}
+
 user_manage_single() {
   local username="$1"
   local db_json json act new_db is_admin=0
@@ -455,12 +533,13 @@ user_manage_single() {
     show_user_status_table "$db_json"
     echo "当前用户：$username"
     [ $is_admin -eq 1 ] && echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
+    show_user_allowed_nodes "$db_json" "$username"
     echo "  1. 启用/停用"
     [ $is_admin -eq 0 ] && echo "  2. 节点权限"
     echo "  3. 套餐设置"
     echo "  4. 手动重置流量"
     echo "  5. 手动添加流量（对齐总量）"
-    echo "  6. 查看用户信息"
+    echo "  6. 一键续期"
     echo "  0. 返回上一级"
     read -r -p "请选择操作: " act
     case "${act:-}" in
@@ -501,11 +580,10 @@ user_manage_single() {
         fi
         ;;
       6)
-        clear
-        print_rect_title "用户信息"
-        user_show_info "$db_json" "$username"
-        echo ""
-        pause
+        new_db="$(user_renew_menu "$db_json" "$username")" || new_db=""
+        if json_is_object "$new_db"; then
+          user_manager_apply_changes "$new_db" "$json" || true
+        fi
         ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;

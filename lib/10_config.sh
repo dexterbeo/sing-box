@@ -142,33 +142,57 @@ openrc_stop_service() {
   rc-service "$service" stop
 }
 
-restart_singbox_safe() {
+reload_or_restart_singbox_safe() {
   if ! check_config_or_print; then
-    err "已阻止重启：请先修复配置。"
+    err "已阻止热载：请先修复配置。"
     return 1
   fi
-  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
+  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}" action=""
   case "$INIT_SYSTEM" in
     systemd)
       if [ "$quiet" = "1" ]; then
-        systemctl reload sing-box >/dev/null 2>&1 || systemctl restart sing-box >/dev/null 2>&1
+        if systemctl reload sing-box >/dev/null 2>&1; then
+          action="热载"
+        elif systemctl restart sing-box >/dev/null 2>&1; then
+          action="重启"
+        else
+          return 1
+        fi
       else
-        systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+        if systemctl reload sing-box 2>/dev/null; then
+          action="热载"
+        elif systemctl restart sing-box; then
+          action="重启"
+        else
+          return 1
+        fi
       fi
       ;;
     openrc)
       if [ "$quiet" = "1" ]; then
-        rc-service sing-box restart >/dev/null 2>&1
+        if rc-service sing-box reload >/dev/null 2>&1; then
+          action="热载"
+        elif rc-service sing-box restart >/dev/null 2>&1; then
+          action="重启"
+        else
+          return 1
+        fi
       else
-        rc-service sing-box restart
+        if rc-service sing-box reload 2>/dev/null; then
+          action="热载"
+        elif rc-service sing-box restart; then
+          action="重启"
+        else
+          return 1
+        fi
       fi
       ;;
     *)
-      err "未识别的 init 系统，无法重启 sing-box。"
+      err "未识别的 init 系统，无法热载 sing-box。"
       return 1
       ;;
   esac
-  [ "$quiet" = "1" ] || ok "sing-box 已重启。"
+  [ "$quiet" = "1" ] || ok "sing-box 已${action}。"
 }
 
 enable_now_singbox_safe() {
@@ -286,7 +310,7 @@ _config_apply_body() {
   mv -f "$tmp_file" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if _RESTART_SINGBOX_QUIET_OK=1 restart_singbox_safe; then
+  if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
@@ -298,7 +322,7 @@ _config_apply_body() {
     return 0
   fi
 
-  err "重启失败：正在回滚。"
+  err "热载/重启失败：正在回滚。"
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
     cp -a "$prev_tmp" "$backup"
     cp -a "$prev_tmp" "$CONFIG_FILE"
@@ -308,8 +332,8 @@ _config_apply_body() {
     warn "无旧配置可回滚，已保存失败现场：$backup"
   fi
   rm -f "$prev_tmp" >/dev/null 2>&1 || true
-  if ! restart_singbox_safe; then
-    err "回滚后重启仍失败，sing-box 当前处于停止状态。"
+  if ! reload_or_restart_singbox_safe; then
+    err "回滚后热载/重启仍失败，sing-box 当前可能处于异常状态。"
     warn "手动恢复命令："
     case "$INIT_SYSTEM" in
       systemd) warn "  systemctl start sing-box" ;;

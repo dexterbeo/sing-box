@@ -6,7 +6,6 @@
 # ============================================================
 
 main_menu() {
-  ensure_sb_shortcut >/dev/null 2>&1 || true
   while true; do
     clear
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
@@ -41,8 +40,6 @@ main_menu() {
 # ====================================================
 # CLI 入口路由
 # ====================================================
-sync_runtime_script_entrypoints
-
 if [[ "${1:-}" == "--user-watch" ]]; then
   user_watch_run
   exit 0

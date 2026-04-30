@@ -70,13 +70,6 @@ show_user_status_table() {
   ui_echo "${B}${divider_line}${NC}"
 }
 
-show_user_status_table_from_file() {
-  local db_json
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
-  show_user_status_table "$db_json"
-}
-
 prompt_reset_day() {
   local outvar="$1" val
   while true; do
@@ -173,7 +166,6 @@ show_user_allowed_nodes() {
 
 user_add_menu() {
   local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
-  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -616,7 +608,6 @@ user_select_and_manage_menu() {
 
 user_delete_menu() {
   local db_json json usernames=() ans new_db picks=() part idx username
-  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -663,7 +654,11 @@ user_delete_menu() {
 }
 
 user_manager_menu() {
-  init_user_manager_if_needed || return 0
+  if ! user_db_exists; then
+    err "用户数据库不存在或不可用，请先执行 1. 安装/更新 sing-box。"
+    pause
+    return 0
+  fi
   while true; do
     local db_json
     db_json="$(user_db_load)"

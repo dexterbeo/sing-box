@@ -132,8 +132,6 @@ user_manager_runtime_sync() {
     user_db_save "$db_json" || return 1
   fi
 
-  ensure_grpcurl >/dev/null 2>&1 || true
-
   current_json="$(config_load)"
   desired_json="$(user_manager_apply_to_json "$current_json" "$db_json")" || {
     err "生成用户流量统计配置失败。"
@@ -151,7 +149,6 @@ user_manager_runtime_sync() {
     fi
   fi
 
-  sync_user_usage_counters || true
   return 0
 }
 
@@ -241,6 +238,7 @@ user_watch_run() {
   local lock_fd
   exec {lock_fd}>"$SB_LOCK_FILE" || return 0
   flock -n "$lock_fd" || return 0
+  user_db_exists || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
   user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
@@ -249,22 +247,22 @@ user_watch_run() {
   exec {lock_fd}>&-
 }
 
-init_user_manager_if_needed() {
+ensure_user_manager_ready() {
   init_manager_env
-  if [ ! -e "$USER_DB_FILE" ] && [ -e "/etc/sing-box/user-manager.json" ]; then
-    mkdir -p "$(dirname "$USER_DB_FILE")"
-    mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
-  fi
   if ! user_db_exists; then
-    user_db_save "$(user_db_min_template)" || return 1
+    user_db_save "$(user_db_min_template)" || {
+      err "用户数据库初始化失败：$USER_DB_FILE"
+      return 1
+    }
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   return 0
 }
 
 user_manager_background_sync() {
-  init_user_manager_if_needed || return 1
-  user_db_cleanup_current_and_save || true
-  user_manager_runtime_sync || true
+  user_db_exists || return 0
+  init_manager_env
+  user_db_cleanup_current_and_save || return 1
+  user_manager_runtime_sync || return 1
   return 0
 }

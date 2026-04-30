@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 08:49:57 UTC
+# 构建时间: 2026-04-30 09:16:12 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.5.2"
+SCRIPT_VERSION="5.5.3"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -710,33 +710,57 @@ openrc_stop_service() {
   rc-service "$service" stop
 }
 
-restart_singbox_safe() {
+reload_or_restart_singbox_safe() {
   if ! check_config_or_print; then
-    err "已阻止重启：请先修复配置。"
+    err "已阻止热载：请先修复配置。"
     return 1
   fi
-  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
+  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}" action=""
   case "$INIT_SYSTEM" in
     systemd)
       if [ "$quiet" = "1" ]; then
-        systemctl reload sing-box >/dev/null 2>&1 || systemctl restart sing-box >/dev/null 2>&1
+        if systemctl reload sing-box >/dev/null 2>&1; then
+          action="热载"
+        elif systemctl restart sing-box >/dev/null 2>&1; then
+          action="重启"
+        else
+          return 1
+        fi
       else
-        systemctl reload sing-box 2>/dev/null || systemctl restart sing-box
+        if systemctl reload sing-box 2>/dev/null; then
+          action="热载"
+        elif systemctl restart sing-box; then
+          action="重启"
+        else
+          return 1
+        fi
       fi
       ;;
     openrc)
       if [ "$quiet" = "1" ]; then
-        rc-service sing-box restart >/dev/null 2>&1
+        if rc-service sing-box reload >/dev/null 2>&1; then
+          action="热载"
+        elif rc-service sing-box restart >/dev/null 2>&1; then
+          action="重启"
+        else
+          return 1
+        fi
       else
-        rc-service sing-box restart
+        if rc-service sing-box reload 2>/dev/null; then
+          action="热载"
+        elif rc-service sing-box restart; then
+          action="重启"
+        else
+          return 1
+        fi
       fi
       ;;
     *)
-      err "未识别的 init 系统，无法重启 sing-box。"
+      err "未识别的 init 系统，无法热载 sing-box。"
       return 1
       ;;
   esac
-  [ "$quiet" = "1" ] || ok "sing-box 已重启。"
+  [ "$quiet" = "1" ] || ok "sing-box 已${action}。"
 }
 
 enable_now_singbox_safe() {
@@ -854,7 +878,7 @@ _config_apply_body() {
   mv -f "$tmp_file" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if _RESTART_SINGBOX_QUIET_OK=1 restart_singbox_safe; then
+  if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
@@ -866,7 +890,7 @@ _config_apply_body() {
     return 0
   fi
 
-  err "重启失败：正在回滚。"
+  err "热载/重启失败：正在回滚。"
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
     cp -a "$prev_tmp" "$backup"
     cp -a "$prev_tmp" "$CONFIG_FILE"
@@ -876,8 +900,8 @@ _config_apply_body() {
     warn "无旧配置可回滚，已保存失败现场：$backup"
   fi
   rm -f "$prev_tmp" >/dev/null 2>&1 || true
-  if ! restart_singbox_safe; then
-    err "回滚后重启仍失败，sing-box 当前处于停止状态。"
+  if ! reload_or_restart_singbox_safe; then
+    err "回滚后热载/重启仍失败，sing-box 当前可能处于异常状态。"
     warn "手动恢复命令："
     case "$INIT_SYSTEM" in
       systemd) warn "  systemctl start sing-box" ;;
@@ -2412,8 +2436,6 @@ user_manager_runtime_sync() {
     user_db_save "$db_json" || return 1
   fi
 
-  ensure_grpcurl >/dev/null 2>&1 || true
-
   current_json="$(config_load)"
   desired_json="$(user_manager_apply_to_json "$current_json" "$db_json")" || {
     err "生成用户流量统计配置失败。"
@@ -2431,7 +2453,6 @@ user_manager_runtime_sync() {
     fi
   fi
 
-  sync_user_usage_counters || true
   return 0
 }
 
@@ -2521,6 +2542,7 @@ user_watch_run() {
   local lock_fd
   exec {lock_fd}>"$SB_LOCK_FILE" || return 0
   flock -n "$lock_fd" || return 0
+  user_db_exists || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
   user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
@@ -2529,23 +2551,23 @@ user_watch_run() {
   exec {lock_fd}>&-
 }
 
-init_user_manager_if_needed() {
+ensure_user_manager_ready() {
   init_manager_env
-  if [ ! -e "$USER_DB_FILE" ] && [ -e "/etc/sing-box/user-manager.json" ]; then
-    mkdir -p "$(dirname "$USER_DB_FILE")"
-    mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
-  fi
   if ! user_db_exists; then
-    user_db_save "$(user_db_min_template)" || return 1
+    user_db_save "$(user_db_min_template)" || {
+      err "用户数据库初始化失败：$USER_DB_FILE"
+      return 1
+    }
     ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
   return 0
 }
 
 user_manager_background_sync() {
-  init_user_manager_if_needed || return 1
-  user_db_cleanup_current_and_save || true
-  user_manager_runtime_sync || true
+  user_db_exists || return 0
+  init_manager_env
+  user_db_cleanup_current_and_save || return 1
+  user_manager_runtime_sync || return 1
   return 0
 }
 
@@ -2621,13 +2643,6 @@ show_user_status_table() {
   done
 
   ui_echo "${B}${divider_line}${NC}"
-}
-
-show_user_status_table_from_file() {
-  local db_json
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
-  show_user_status_table "$db_json"
 }
 
 prompt_reset_day() {
@@ -2726,7 +2741,6 @@ show_user_allowed_nodes() {
 
 user_add_menu() {
   local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
-  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -3169,7 +3183,6 @@ user_select_and_manage_menu() {
 
 user_delete_menu() {
   local db_json json usernames=() ans new_db picks=() part idx username
-  sync_user_usage_counters || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -3216,7 +3229,11 @@ user_delete_menu() {
 }
 
 user_manager_menu() {
-  init_user_manager_if_needed || return 0
+  if ! user_db_exists; then
+    err "用户数据库不存在或不可用，请先执行 1. 安装/更新 sing-box。"
+    pause
+    return 0
+  fi
   while true; do
     local db_json
     db_json="$(user_db_load)"
@@ -3652,42 +3669,6 @@ is_install_complete() {
 
 # ---------- 脚本自身管理 ----------
 
-script_version_of_file() {
-  local f="${1:-}"
-  [ -f "$f" ] || return 1
-  grep -E '^[[:space:]]*SCRIPT_VERSION=' "$f" 2>/dev/null | head -n1 | sed -E 's/^[^"]*"([^"]+)".*$/\1/'
-}
-
-sync_runtime_script_entrypoints() {
-  local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
-  local resolved current_ver target_ver
-  resolved="$(readlink -f "$current" 2>/dev/null || echo "$current")"
-  current_ver="${SCRIPT_VERSION:-}"
-  target_ver="$(script_version_of_file "$SB_TARGET_SCRIPT" || true)"
-
-  if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
-    # 管道/process substitution 执行场景：从自身文件描述符读取内容写入目标
-    # 这样无论从哪个分支执行，s 快捷命令始终与当前运行版本一致
-    if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
-      local fd_path
-      fd_path="$(readlink -f "$current" 2>/dev/null || true)"
-      if [ -n "$fd_path" ] && [ -r "$fd_path" ]; then
-        cp -f "$fd_path" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      else
-        # fd 不可读时（极少数系统）回退到网络下载
-        curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      fi
-    fi
-  else
-    if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
-      cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-    fi
-  fi
-
-  chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-  install_sb_shortcut >/dev/null 2>&1 || true
-}
-
 install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
@@ -3941,13 +3922,6 @@ ensure_command_compat_links() {
   ln -sf "${SINGBOX_BIN}" /usr/bin/sing-box
 }
 
-migrate_legacy_user_db_if_needed() {
-  if [ ! -e "$USER_DB_FILE" ] && [ -e "/etc/sing-box/user-manager.json" ]; then
-    mkdir -p "$(dirname "$USER_DB_FILE")"
-    mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
-  fi
-}
-
 migrate_legacy_script_name() {
   if [ -f /root/sing-box.sh ]; then
     rm -f /root/sing-box.sh
@@ -3980,7 +3954,6 @@ is_script_managed_environment() {
 }
 
 prepare_script_runtime() {
-  migrate_legacy_user_db_if_needed
   migrate_legacy_script_name
   write_managed_singbox_service
   ensure_command_compat_links
@@ -4135,6 +4108,7 @@ install_or_update_singbox() {
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
+  ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"
     warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
@@ -4149,7 +4123,11 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  user_manager_background_sync >/dev/null 2>&1 || true
+  user_manager_background_sync || {
+    err "用户管理后台同步初始化失败。"
+    pause
+    return 1
+  }
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
@@ -5107,7 +5085,6 @@ system_tools_menu() {
 # ============================================================
 
 main_menu() {
-  ensure_sb_shortcut >/dev/null 2>&1 || true
   while true; do
     clear
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
@@ -5142,8 +5119,6 @@ main_menu() {
 # ====================================================
 # CLI 入口路由
 # ====================================================
-sync_runtime_script_entrypoints
-
 if [[ "${1:-}" == "--user-watch" ]]; then
   user_watch_run
   exit 0

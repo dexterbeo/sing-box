@@ -82,42 +82,6 @@ is_install_complete() {
 
 # ---------- 脚本自身管理 ----------
 
-script_version_of_file() {
-  local f="${1:-}"
-  [ -f "$f" ] || return 1
-  grep -E '^[[:space:]]*SCRIPT_VERSION=' "$f" 2>/dev/null | head -n1 | sed -E 's/^[^"]*"([^"]+)".*$/\1/'
-}
-
-sync_runtime_script_entrypoints() {
-  local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
-  local resolved current_ver target_ver
-  resolved="$(readlink -f "$current" 2>/dev/null || echo "$current")"
-  current_ver="${SCRIPT_VERSION:-}"
-  target_ver="$(script_version_of_file "$SB_TARGET_SCRIPT" || true)"
-
-  if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
-    # 管道/process substitution 执行场景：从自身文件描述符读取内容写入目标
-    # 这样无论从哪个分支执行，s 快捷命令始终与当前运行版本一致
-    if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
-      local fd_path
-      fd_path="$(readlink -f "$current" 2>/dev/null || true)"
-      if [ -n "$fd_path" ] && [ -r "$fd_path" ]; then
-        cp -f "$fd_path" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      else
-        # fd 不可读时（极少数系统）回退到网络下载
-        curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      fi
-    fi
-  else
-    if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
-      cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-    fi
-  fi
-
-  chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-  install_sb_shortcut >/dev/null 2>&1 || true
-}
-
 install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
@@ -371,13 +335,6 @@ ensure_command_compat_links() {
   ln -sf "${SINGBOX_BIN}" /usr/bin/sing-box
 }
 
-migrate_legacy_user_db_if_needed() {
-  if [ ! -e "$USER_DB_FILE" ] && [ -e "/etc/sing-box/user-manager.json" ]; then
-    mkdir -p "$(dirname "$USER_DB_FILE")"
-    mv -f /etc/sing-box/user-manager.json "$USER_DB_FILE" 2>/dev/null || cp -f /etc/sing-box/user-manager.json "$USER_DB_FILE"
-  fi
-}
-
 migrate_legacy_script_name() {
   if [ -f /root/sing-box.sh ]; then
     rm -f /root/sing-box.sh
@@ -410,7 +367,6 @@ is_script_managed_environment() {
 }
 
 prepare_script_runtime() {
-  migrate_legacy_user_db_if_needed
   migrate_legacy_script_name
   write_managed_singbox_service
   ensure_command_compat_links
@@ -565,6 +521,7 @@ install_or_update_singbox() {
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
+  ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"
     warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
@@ -579,7 +536,11 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  user_manager_background_sync >/dev/null 2>&1 || true
+  user_manager_background_sync || {
+    err "用户管理后台同步初始化失败。"
+    pause
+    return 1
+  }
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"

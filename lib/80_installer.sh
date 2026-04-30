@@ -82,34 +82,34 @@ is_install_complete() {
 
 # ---------- 脚本自身管理 ----------
 
-install_script_self() {
-  mkdir -p /usr/local/bin
+resolve_current_script_file() {
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
+  local fd_path
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
-    # 管道执行场景：优先从自身 fd 读取，确保版本一致
-    local fd_path
     fd_path="$(readlink -f "$current" 2>/dev/null || true)"
-    if [ -n "$fd_path" ] && [ -r "$fd_path" ]; then
-      cp -f "$fd_path" "$SB_TARGET_SCRIPT" || {
-        warn "快捷命令 s 安装失败：无法写入 $SB_TARGET_SCRIPT"
-        return 1
-      }
-    else
-      curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-        warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
-        return 1
-      }
-    fi
-  else
-    current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
-    if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
-      cp -f "$current" "$SB_TARGET_SCRIPT" || {
-        warn "快捷命令 s 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
-        return 1
-      }
-    fi
+    [ -n "$fd_path" ] && [ -r "$fd_path" ] && { echo "$fd_path"; return 0; }
+    return 1
+  fi
+  current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
+  [ -r "$current" ] || return 1
+  echo "$current"
+}
+
+write_local_script_entrypoint() {
+  mkdir -p /usr/local/bin
+  local source_file
+  source_file="$(resolve_current_script_file)" || {
+    warn "快捷命令 s 安装失败：无法读取当前脚本。"
+    return 1
+  }
+  if [ "$source_file" != "$SB_TARGET_SCRIPT" ]; then
+    cp -f "$source_file" "$SB_TARGET_SCRIPT" || {
+      warn "快捷命令 s 安装失败：无法写入 $SB_TARGET_SCRIPT"
+      return 1
+    }
   fi
   chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+  install_sb_shortcut
 }
 
 install_sb_shortcut() {
@@ -120,9 +120,13 @@ EOF2
   chmod +x "$SB_SHORTCUT" >/dev/null 2>&1 || true
 }
 
+ensure_local_script_entrypoint_once() {
+  [ -s "$SB_TARGET_SCRIPT" ] && [ -x "$SB_SHORTCUT" ] && return 0
+  write_local_script_entrypoint >/dev/null 2>&1 || true
+}
+
 ensure_sb_shortcut() {
-  install_script_self || return 1
-  install_sb_shortcut
+  write_local_script_entrypoint
 }
 
 # ---------- 日志维护 ----------

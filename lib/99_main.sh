@@ -6,6 +6,7 @@
 # ============================================================
 
 main_menu() {
+  ensure_local_script_entrypoint_once
   while true; do
     clear
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"

@@ -42,9 +42,10 @@ entry_key_to_port() {
 
 ensure_self_signed_cert() {
   local cn="$1" crt_path="$2" key_path="$3"
-  mkdir -p "$(dirname "$crt_path")"
+  mkdir -p "$(dirname "$crt_path")" || return 1
   openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout "$key_path" -out "$crt_path" -days 36500 -nodes -subj "/CN=${cn}" >/dev/null 2>&1
+    -keyout "$key_path" -out "$crt_path" -days 36500 -nodes -subj "/CN=${cn}" >/dev/null 2>&1 || return 1
+  [ -s "$crt_path" ] && [ -s "$key_path" ]
 }
 
 generate_reality_keypair_auto() {
@@ -152,6 +153,7 @@ choose_tls_domain() {
         pause >&2
         return 1
       fi
+      param_echo "SNI" "$manual"
       echo "$manual"
       ;;
     *)
@@ -232,7 +234,7 @@ build_anytls_inbound() {
   pass="$(openssl rand -base64 16)"
   crt="/etc/sing-box/anytls-${port}.crt"
   key="/etc/sing-box/anytls-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"anytls",
@@ -278,7 +280,7 @@ build_trojan_inbound() {
   pass="$(openssl rand -base64 16)"
   crt="/etc/sing-box/trojan-${port}.crt"
   key="/etc/sing-box/trojan-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"trojan",
@@ -338,7 +340,7 @@ build_tuic_inbound() {
   pass="$(openssl rand -base64 12)"
   crt="/etc/sing-box/tuic-${port}.crt"
   key="/etc/sing-box/tuic-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"tuic",

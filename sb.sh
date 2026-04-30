@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 03:25:30 UTC
+# 构建时间: 2026-04-30 03:32:08 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.5"
+SCRIPT_VERSION="5.4.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -57,7 +57,7 @@ ui_echo(){ printf '%b\n' "$*" >&2; }
 
 param_echo() {
   local label="$1" value="$2"
-  printf '  %b%s%b: %b%s%b\n' "$W" "$label" "$NC" "$C" "$value" "$NC"
+  printf '  %b%s%b: %b%s%b\n' "$W" "$label" "$NC" "$C" "$value" "$NC" >&2
 }
 
 text_display_width() {
@@ -926,9 +926,10 @@ entry_key_to_port() {
 
 ensure_self_signed_cert() {
   local cn="$1" crt_path="$2" key_path="$3"
-  mkdir -p "$(dirname "$crt_path")"
+  mkdir -p "$(dirname "$crt_path")" || return 1
   openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout "$key_path" -out "$crt_path" -days 36500 -nodes -subj "/CN=${cn}" >/dev/null 2>&1
+    -keyout "$key_path" -out "$crt_path" -days 36500 -nodes -subj "/CN=${cn}" >/dev/null 2>&1 || return 1
+  [ -s "$crt_path" ] && [ -s "$key_path" ]
 }
 
 generate_reality_keypair_auto() {
@@ -1036,6 +1037,7 @@ choose_tls_domain() {
         pause >&2
         return 1
       fi
+      param_echo "SNI" "$manual"
       echo "$manual"
       ;;
     *)
@@ -1116,7 +1118,7 @@ build_anytls_inbound() {
   pass="$(openssl rand -base64 16)"
   crt="/etc/sing-box/anytls-${port}.crt"
   key="/etc/sing-box/anytls-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"anytls",
@@ -1162,7 +1164,7 @@ build_trojan_inbound() {
   pass="$(openssl rand -base64 16)"
   crt="/etc/sing-box/trojan-${port}.crt"
   key="/etc/sing-box/trojan-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"trojan",
@@ -1222,7 +1224,7 @@ build_tuic_inbound() {
   pass="$(openssl rand -base64 12)"
   crt="/etc/sing-box/tuic-${port}.crt"
   key="/etc/sing-box/tuic-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
   jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"tuic",
@@ -4571,7 +4573,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts anytls "$port")"
         done
         sni="$(choose_tls_domain "AnyTLS")" || return 0
-        inbound="$(build_anytls_inbound "$port" "$sni")"
+        if ! inbound="$(build_anytls_inbound "$port" "$sni")"; then
+          err "生成 AnyTLS 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
@@ -4608,7 +4614,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts trojan "$port")"
         done
         sni="$(choose_tls_domain "Trojan")" || return 0
-        inbound="$(build_trojan_inbound "$port" "$sni")"
+        if ! inbound="$(build_trojan_inbound "$port" "$sni")"; then
+          err "生成 Trojan 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
@@ -4657,7 +4667,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts tuic "$port")"
         done
         sni="$(choose_tls_domain "TUIC")" || return 0
-        inbound="$(build_tuic_inbound "$port" "$sni")"
+        if ! inbound="$(build_tuic_inbound "$port" "$sni")"; then
+          err "生成 TUIC 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "UUID" "$uuid"

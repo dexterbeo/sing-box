@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.4.5"
+SCRIPT_VERSION="5.4.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -47,7 +47,7 @@ ui_echo(){ printf '%b\n' "$*" >&2; }
 
 param_echo() {
   local label="$1" value="$2"
-  printf '  %b%s%b: %b%s%b\n' "$W" "$label" "$NC" "$C" "$value" "$NC"
+  printf '  %b%s%b: %b%s%b\n' "$W" "$label" "$NC" "$C" "$value" "$NC" >&2
 }
 
 text_display_width() {

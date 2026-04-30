@@ -333,7 +333,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts anytls "$port")"
         done
         sni="$(choose_tls_domain "AnyTLS")" || return 0
-        inbound="$(build_anytls_inbound "$port" "$sni")"
+        if ! inbound="$(build_anytls_inbound "$port" "$sni")"; then
+          err "生成 AnyTLS 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
@@ -370,7 +374,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts trojan "$port")"
         done
         sni="$(choose_tls_domain "Trojan")" || return 0
-        inbound="$(build_trojan_inbound "$port" "$sni")"
+        if ! inbound="$(build_trojan_inbound "$port" "$sni")"; then
+          err "生成 Trojan 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
@@ -419,7 +427,11 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts tuic "$port")"
         done
         sni="$(choose_tls_domain "TUIC")" || return 0
-        inbound="$(build_tuic_inbound "$port" "$sni")"
+        if ! inbound="$(build_tuic_inbound "$port" "$sni")"; then
+          err "生成 TUIC 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "UUID" "$uuid"

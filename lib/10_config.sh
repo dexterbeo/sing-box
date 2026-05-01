@@ -224,16 +224,26 @@ with_manager_lock() {
     if "$@"; then return 0; else return $?; fi
   fi
 
+  if ! has_cmd flock; then
+    if "$@"; then return 0; else return $?; fi
+  fi
+
+  mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
+
   # 注意：exec 行的尾部重定向是永久作用于当前 shell 的，不能写成
   # `exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null`（会把整个 shell 的
   # stderr 永久关闭到 /dev/null，后续 err/warn/read -p 提示全丢失）。
   # 必须用命令组 { ... } 2>/dev/null，把重定向锚定在组作用域内。
   if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    flock "$_lock_fd"
-    _CONFIG_LOCK_HELD=1
-    if "$@"; then _rc=0; else _rc=$?; fi
-    _CONFIG_LOCK_HELD=0
-    { exec {_lock_fd}>&-; } 2>/dev/null || true
+    if flock "$_lock_fd"; then
+      _CONFIG_LOCK_HELD=1
+      if "$@"; then _rc=0; else _rc=$?; fi
+      _CONFIG_LOCK_HELD=0
+      { exec {_lock_fd}>&-; } 2>/dev/null || true
+    else
+      { exec {_lock_fd}>&-; } 2>/dev/null || true
+      if "$@"; then _rc=0; else _rc=$?; fi
+    fi
   else
     # 锁文件不可创建时降级为无锁模式（不阻塞功能）
     if "$@"; then _rc=0; else _rc=$?; fi
@@ -299,7 +309,12 @@ _config_apply_body() {
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
   backup="/etc/sing-box/config.json.bak.fail.$ts"
-  prev_tmp="/tmp/singbox_config_prev.$$"
+  prev_tmp="$(mktemp /etc/sing-box/config.json.prev.XXXXXX)" || {
+    err "创建回滚临时文件失败。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    return 1
+  }
+  chmod 600 "$prev_tmp" 2>/dev/null || true
 
   if [ -f "$CONFIG_FILE" ]; then
     cp -a "$CONFIG_FILE" "$prev_tmp"
@@ -351,12 +366,15 @@ config_reset() {
 init_manager_env() {
   # 幂等哨兵：首次执行后标记，避免菜单循环重复跑 require_root/has_cmd/磁盘读
   [ "${_MANAGER_ENV_READY:-0}" = "1" ] && return 0
-  require_root
-  has_cmd jq || { err "未找到 jq，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
-  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    err "请使用 root 运行此脚本。"
+    return 1
+  fi
+  has_cmd jq || { err "未找到 jq，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd sing-box || { err "未找到 sing-box，请先安装。"; return 1; }
+  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; return 1; }
   config_ensure_exists
   ensure_manager_file_permissions
   _MANAGER_ENV_READY=1

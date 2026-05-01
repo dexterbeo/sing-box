@@ -163,7 +163,7 @@ user_current_period() {
 }
 
 apply_automatic_user_controls() {
-  init_manager_env
+  init_manager_env || return 1
   user_db_exists || return 0
   sync_user_usage_counters || true
 
@@ -193,7 +193,11 @@ apply_automatic_user_controls() {
       # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
       | if ($expire != "0" and ($today > $expire)) then
           .value.enabled = false
-          | .value.disabled_reason = "expired"
+          | if ($reason == "manual") then
+              .value.disabled_reason = "manual"
+            else
+              .value.disabled_reason = "expired"
+            end
         else
           # 2. 重置检查
           (
@@ -236,9 +240,14 @@ apply_automatic_user_controls() {
 user_watch_run() {
   # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
   local lock_fd
-  exec {lock_fd}>"$SB_LOCK_FILE" || return 0
-  flock -n "$lock_fd" || return 0
-  user_db_exists || { exec {lock_fd}>&-; return 0; }
+  user_db_exists || return 0
+  mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
+  if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
+    user_manager_background_sync >/dev/null 2>&1 || return 0
+    apply_automatic_user_controls >/dev/null 2>&1 || true
+    return 0
+  fi
+  flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
   user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
@@ -248,7 +257,7 @@ user_watch_run() {
 }
 
 ensure_user_manager_ready() {
-  init_manager_env
+  init_manager_env || return 1
   if ! user_db_exists; then
     user_db_save "$(user_db_min_template)" || {
       err "用户数据库初始化失败：$USER_DB_FILE"
@@ -261,7 +270,7 @@ ensure_user_manager_ready() {
 
 user_manager_background_sync() {
   user_db_exists || return 0
-  init_manager_env
+  init_manager_env || return 1
   user_db_cleanup_current_and_save || return 1
   user_manager_runtime_sync || return 1
   return 0

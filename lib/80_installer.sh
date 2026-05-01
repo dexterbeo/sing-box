@@ -22,8 +22,26 @@ ensure_deps_for_installer() {
 }
 
 version_ge() {
-  # version_ge A B → true if A >= B（使用 sort -V）
-  [ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+  # version_ge A B → true if A >= B
+  local a="${1#v}" b="${2#v}"
+  if sort -V </dev/null >/dev/null 2>&1; then
+    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" = "$b" ]
+    return $?
+  fi
+  awk -v a="$a" -v b="$b" '
+    function clean(v) { sub(/[-+].*/, "", v); return v }
+    BEGIN {
+      split(clean(a), av, ".")
+      split(clean(b), bv, ".")
+      for (i = 1; i <= 4; i++) {
+        ai = av[i] + 0
+        bi = bv[i] + 0
+        if (ai > bi) exit 0
+        if (ai < bi) exit 1
+      }
+      exit 0
+    }
+  '
 }
 
 ensure_sagernet_repo() { :; }
@@ -240,7 +258,7 @@ _install_cron_job() {
   # 到这里 crontab 命令必然可用（_ensure_crond_running 会主动安装）
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
@@ -253,7 +271,7 @@ _remove_cron_job() {
   has_cmd crontab || return 0
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -608,13 +626,7 @@ chrony_service_enable() {
 }
 
 chrony_timeout() {
-  local seconds="$1"
-  shift
-  if has_cmd timeout; then
-    timeout "$seconds" "$@"
-  else
-    "$@"
-  fi
+  run_with_timeout "$@"
 }
 
 chronyc_tracking_ready() {

@@ -123,7 +123,7 @@ export_collect_context() {
 # ---------- 主导出函数 ----------
 
 export_configs() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
   local tag proto port sni path sid method server_p

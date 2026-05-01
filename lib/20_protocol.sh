@@ -99,10 +99,10 @@ EOF_TLS
 
 benchmark_tls_domain_ms() {
   local domain="$1" t1 t2
-  t1="$(date +%s%3N 2>/dev/null || true)"
-  timeout 1 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >/dev/null 2>&1 || return 1
-  t2="$(date +%s%3N 2>/dev/null || true)"
-  if [ -n "$t1" ] && [ -n "$t2" ]; then
+  t1="$(now_ms)"
+  run_with_timeout 1 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >/dev/null 2>&1 || return 1
+  t2="$(now_ms)"
+  if [[ "$t1" =~ ^[0-9]+$ ]] && [[ "$t2" =~ ^[0-9]+$ ]] && [ "$t2" -ge "$t1" ]; then
     echo $((t2 - t1))
   else
     echo 999

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-04-30 15:10:54 UTC
+# 构建时间: 2026-05-01 04:53:02 UTC
 # ============================================================
 
 
@@ -308,6 +308,31 @@ require_root() {
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  if has_cmd timeout; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]{13,}$ ]]; then
+    echo "$value"
+    return 0
+  fi
+  value="$(date +%s 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo $((value * 1000))
+  else
+    echo 0
+  fi
+}
 
 # ---------- 包管理器 / init 系统检测 ----------
 
@@ -792,16 +817,26 @@ with_manager_lock() {
     if "$@"; then return 0; else return $?; fi
   fi
 
+  if ! has_cmd flock; then
+    if "$@"; then return 0; else return $?; fi
+  fi
+
+  mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
+
   # 注意：exec 行的尾部重定向是永久作用于当前 shell 的，不能写成
   # `exec {_lock_fd}>"$SB_LOCK_FILE" 2>/dev/null`（会把整个 shell 的
   # stderr 永久关闭到 /dev/null，后续 err/warn/read -p 提示全丢失）。
   # 必须用命令组 { ... } 2>/dev/null，把重定向锚定在组作用域内。
   if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    flock "$_lock_fd"
-    _CONFIG_LOCK_HELD=1
-    if "$@"; then _rc=0; else _rc=$?; fi
-    _CONFIG_LOCK_HELD=0
-    { exec {_lock_fd}>&-; } 2>/dev/null || true
+    if flock "$_lock_fd"; then
+      _CONFIG_LOCK_HELD=1
+      if "$@"; then _rc=0; else _rc=$?; fi
+      _CONFIG_LOCK_HELD=0
+      { exec {_lock_fd}>&-; } 2>/dev/null || true
+    else
+      { exec {_lock_fd}>&-; } 2>/dev/null || true
+      if "$@"; then _rc=0; else _rc=$?; fi
+    fi
   else
     # 锁文件不可创建时降级为无锁模式（不阻塞功能）
     if "$@"; then _rc=0; else _rc=$?; fi
@@ -867,7 +902,12 @@ _config_apply_body() {
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
   backup="/etc/sing-box/config.json.bak.fail.$ts"
-  prev_tmp="/tmp/singbox_config_prev.$$"
+  prev_tmp="$(mktemp /etc/sing-box/config.json.prev.XXXXXX)" || {
+    err "创建回滚临时文件失败。"
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    return 1
+  }
+  chmod 600 "$prev_tmp" 2>/dev/null || true
 
   if [ -f "$CONFIG_FILE" ]; then
     cp -a "$CONFIG_FILE" "$prev_tmp"
@@ -919,12 +959,15 @@ config_reset() {
 init_manager_env() {
   # 幂等哨兵：首次执行后标记，避免菜单循环重复跑 require_root/has_cmd/磁盘读
   [ "${_MANAGER_ENV_READY:-0}" = "1" ] && return 0
-  require_root
-  has_cmd jq || { err "未找到 jq，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; exit 1; }
-  has_cmd sing-box || { err "未找到 sing-box，请先安装。"; exit 1; }
-  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; exit 1; }
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    err "请使用 root 运行此脚本。"
+    return 1
+  fi
+  has_cmd jq || { err "未找到 jq，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
+  has_cmd sing-box || { err "未找到 sing-box，请先安装。"; return 1; }
+  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; return 1; }
   config_ensure_exists
   ensure_manager_file_permissions
   _MANAGER_ENV_READY=1
@@ -1033,10 +1076,10 @@ EOF_TLS
 
 benchmark_tls_domain_ms() {
   local domain="$1" t1 t2
-  t1="$(date +%s%3N 2>/dev/null || true)"
-  timeout 1 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >/dev/null 2>&1 || return 1
-  t2="$(date +%s%3N 2>/dev/null || true)"
-  if [ -n "$t1" ] && [ -n "$t2" ]; then
+  t1="$(now_ms)"
+  run_with_timeout 1 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >/dev/null 2>&1 || return 1
+  t2="$(now_ms)"
+  if [[ "$t1" =~ ^[0-9]+$ ]] && [[ "$t2" =~ ^[0-9]+$ ]] && [ "$t2" -ge "$t1" ]; then
     echo $((t2 - t1))
   else
     echo 999
@@ -1696,7 +1739,7 @@ show_managed_relay_lines() {
 # ---------- 中转节点菜单 ----------
 
 relay_add() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
   json="$(config_load)"
 
@@ -1811,7 +1854,7 @@ relay_add() {
 }
 
 relay_delete() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   local json lines=() node_lines=() choice picks=() updated_json line entry relay_user out_tag part idx
   local node_key users_json
   json="$(config_load)"
@@ -1892,7 +1935,7 @@ relay_delete() {
 }
 
 manage_relay_nodes() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   while true; do
     clear
     local json
@@ -2467,7 +2510,7 @@ user_current_period() {
 }
 
 apply_automatic_user_controls() {
-  init_manager_env
+  init_manager_env || return 1
   user_db_exists || return 0
   sync_user_usage_counters || true
 
@@ -2497,7 +2540,11 @@ apply_automatic_user_controls() {
       # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
       | if ($expire != "0" and ($today > $expire)) then
           .value.enabled = false
-          | .value.disabled_reason = "expired"
+          | if ($reason == "manual") then
+              .value.disabled_reason = "manual"
+            else
+              .value.disabled_reason = "expired"
+            end
         else
           # 2. 重置检查
           (
@@ -2540,9 +2587,14 @@ apply_automatic_user_controls() {
 user_watch_run() {
   # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
   local lock_fd
-  exec {lock_fd}>"$SB_LOCK_FILE" || return 0
-  flock -n "$lock_fd" || return 0
-  user_db_exists || { exec {lock_fd}>&-; return 0; }
+  user_db_exists || return 0
+  mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
+  if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
+    user_manager_background_sync >/dev/null 2>&1 || return 0
+    apply_automatic_user_controls >/dev/null 2>&1 || true
+    return 0
+  fi
+  flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
   user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
@@ -2552,7 +2604,7 @@ user_watch_run() {
 }
 
 ensure_user_manager_ready() {
-  init_manager_env
+  init_manager_env || return 1
   if ! user_db_exists; then
     user_db_save "$(user_db_min_template)" || {
       err "用户数据库初始化失败：$USER_DB_FILE"
@@ -2565,7 +2617,7 @@ ensure_user_manager_ready() {
 
 user_manager_background_sync() {
   user_db_exists || return 0
-  init_manager_env
+  init_manager_env || return 1
   user_db_cleanup_current_and_save || return 1
   user_manager_runtime_sync || return 1
   return 0
@@ -3399,7 +3451,7 @@ export_collect_context() {
 # ---------- 主导出函数 ----------
 
 export_configs() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
   local tag proto port sni path sid method server_p
@@ -3609,8 +3661,26 @@ ensure_deps_for_installer() {
 }
 
 version_ge() {
-  # version_ge A B → true if A >= B（使用 sort -V）
-  [ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+  # version_ge A B → true if A >= B
+  local a="${1#v}" b="${2#v}"
+  if sort -V </dev/null >/dev/null 2>&1; then
+    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" = "$b" ]
+    return $?
+  fi
+  awk -v a="$a" -v b="$b" '
+    function clean(v) { sub(/[-+].*/, "", v); return v }
+    BEGIN {
+      split(clean(a), av, ".")
+      split(clean(b), bv, ".")
+      for (i = 1; i <= 4; i++) {
+        ai = av[i] + 0
+        bi = bv[i] + 0
+        if (ai > bi) exit 0
+        if (ai < bi) exit 1
+      }
+      exit 0
+    }
+  '
 }
 
 ensure_sagernet_repo() { :; }
@@ -3827,7 +3897,7 @@ _install_cron_job() {
   # 到这里 crontab 命令必然可用（_ensure_crond_running 会主动安装）
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
@@ -3840,7 +3910,7 @@ _remove_cron_job() {
   has_cmd crontab || return 0
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -4195,13 +4265,7 @@ chrony_service_enable() {
 }
 
 chrony_timeout() {
-  local seconds="$1"
-  shift
-  if has_cmd timeout; then
-    timeout "$seconds" "$@"
-  else
-    "$@"
-  fi
+  run_with_timeout "$@"
 }
 
 chronyc_tracking_ready() {
@@ -4383,7 +4447,7 @@ protocol_entry_table() {
 # ---------- 规范化接管 ----------
 
 normalize_takeover(){
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   local json work_json
   local -a inv_lines=() issue_lines=() action_lines=()
@@ -4919,7 +4983,7 @@ protocol_remove_menu() {
 # ---------- 协议管理主菜单 ----------
 
 protocol_manager() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   while true; do
     clear
     local json
@@ -4966,7 +5030,7 @@ protocol_manager() {
 # ---------- 其它工具入口 ----------
 
 clear_config_json() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   echo -e "${Y}--- 清空/重置配置文件 ---${NC}"
   echo -e "${Y}注意：该操作将清空当前 config.json。${NC}"
@@ -5002,7 +5066,7 @@ view_realtime_log() {
 }
 
 view_config_formatted() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   echo -e "${C}--- 查看格式化配置 ---${NC}"
   sing-box format -c "$CONFIG_FILE" || err "sing-box format 执行失败。"

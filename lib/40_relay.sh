@@ -63,7 +63,7 @@ show_managed_relay_lines() {
 # ---------- 中转节点菜单 ----------
 
 relay_add() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
   json="$(config_load)"
 
@@ -178,7 +178,7 @@ relay_add() {
 }
 
 relay_delete() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   local json lines=() node_lines=() choice picks=() updated_json line entry relay_user out_tag part idx
   local node_key users_json
   json="$(config_load)"
@@ -259,7 +259,7 @@ relay_delete() {
 }
 
 manage_relay_nodes() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   while true; do
     clear
     local json

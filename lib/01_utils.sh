@@ -13,6 +13,31 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  if has_cmd timeout; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]{13,}$ ]]; then
+    echo "$value"
+    return 0
+  fi
+  value="$(date +%s 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo $((value * 1000))
+  else
+    echo 0
+  fi
+}
+
 # ---------- 包管理器 / init 系统检测 ----------
 
 detect_pkg_manager() {

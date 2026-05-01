@@ -32,7 +32,7 @@ protocol_entry_table() {
 # ---------- 规范化接管 ----------
 
 normalize_takeover(){
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   local json work_json
   local -a inv_lines=() issue_lines=() action_lines=()
@@ -568,7 +568,7 @@ protocol_remove_menu() {
 # ---------- 协议管理主菜单 ----------
 
 protocol_manager() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   while true; do
     clear
     local json
@@ -615,7 +615,7 @@ protocol_manager() {
 # ---------- 其它工具入口 ----------
 
 clear_config_json() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   echo -e "${Y}--- 清空/重置配置文件 ---${NC}"
   echo -e "${Y}注意：该操作将清空当前 config.json。${NC}"
@@ -651,7 +651,7 @@ view_realtime_log() {
 }
 
 view_config_formatted() {
-  init_manager_env
+  init_manager_env || { pause; return 0; }
   clear
   echo -e "${C}--- 查看格式化配置 ---${NC}"
   sing-box format -c "$CONFIG_FILE" || err "sing-box format 执行失败。"

@@ -51,4 +51,9 @@ if [[ "${1:-}" == "--maintain-logs" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--tg-agent-sync" ]]; then
+  tg_agent_sync
+  exit 0
+fi
+
 main_menu

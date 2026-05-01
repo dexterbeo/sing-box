@@ -737,6 +737,8 @@ uninstall_singbox_keep_config() {
   sync_user_usage_counters || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
+  remove_tg_agent_cron || true
+  tg_stop_center_service || true
   remove_all_singbox_service_units
   # 清理官方包可能创建的系统用户/组
   if has_cmd deluser; then

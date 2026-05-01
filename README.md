@@ -5,11 +5,11 @@
 ## 快速开始
 
 ```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && bash sb.sh
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh && bash sb.sh
 ```
 **非root用户：**
 ```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && sudo bash sb.sh
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh && sudo bash sb.sh
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。

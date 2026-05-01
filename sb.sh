@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-01 06:53:48 UTC
+# 构建时间: 2026-05-01 07:14:06 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.6.1"
+SCRIPT_VERSION="5.6.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3614,38 +3614,23 @@ def is_admin(cfg, tg_id):
     return str(tg_id) in {str(x) for x in cfg.get("admin_chat_ids") or []}
 
 
-def header_rows(role):
-    label = "管理员" if role == "admin" else "用户"
-    return [[
-        {"text": "Sing-box 助手", "callback_data": "noop"},
-        {"text": label, "callback_data": "noop"},
-    ]]
-
-
-def binding_keyboard():
-    return header_rows("user") + [
-        [{"text": "我的状态", "callback_data": "u:status"}],
-        [{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "绑定/解绑", "callback_data": "u:bind"}],
+def user_home_keyboard():
+    return [
+        [{"text": "刷新", "callback_data": "u:home"}, {"text": "提醒设置", "callback_data": "u:notify"}],
+        [{"text": "绑定/解绑", "callback_data": "u:bind"}],
     ]
 
 
-def admin_keyboard():
-    return header_rows("admin") + [
-        [{"text": "总览", "callback_data": "a:overview"}],
-        [{"text": "提醒设置", "callback_data": "a:notify"}],
-    ]
-
-
-def back_keyboard(role, back_to):
-    return header_rows(role) + [[{"text": "返回", "callback_data": back_to}]]
+def back_keyboard(back_to):
+    return [[{"text": "返回", "callback_data": back_to}]]
 
 
 def send_home(chat_id, tg_id, message_id=None):
     cfg = load_config()
     if is_admin(cfg, tg_id):
-        render_page(chat_id, "Sing-box 助手（管理员）", admin_keyboard(), message_id)
+        admin_overview(chat_id, message_id)
     else:
-        render_page(chat_id, "Sing-box 助手", binding_keyboard(), message_id)
+        user_status(chat_id, tg_id, message_id)
 
 
 def bind_token(chat_id, tg_id, token):
@@ -3679,7 +3664,7 @@ def bind_token(chat_id, tg_id, token):
         settings = cfg.setdefault("user_settings", {})
         settings.setdefault(str(tg_id), {"notify": True})
         save_config(cfg)
-    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}", binding_keyboard())
+    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}", user_home_keyboard())
 
 
 def user_bindings(cfg, tg_id):
@@ -3691,19 +3676,21 @@ def user_bindings(cfg, tg_id):
 
 def user_status(chat_id, tg_id, message_id=None):
     cfg = load_config()
-    lines = ["我的状态"]
+    lines = []
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", back_keyboard("user", "u:home"), message_id)
+        render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", user_home_keyboard(), message_id)
         return
     for b in bindings:
         report, user = find_report_user(cfg, b)
         title = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
+        if lines:
+            lines.append("")
         if report is None:
-            lines += ["", title, "状态：节点暂无上报"]
+            lines += [title, "状态：节点暂无上报"]
             continue
         if user is None:
-            lines += ["", title, "状态：绑定已失效，请联系管理员"]
+            lines += [title, "状态：绑定已失效，请联系管理员"]
             continue
         total = user_total(user)
         quota = int(user.get("quota_gb") or 0)
@@ -3721,14 +3708,13 @@ def user_status(chat_id, tg_id, message_id=None):
             days = (exp_date - today()).days
             exp_text = f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
         lines += [
-            "",
             title,
             f"状态：{status_text(user)}",
             f"已用：{used_text}",
             f"到期：{exp_text}",
             f"更新时间：{report.get('updated_at_text') or '未知'}",
         ]
-    render_page(chat_id, "\n".join(lines), back_keyboard("user", "u:home"), message_id)
+    render_page(chat_id, "\n".join(lines), user_home_keyboard(), message_id)
 
 
 def notify_settings(chat_id, tg_id, admin=False, message_id=None):
@@ -3737,12 +3723,11 @@ def notify_settings(chat_id, tg_id, admin=False, message_id=None):
     item = settings.setdefault(str(tg_id), {"notify": True})
     state = "开启" if item.get("notify", True) else "关闭"
     text = f"提醒设置\n\n提醒：{state}\n规则：流量达到{cfg.get('notify_threshold', 90)}%、到期前{cfg.get('expire_warn_days', 3)}天提醒"
-    role = "admin" if admin else "user"
     back_to = "a:home" if admin else "u:home"
-    keyboard = header_rows(role) + [
-        [{"text": "关闭提醒" if item.get("notify", True) else "开启提醒", "callback_data": "a:toggle_notify" if admin else "u:toggle_notify"}],
-        [{"text": "返回", "callback_data": back_to}],
-    ]
+    keyboard = [[
+        {"text": "关闭提醒" if item.get("notify", True) else "开启提醒", "callback_data": "a:toggle_notify" if admin else "u:toggle_notify"},
+        {"text": "返回", "callback_data": back_to},
+    ]]
     render_page(chat_id, text, keyboard, message_id)
 
 
@@ -3760,10 +3745,10 @@ def binding_list(chat_id, tg_id, message_id=None):
     cfg = load_config()
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        render_page(chat_id, "当前没有绑定的用户。", back_keyboard("user", "u:home"), message_id)
+        render_page(chat_id, "当前没有绑定的用户。", back_keyboard("u:home"), message_id)
         return
     lines = ["绑定状态", "", "已绑定："]
-    keyboard = header_rows("user")
+    keyboard = []
     for idx, b in enumerate(bindings):
         label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
         lines.append(f"- {label}")
@@ -3780,7 +3765,7 @@ def ask_unbind(chat_id, tg_id, idx, message_id=None):
         return
     b = bindings[idx]
     label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
-    render_page(chat_id, f"确认解除绑定：{label}？", header_rows("user") + [
+    render_page(chat_id, f"确认解除绑定：{label}？", [
         [{"text": "确认解除", "callback_data": f"u:do_unbind:{idx}"}],
         [{"text": "取消", "callback_data": "u:bind"}],
     ], message_id)
@@ -3799,7 +3784,7 @@ def do_unbind(chat_id, tg_id, idx, message_id=None):
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
         save_config(cfg)
-    render_page(chat_id, "绑定已解除。", binding_keyboard(), message_id)
+    render_page(chat_id, "绑定已解除。", user_home_keyboard(), message_id)
 
 
 def admin_machine_keyboard(reports):
@@ -3807,15 +3792,14 @@ def admin_machine_keyboard(reports):
         {"text": (report.get("vps_name") or vps_id), "callback_data": f"a:vps:{vps_id}"}
         for vps_id, report in sorted(reports.items())
     ]
-    rows = header_rows("admin")
+    rows = []
     i = 0
     while i + 1 < len(buttons):
         rows.append([buttons[i], buttons[i + 1]])
         i += 2
     if i < len(buttons):
-        rows.append([buttons[i], {"text": "返回", "callback_data": "a:home"}])
-    else:
-        rows.append([{"text": "返回", "callback_data": "a:home"}])
+        rows.append([buttons[i]])
+    rows.append([{"text": "刷新", "callback_data": "a:home"}, {"text": "提醒设置", "callback_data": "a:notify"}])
     return rows
 
 
@@ -3823,9 +3807,9 @@ def admin_overview(chat_id, message_id=None):
     cfg = load_config()
     reports = cfg.get("reports") or {}
     if not reports:
-        render_page(chat_id, "当前没有节点上报数据。", back_keyboard("admin", "a:home"), message_id)
+        render_page(chat_id, "当前没有节点上报数据。", [[{"text": "刷新", "callback_data": "a:home"}, {"text": "提醒设置", "callback_data": "a:notify"}]], message_id)
         return
-    lines = ["总览"]
+    lines = []
     now = int(time.time())
     for vps_id, report in sorted(reports.items()):
         users = report.get("users") or []
@@ -3840,7 +3824,7 @@ def admin_overview(chat_id, message_id=None):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
         online = "在线" if age <= 900 else "离线"
-        lines.append(f"\n{report.get('vps_name') or vps_id}：{online}，用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前")
+        lines.append(f"{report.get('vps_name') or vps_id}：{online}，用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前")
     render_page(chat_id, "\n".join(lines), admin_machine_keyboard(reports), message_id)
 
 
@@ -3863,7 +3847,7 @@ def admin_vps(chat_id, vps_id, message_id=None):
             days = (exp - today()).days
             exp_text = f"剩{days}天" if days >= 0 else "已过期"
         lines.append(f"{user.get('username')}：{total}/{quota_text}，{exp_text}，{status_text(user)}")
-    render_page(chat_id, "\n".join(lines), back_keyboard("admin", "a:overview"), message_id)
+    render_page(chat_id, "\n".join(lines), [[{"text": "刷新", "callback_data": f"a:vps:{vps_id}"}, {"text": "返回", "callback_data": "a:home"}]], message_id)
 
 
 def handle_message(msg):
@@ -3892,10 +3876,6 @@ def handle_callback(cb):
     user = cb.get("from") or {}
     tg_id = user.get("id")
     if not chat_id or not tg_id:
-        return
-    if data == "noop":
-        if cb.get("id"):
-            answer_callback(cb.get("id"), "当前页面")
         return
     if cb.get("id"):
         answer_callback(cb.get("id"))

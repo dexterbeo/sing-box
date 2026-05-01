@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-01 06:12:38 UTC
+# 构建时间: 2026-05-01 06:53:48 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.6.0"
+SCRIPT_VERSION="5.6.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3418,10 +3418,18 @@ tg_bot_username_from_token() {
 
 tg_send_message() {
   local token="$1" chat_id="$2" text="$3"
+  local payload
   [ -n "$chat_id" ] || return 1
-  jq -n --arg chat_id "$chat_id" --arg text "$text" \
-    '{chat_id:$chat_id,text:$text,disable_web_page_preview:true}' |
-    tg_api_request "$token" "sendMessage" >/dev/null
+  payload="$(jq -n --arg chat_id "$chat_id" --arg text "$text" \
+    '{chat_id:$chat_id,text:$text,disable_web_page_preview:true}')"
+  tg_api_request "$token" "sendMessage" "$payload" >/dev/null
+}
+
+tg_generate_vps_id() {
+  local raw
+  raw="$(openssl rand -hex 4 2>/dev/null || true)"
+  [ -n "$raw" ] || raw="$(date +%s%N | sha256sum | awk '{print $1}' | cut -c1-8)"
+  echo "node_${raw}"
 }
 
 tg_require_python3() {
@@ -3479,7 +3487,7 @@ def bot_api(method, payload=None):
     cfg = load_config()
     token = cfg.get("bot_token", "")
     if not token:
-        return {}
+        return {"ok": False, "description": "bot token missing"}
     data = json.dumps(payload or {}).encode("utf-8")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
@@ -3490,8 +3498,13 @@ def bot_api(method, payload=None):
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return {}
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            return {"ok": False, "description": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "description": str(exc)}
 
 
 def send_message(chat_id, text, keyboard=None):
@@ -3502,11 +3515,34 @@ def send_message(chat_id, text, keyboard=None):
     }
     if keyboard is not None:
         payload["reply_markup"] = {"inline_keyboard": keyboard}
-    bot_api("sendMessage", payload)
+    return bot_api("sendMessage", payload)
 
 
-def answer_callback(callback_id):
-    bot_api("answerCallbackQuery", {"callback_query_id": callback_id})
+def edit_message(chat_id, message_id, text, keyboard=None):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if keyboard is not None:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+    return bot_api("editMessageText", payload)
+
+
+def render_page(chat_id, text, keyboard=None, message_id=None):
+    if message_id:
+        resp = edit_message(chat_id, message_id, text, keyboard)
+        if resp.get("ok") or "message is not modified" in (resp.get("description") or ""):
+            return resp
+    return send_message(chat_id, text, keyboard)
+
+
+def answer_callback(callback_id, text=None):
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    bot_api("answerCallbackQuery", payload)
 
 
 def get_bot_username(cfg):
@@ -3578,26 +3614,38 @@ def is_admin(cfg, tg_id):
     return str(tg_id) in {str(x) for x in cfg.get("admin_chat_ids") or []}
 
 
+def header_rows(role):
+    label = "管理员" if role == "admin" else "用户"
+    return [[
+        {"text": "Sing-box 助手", "callback_data": "noop"},
+        {"text": label, "callback_data": "noop"},
+    ]]
+
+
 def binding_keyboard():
-    return [
+    return header_rows("user") + [
         [{"text": "我的状态", "callback_data": "u:status"}],
         [{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "绑定/解绑", "callback_data": "u:bind"}],
     ]
 
 
 def admin_keyboard():
-    return [
+    return header_rows("admin") + [
         [{"text": "总览", "callback_data": "a:overview"}],
         [{"text": "提醒设置", "callback_data": "a:notify"}],
     ]
 
 
-def send_home(chat_id, tg_id):
+def back_keyboard(role, back_to):
+    return header_rows(role) + [[{"text": "返回", "callback_data": back_to}]]
+
+
+def send_home(chat_id, tg_id, message_id=None):
     cfg = load_config()
     if is_admin(cfg, tg_id):
-        send_message(chat_id, "Sing-box 助手（管理员）", admin_keyboard())
+        render_page(chat_id, "Sing-box 助手（管理员）", admin_keyboard(), message_id)
     else:
-        send_message(chat_id, "Sing-box 助手", binding_keyboard())
+        render_page(chat_id, "Sing-box 助手", binding_keyboard(), message_id)
 
 
 def bind_token(chat_id, tg_id, token):
@@ -3641,18 +3689,18 @@ def user_bindings(cfg, tg_id):
     ]
 
 
-def user_status(chat_id, tg_id):
+def user_status(chat_id, tg_id, message_id=None):
     cfg = load_config()
     lines = ["我的状态"]
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        send_message(chat_id, "当前没有绑定的 VPS 用户。\n请通过管理员生成的绑定链接完成绑定。", binding_keyboard())
+        render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", back_keyboard("user", "u:home"), message_id)
         return
     for b in bindings:
         report, user = find_report_user(cfg, b)
         title = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
         if report is None:
-            lines += ["", title, "状态：VPS 暂无上报"]
+            lines += ["", title, "状态：节点暂无上报"]
             continue
         if user is None:
             lines += ["", title, "状态：绑定已失效，请联系管理员"]
@@ -3680,60 +3728,65 @@ def user_status(chat_id, tg_id):
             f"到期：{exp_text}",
             f"更新时间：{report.get('updated_at_text') or '未知'}",
         ]
-    send_message(chat_id, "\n".join(lines), binding_keyboard())
+    render_page(chat_id, "\n".join(lines), back_keyboard("user", "u:home"), message_id)
 
 
-def notify_settings(chat_id, tg_id, admin=False):
+def notify_settings(chat_id, tg_id, admin=False, message_id=None):
     cfg = load_config()
     settings = cfg.setdefault("user_settings", {})
     item = settings.setdefault(str(tg_id), {"notify": True})
     state = "开启" if item.get("notify", True) else "关闭"
     text = f"提醒设置\n\n提醒：{state}\n规则：流量达到{cfg.get('notify_threshold', 90)}%、到期前{cfg.get('expire_warn_days', 3)}天提醒"
-    keyboard = [[{"text": "关闭提醒" if item.get("notify", True) else "开启提醒", "callback_data": "a:toggle_notify" if admin else "u:toggle_notify"}]]
-    send_message(chat_id, text, keyboard)
+    role = "admin" if admin else "user"
+    back_to = "a:home" if admin else "u:home"
+    keyboard = header_rows(role) + [
+        [{"text": "关闭提醒" if item.get("notify", True) else "开启提醒", "callback_data": "a:toggle_notify" if admin else "u:toggle_notify"}],
+        [{"text": "返回", "callback_data": back_to}],
+    ]
+    render_page(chat_id, text, keyboard, message_id)
 
 
-def toggle_notify(chat_id, tg_id, admin=False):
+def toggle_notify(chat_id, tg_id, admin=False, message_id=None):
     with CFG_LOCK:
         cfg = load_config()
         settings = cfg.setdefault("user_settings", {})
         item = settings.setdefault(str(tg_id), {"notify": True})
         item["notify"] = not bool(item.get("notify", True))
         save_config(cfg)
-    notify_settings(chat_id, tg_id, admin)
+    notify_settings(chat_id, tg_id, admin, message_id)
 
 
-def binding_list(chat_id, tg_id):
+def binding_list(chat_id, tg_id, message_id=None):
     cfg = load_config()
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        send_message(chat_id, "当前没有绑定的 VPS 用户。", binding_keyboard())
+        render_page(chat_id, "当前没有绑定的用户。", back_keyboard("user", "u:home"), message_id)
         return
     lines = ["绑定状态", "", "已绑定："]
-    keyboard = []
+    keyboard = header_rows("user")
     for idx, b in enumerate(bindings):
         label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
         lines.append(f"- {label}")
         keyboard.append([{"text": f"解除 {label}", "callback_data": f"u:ask_unbind:{idx}"}])
     keyboard.append([{"text": "返回", "callback_data": "u:home"}])
-    send_message(chat_id, "\n".join(lines), keyboard)
+    render_page(chat_id, "\n".join(lines), keyboard, message_id)
 
 
-def ask_unbind(chat_id, tg_id, idx):
+def ask_unbind(chat_id, tg_id, idx, message_id=None):
     cfg = load_config()
     bindings = user_bindings(cfg, tg_id)
     if idx < 0 or idx >= len(bindings):
-        binding_list(chat_id, tg_id)
+        binding_list(chat_id, tg_id, message_id)
         return
     b = bindings[idx]
     label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
-    send_message(chat_id, f"确认解除绑定：{label}？", [
+    render_page(chat_id, f"确认解除绑定：{label}？", header_rows("user") + [
         [{"text": "确认解除", "callback_data": f"u:do_unbind:{idx}"}],
         [{"text": "取消", "callback_data": "u:bind"}],
-    ])
+    ], message_id)
 
 
-def do_unbind(chat_id, tg_id, idx):
+def do_unbind(chat_id, tg_id, idx, message_id=None):
     with CFG_LOCK:
         cfg = load_config()
         real_indices = [
@@ -3742,22 +3795,38 @@ def do_unbind(chat_id, tg_id, idx):
         ]
         if idx < 0 or idx >= len(real_indices):
             save_config(cfg)
-            binding_list(chat_id, tg_id)
+            binding_list(chat_id, tg_id, message_id)
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
         save_config(cfg)
-    send_message(chat_id, "绑定已解除。", binding_keyboard())
+    render_page(chat_id, "绑定已解除。", binding_keyboard(), message_id)
 
 
-def admin_overview(chat_id):
+def admin_machine_keyboard(reports):
+    buttons = [
+        {"text": (report.get("vps_name") or vps_id), "callback_data": f"a:vps:{vps_id}"}
+        for vps_id, report in sorted(reports.items())
+    ]
+    rows = header_rows("admin")
+    i = 0
+    while i + 1 < len(buttons):
+        rows.append([buttons[i], buttons[i + 1]])
+        i += 2
+    if i < len(buttons):
+        rows.append([buttons[i], {"text": "返回", "callback_data": "a:home"}])
+    else:
+        rows.append([{"text": "返回", "callback_data": "a:home"}])
+    return rows
+
+
+def admin_overview(chat_id, message_id=None):
     cfg = load_config()
     reports = cfg.get("reports") or {}
     if not reports:
-        send_message(chat_id, "当前没有 VPS 上报数据。", admin_keyboard())
+        render_page(chat_id, "当前没有节点上报数据。", back_keyboard("admin", "a:home"), message_id)
         return
     lines = ["总览"]
     now = int(time.time())
-    keyboard = []
     for vps_id, report in sorted(reports.items()):
         users = report.get("users") or []
         warn_count = 0
@@ -3772,16 +3841,14 @@ def admin_overview(chat_id):
         age = now - int(report.get("received_at") or now)
         online = "在线" if age <= 900 else "离线"
         lines.append(f"\n{report.get('vps_name') or vps_id}：{online}，用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前")
-        keyboard.append([{"text": report.get("vps_name") or vps_id, "callback_data": f"a:vps:{vps_id}"}])
-    keyboard.append([{"text": "返回", "callback_data": "a:home"}])
-    send_message(chat_id, "\n".join(lines), keyboard)
+    render_page(chat_id, "\n".join(lines), admin_machine_keyboard(reports), message_id)
 
 
-def admin_vps(chat_id, vps_id):
+def admin_vps(chat_id, vps_id, message_id=None):
     cfg = load_config()
     report = (cfg.get("reports") or {}).get(vps_id)
     if not report:
-        admin_overview(chat_id)
+        admin_overview(chat_id, message_id)
         return
     lines = [report.get("vps_name") or vps_id]
     for user in report.get("users") or []:
@@ -3796,7 +3863,7 @@ def admin_vps(chat_id, vps_id):
             days = (exp - today()).days
             exp_text = f"剩{days}天" if days >= 0 else "已过期"
         lines.append(f"{user.get('username')}：{total}/{quota_text}，{exp_text}，{status_text(user)}")
-    send_message(chat_id, "\n".join(lines), [[{"text": "返回", "callback_data": "a:overview"}]])
+    render_page(chat_id, "\n".join(lines), back_keyboard("admin", "a:overview"), message_id)
 
 
 def handle_message(msg):
@@ -3821,40 +3888,45 @@ def handle_callback(cb):
     data = cb.get("data") or ""
     msg = cb.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
     user = cb.get("from") or {}
     tg_id = user.get("id")
-    if cb.get("id"):
-        answer_callback(cb.get("id"))
     if not chat_id or not tg_id:
         return
+    if data == "noop":
+        if cb.get("id"):
+            answer_callback(cb.get("id"), "当前页面")
+        return
+    if cb.get("id"):
+        answer_callback(cb.get("id"))
     cfg = load_config()
     admin = is_admin(cfg, tg_id)
     if data == "u:home":
-        send_home(chat_id, tg_id)
+        send_home(chat_id, tg_id, message_id)
     elif data == "u:status":
-        user_status(chat_id, tg_id)
+        user_status(chat_id, tg_id, message_id)
     elif data == "u:notify":
-        notify_settings(chat_id, tg_id)
+        notify_settings(chat_id, tg_id, message_id=message_id)
     elif data == "u:toggle_notify":
-        toggle_notify(chat_id, tg_id)
+        toggle_notify(chat_id, tg_id, message_id=message_id)
     elif data == "u:bind":
-        binding_list(chat_id, tg_id)
+        binding_list(chat_id, tg_id, message_id)
     elif data.startswith("u:ask_unbind:"):
-        ask_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]))
+        ask_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
     elif data.startswith("u:do_unbind:"):
-        do_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]))
+        do_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
     elif admin and data == "a:home":
-        send_home(chat_id, tg_id)
+        send_home(chat_id, tg_id, message_id)
     elif admin and data == "a:overview":
-        admin_overview(chat_id)
+        admin_overview(chat_id, message_id)
     elif admin and data == "a:notify":
-        notify_settings(chat_id, tg_id, admin=True)
+        notify_settings(chat_id, tg_id, admin=True, message_id=message_id)
     elif admin and data == "a:toggle_notify":
-        toggle_notify(chat_id, tg_id, admin=True)
+        toggle_notify(chat_id, tg_id, admin=True, message_id=message_id)
     elif admin and data.startswith("a:vps:"):
-        admin_vps(chat_id, data.split(":", 2)[2])
+        admin_vps(chat_id, data.split(":", 2)[2], message_id)
     else:
-        send_home(chat_id, tg_id)
+        send_home(chat_id, tg_id, message_id)
 
 
 def process_updates():
@@ -3992,9 +4064,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/test":
             cfg = load_config()
-            for chat_id in cfg.get("admin_chat_ids") or []:
-                send_message(chat_id, f"通知测试成功：{payload.get('vps_name') or payload.get('vps_id') or '中心 Bot'}")
-            write_json(self, 200, {"ok": True})
+            errors = []
+            admin_ids = cfg.get("admin_chat_ids") or []
+            if not admin_ids:
+                errors.append("管理员 TG ID 未配置")
+            for chat_id in admin_ids:
+                resp = send_message(chat_id, f"通知测试成功：{payload.get('vps_name') or payload.get('vps_id') or '中心 Bot'}")
+                if not resp.get("ok"):
+                    errors.append(resp.get("description") or "sendMessage failed")
+            write_json(self, 200, {"ok": len(errors) == 0, "errors": errors})
             return
 
         write_json(self, 404, {"ok": False, "error": "not_found"})
@@ -4096,7 +4174,6 @@ tg_collect_report_json() {
         users: [
           .users
           | to_entries[]
-          | select(.key != "admin")
           | {
               username: .key,
               enabled: (.value.enabled // false),
@@ -4116,19 +4193,19 @@ tg_collect_report_json() {
 
 tg_center_api_post() {
   local url="$1" secret="$2" path="$3" payload="$4"
-  curl -fsS --connect-timeout 10 --max-time 20 \
+  curl -sS --connect-timeout 10 --max-time 20 \
     -H "Content-Type: application/json" \
     -H "X-SB-TG-Secret: ${secret}" \
     -d "$payload" \
     "${url%/}${path}"
 }
 
-tg_agent_sync() {
+tg_agent_sync_once() {
   local cfg role center_url secret payload
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$role" = "center" ] || [ "$role" = "agent" ] || return 0
-  user_db_exists || return 0
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
+  user_db_exists || return 1
   sync_user_usage_counters || true
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
@@ -4136,9 +4213,26 @@ tg_agent_sync() {
     center_url="$(echo "$cfg" | jq -r '.center_url // empty')"
   fi
   secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
-  [ -n "$center_url" ] && [ -n "$secret" ] || return 0
-  payload="$(tg_collect_report_json "$cfg")" || return 0
-  tg_center_api_post "$center_url" "$secret" "/api/report" "$payload" >/dev/null 2>&1 || return 0
+  [ -n "$center_url" ] && [ -n "$secret" ] || return 1
+  payload="$(tg_collect_report_json "$cfg")" || return 1
+  local resp
+  resp="$(tg_center_api_post "$center_url" "$secret" "/api/report" "$payload" 2>/dev/null)" || return 1
+  echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1
+}
+
+tg_agent_sync_now() {
+  local i
+  for i in 1 2 3; do
+    if tg_agent_sync_once; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+tg_agent_sync() {
+  tg_agent_sync_once >/dev/null 2>&1 || true
 }
 
 tg_setup_center() {
@@ -4151,16 +4245,15 @@ tg_setup_center() {
   read -r -p "中心监听端口 (默认: 25888): " port
   port="${port:-25888}"
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
-  read -r -p "本机标识 (如 sg01): " vps_id
-  [ -n "$vps_id" ] || { warn "本机标识不能为空。"; pause; return 1; }
   read -r -p "本机名称 (如 新加坡01): " vps_name
-  vps_name="${vps_name:-$vps_id}"
-  read -r -p "中心 Bot 地址 (默认: http://$(get_public_ip):${port}): " public_url
-  public_url="$(tg_normalize_url "${public_url:-http://$(get_public_ip):${port}}")"
+  [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+  public_url="$(tg_normalize_url "http://$(get_public_ip):${port}")"
   username="$(tg_bot_username_from_token "$token")" || username=""
   [ -n "$username" ] || { warn "Bot Token 校验失败，无法获取 Bot 用户名。"; pause; return 1; }
   secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
   [ -n "$secret" ] || secret="$(tg_generate_secret)"
+  vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
+  [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
   cfg="$(echo "$cfg" | jq \
     --arg token "$token" \
     --arg admin "$admin_id" \
@@ -4185,6 +4278,11 @@ tg_setup_center() {
   tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
   tg_install_center_service || { err "中心 Bot 服务安装失败。"; pause; return 1; }
   install_tg_agent_cron || warn "TG 节点上报定时任务安装失败。"
+  if tg_agent_sync_now; then
+    ok "本机数据已立即上报。"
+  else
+    warn "TG Bot 已配置，但首次上报失败，请检查服务状态或稍后再试。"
+  fi
   ok "中心 Bot 已配置。"
   param_echo "中心地址" "$public_url"
   param_echo "接入密钥" "$secret"
@@ -4200,10 +4298,10 @@ tg_setup_agent() {
   [ -n "$center_url" ] || { warn "中心 Bot 地址不能为空。"; pause; return 1; }
   read -r -p "接入密钥: " secret
   [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
-  read -r -p "本机标识 (如 jp01): " vps_id
-  [ -n "$vps_id" ] || { warn "本机标识不能为空。"; pause; return 1; }
   read -r -p "本机名称 (如 日本01): " vps_name
-  vps_name="${vps_name:-$vps_id}"
+  [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+  vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
+  [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
   cfg="$(echo "$cfg" | jq \
     --arg url "$center_url" \
     --arg secret "$secret" \
@@ -4218,8 +4316,12 @@ tg_setup_agent() {
     ')"
   tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
   install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; pause; return 1; }
-  tg_agent_sync || true
-  ok "普通 VPS 节点已配置。"
+  if tg_agent_sync_now; then
+    ok "本机数据已立即上报。"
+  else
+    warn "已保存配置，但首次上报失败，请检查中心地址、接入密钥或防火墙。"
+  fi
+  ok "普通节点已配置。"
   pause
 }
 
@@ -4227,7 +4329,7 @@ tg_setup_menu() {
   clear
   print_rect_title "设置TG Bot"
   echo "  1. 中心 Bot"
-  echo "  2. 普通 VPS 节点"
+  echo "  2. 普通节点"
   echo "  0. 返回上一级"
   local role
   read -r -p "请选择本机角色: " role
@@ -4287,31 +4389,42 @@ tg_generate_bind_link_menu() {
 }
 
 tg_notify_test() {
-  local cfg role center_url secret payload token admin_id
+  local cfg role center_url secret payload resp ok_value err_msg
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "请先设置TG Bot。"; pause; return 0; }
   if [ "$role" = "center" ]; then
-    token="$(echo "$cfg" | jq -r '.bot_token // empty')"
-    admin_id="$(echo "$cfg" | jq -r '.admin_chat_ids[0] // empty')"
-    if tg_send_message "$token" "$admin_id" "通知测试成功：$(echo "$cfg" | jq -r '.vps_name // "中心 Bot"')"; then
-      ok "通知测试已发送。"
-    else
-      err "通知测试失败，请检查 Bot Token 和管理员 TG ID。"
-    fi
+    center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
+    secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
   else
     center_url="$(echo "$cfg" | jq -r '.center_url // empty')"
     secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
-    payload="$(echo "$cfg" | jq -n \
-      --arg vps_id "$(echo "$cfg" | jq -r '.vps_id // empty')" \
-      --arg vps_name "$(echo "$cfg" | jq -r '.vps_name // empty')" \
-      '{vps_id:$vps_id,vps_name:$vps_name}')"
-    if tg_center_api_post "$center_url" "$secret" "/api/test" "$payload" >/dev/null 2>&1; then
-      ok "通知测试已发送到管理员。"
-    else
-      err "通知测试失败，请检查中心地址和接入密钥。"
-    fi
   fi
+  payload="$(echo "$cfg" | jq -n \
+    --arg vps_id "$(echo "$cfg" | jq -r '.vps_id // empty')" \
+    --arg vps_name "$(echo "$cfg" | jq -r '.vps_name // empty')" \
+    '{vps_id:$vps_id,vps_name:$vps_name}')"
+  resp="$(tg_center_api_post "$center_url" "$secret" "/api/test" "$payload" 2>/dev/null || true)"
+  ok_value="$(echo "$resp" | jq -r '.ok // false' 2>/dev/null || echo false)"
+  if [ "$ok_value" = "true" ]; then
+    ok "通知测试已发送到管理员。"
+  else
+    err_msg="$(echo "$resp" | jq -r '(.errors // []) | join("; ")' 2>/dev/null || true)"
+    [ -n "$err_msg" ] || err_msg="请检查中心 Bot 服务、Bot Token、管理员 TG ID，且管理员需先向 Bot 发送 /start。"
+    err "通知测试失败：$err_msg"
+  fi
+  pause
+}
+
+tg_disable_menu() {
+  clear
+  print_rect_title "关闭TG Bot"
+  warn "该操作将停止 TG Bot，删除定时任务，并清除 TG Bot 配置。"
+  ask_confirm_yes "输入 YES 确认关闭并清除 TG Bot 配置: " || { warn "已取消关闭TG Bot。"; pause; return 0; }
+  remove_tg_agent_cron || true
+  tg_stop_center_service || true
+  rm -f "$TG_CONFIG_FILE" "$TG_CENTER_APP" >/dev/null 2>&1 || true
+  ok "TG Bot 已关闭，配置已清除。"
   pause
 }
 
@@ -4331,6 +4444,7 @@ telegram_bot_manager_menu() {
     echo "  1. 设置TG Bot"
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
+    echo "  4. 关闭TG Bot"
     echo "  0. 返回上一级"
     local act
     read -r -p "请选择操作: " act
@@ -4338,6 +4452,7 @@ telegram_bot_manager_menu() {
       1) tg_setup_menu ;;
       2) tg_generate_bind_link_menu ;;
       3) tg_notify_test ;;
+      4) tg_disable_menu ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

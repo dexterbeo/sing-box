@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 03:05:57 UTC
+# 构建时间: 2026-05-02 03:07:58 UTC
 # ============================================================
 
 
@@ -5006,6 +5006,9 @@ telegram_bot_manager_menu() {
     vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
     center_url="$(echo "$cfg" | jq -r '.center_url // ""')"
     access_secret="$(echo "$cfg" | jq -r '.access_secret // ""')"
+    if [ "$role" = "center" ] || [ "$role" = "agent" ]; then
+      install_tg_agent_cron >/dev/null 2>&1 || true
+    fi
     echo "当前角色：${role:-未设置}"
     [ -n "$vps_name" ] && echo "本机名称：$vps_name"
     [ -n "$center_url" ] && echo "中心地址：$center_url"

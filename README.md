@@ -5,11 +5,11 @@
 ## 快速开始
 
 ```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh && bash sb.sh
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && bash sb.sh
 ```
 **非root用户：**
 ```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh && sudo bash sb.sh
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && sudo bash sb.sh
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。
@@ -25,7 +25,8 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh &&
 * 支持设置用户流量限制，总量=上行流量+下行流量+手动校正流量（经sing-box的流量总量，属于服务器的单向流量）。
 * 支持自定义流量重置日（如每月特定日期或月底）。
 * 支持设置套餐到期日，到期自动停用。
-* **使用方法**：新增用户-分配节点-设置套餐，到期后如需续订，手动修改套餐，手动重置流量，手动开启用户即可。
+* 支持一键续期、重置流量、补正流量、启用/停用用户。
+* **使用入口**：`7. 用户管理`。
 
 ### 2. 协议安装
 提供主流协议的一键部署：
@@ -40,6 +41,43 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/test/sb.sh &&
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
 * 支持一键导出 Clash、Quantumult X、v2rayN、Surge 等格式的节点配置。
+
+### 5. Telegram Bot 管理
+支持通过 Telegram 查看用户状态、接收提醒，并进行基础远程管理。
+
+* **两种模式**：
+  * **主控节点**：运行 Telegram Bot，集中查看所有已接入 VPS。
+  * **普通节点**：定时向主控节点上报本机用户数据，不需要暴露控制端口。
+* **普通用户可用功能**：
+  * 绑定自己的用户账号。
+  * 查看已绑定节点的流量、补正流量、到期时间和状态。
+  * 开启或关闭流量/到期提醒。
+* **管理员可用功能**：
+  * 查看所有接入 VPS 的在线状态、用户数量、预警和到期情况。
+  * 查看单个用户的流量、套餐、到期和启用状态。
+  * 远程执行启用/停用、续期、修改套餐、重置流量、补正流量、修改到期时间。
+* **提醒机制**：
+  * 默认流量达到 90% 时提醒。
+  * 默认到期前 3 天提醒。
+  * 无需打开 Bot，后台上报时会自动触发提醒。
+* **使用入口**：`7. 用户管理` → `4. Telegram Bot 管理`。
+
+#### 准备 Bot Token 和管理员 TG ID
+
+使用 Telegram Bot 前，需要先准备两个信息：
+
+* **Bot Token**：
+  1. 在 Telegram 搜索 `@BotFather`。
+  2. 发送 `/newbot`。
+  3. 按提示设置 Bot 名称和用户名。
+  4. 创建完成后，`@BotFather` 会返回一串 Token，格式类似：`123456789:AA...`。
+* **管理员 TG ID**：
+  1. 在 Telegram 搜索 `@userinfobot` 或 `@RawDataBot`。
+  2. 向它发送任意消息或 `/start`。
+  3. 返回信息中的 `Id` / `User ID` 就是管理员 TG ID。
+  4. 只填写数字，不要填写用户名或 `@xxx`。
+
+设置完成后，管理员需要先向自己的 Bot 发送一次 `/start`，否则 Bot 可能无法主动发送测试通知。Bot Token 是敏感信息，请勿公开。
 
 ---
 

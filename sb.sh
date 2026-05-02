@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 10:17:49 UTC
+# 构建时间: 2026-05-02 10:30:42 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.8"
+SCRIPT_VERSION="5.7.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3914,10 +3914,17 @@ def signed_gb_text(bytes_value):
     return f"{float(bytes_value) / (1024 ** 3):+.1f}GB"
 
 
+def sorted_reports(reports):
+    return sorted(
+        (reports or {}).items(),
+        key=lambda item: ((item[1].get("vps_name") or item[0]).casefold(), item[0]),
+    )
+
+
 def admin_machine_keyboard(reports):
     buttons = [
         {"text": (report.get("vps_name") or vps_id), "callback_data": f"a:vps:{vps_id}"}
-        for vps_id, report in sorted(reports.items())
+        for vps_id, report in sorted_reports(reports)
     ]
     rows = []
     i = 0
@@ -3938,7 +3945,7 @@ def admin_overview(chat_id, message_id=None):
         return
     lines = []
     now = int(time.time())
-    for vps_id, report in sorted(reports.items()):
+    for vps_id, report in sorted_reports(reports):
         users = report.get("users") or []
         warn_count = 0
         expire_count = 0
@@ -3950,8 +3957,8 @@ def admin_overview(chat_id, message_id=None):
             if exp is not None and 1 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
-        online = "在线" if age <= 900 else "离线"
-        lines.append(f"{report.get('vps_name') or vps_id}：{online}，用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前")
+        state_mark = "✅" if age <= 900 else "❌"
+        lines.append(f"{report.get('vps_name') or vps_id}：用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前 {state_mark}")
     render_page(chat_id, "\n".join(lines), admin_machine_keyboard(reports), message_id)
 
 
@@ -5321,9 +5328,11 @@ telegram_bot_manager_menu() {
     echo "  1. 设置TG Bot"
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
-    echo "  4. 关闭TG Bot"
     if [ "$role" = "center" ]; then
-      echo "  5. 更新/重启TG Bot服务"
+      echo "  4. 更新/重启TG Bot"
+      echo "  5. 关闭TG Bot"
+    else
+      echo "  4. 关闭TG Bot"
     fi
     echo "  0. 返回上一级"
     local act
@@ -5332,8 +5341,20 @@ telegram_bot_manager_menu() {
       1) tg_setup_menu ;;
       2) tg_generate_bind_link_menu ;;
       3) tg_notify_test ;;
-      4) tg_disable_menu ;;
-      5) tg_reload_center_service_menu ;;
+      4)
+        if [ "$role" = "center" ]; then
+          tg_reload_center_service_menu
+        else
+          tg_disable_menu
+        fi
+        ;;
+      5)
+        if [ "$role" = "center" ]; then
+          tg_disable_menu
+        else
+          warn "无效输入：$act"; sleep 1
+        fi
+        ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 09:26:40 UTC
+# 构建时间: 2026-05-02 10:17:49 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.7"
+SCRIPT_VERSION="5.7.8"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3961,8 +3961,16 @@ def admin_vps(chat_id, vps_id, message_id=None):
     if not report:
         admin_overview(chat_id, message_id)
         return
-    lines = [report.get("vps_name") or vps_id]
     users = report.get("users") or []
+    if len(users) == 1:
+        render_page(
+            chat_id,
+            "\n".join(user_detail_lines(report_user_title(report, vps_id, users[0]), report, users[0])),
+            admin_user_keyboard(vps_id, 0, users[0], "a:home"),
+            message_id,
+        )
+        return
+    lines = [report.get("vps_name") or vps_id]
     keyboard = []
     row = []
     for idx, user in enumerate(users):
@@ -3987,12 +3995,17 @@ def find_report_user_by_index(cfg, vps_id, idx):
     return report, users[idx]
 
 
-def admin_user_keyboard(vps_id, idx, user):
+def admin_user_back_data(report, vps_id):
+    return "a:home" if len(report.get("users") or []) == 1 else f"a:vps:{vps_id}"
+
+
+def admin_user_keyboard(vps_id, idx, user, back_data=None):
     toggle_text = "停用" if user.get("enabled") is True else "启用"
+    back_data = back_data or f"a:vps:{vps_id}"
     return [
         [{"text": toggle_text, "callback_data": f"a:toggle:{vps_id}:{idx}"}, {"text": "续期", "callback_data": f"a:renew_menu:{vps_id}:{idx}"}],
         [{"text": "套餐", "callback_data": f"a:quota_menu:{vps_id}:{idx}"}, {"text": "更多", "callback_data": f"a:more:{vps_id}:{idx}"}],
-        [{"text": "返回", "callback_data": f"a:vps:{vps_id}"}],
+        [{"text": "返回", "callback_data": back_data}],
     ]
 
 
@@ -4002,7 +4015,12 @@ def admin_user_detail(chat_id, vps_id, idx, message_id=None):
     if not report or not user:
         admin_vps(chat_id, vps_id, message_id)
         return
-    render_page(chat_id, "\n".join(user_detail_lines(report_user_title(report, vps_id, user), report, user)), admin_user_keyboard(vps_id, idx, user), message_id)
+    render_page(
+        chat_id,
+        "\n".join(user_detail_lines(report_user_title(report, vps_id, user), report, user)),
+        admin_user_keyboard(vps_id, idx, user, admin_user_back_data(report, vps_id)),
+        message_id,
+    )
 
 
 def admin_quota_menu(chat_id, vps_id, idx, message_id=None):
@@ -5241,6 +5259,26 @@ tg_notify_test() {
   pause
 }
 
+tg_reload_center_service_menu() {
+  local cfg role
+  cfg="$(tg_config_load)"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  if [ "$role" != "center" ]; then
+    warn "只有主控节点需要更新/重启 TG Bot 服务。"
+    pause
+    return 1
+  fi
+  tg_install_center_service || { err "TG Bot 服务更新/重启失败。"; pause; return 1; }
+  install_tg_agent_cron >/dev/null 2>&1 || true
+  if tg_agent_sync_now; then
+    ok "TG Bot 服务已更新并重启，本机数据已立即上报。"
+  else
+    ok "TG Bot 服务已更新并重启。"
+    warn "本机立即上报失败，定时任务会继续自动上报。"
+  fi
+  pause
+}
+
 tg_disable_menu() {
   clear
   print_rect_title "关闭TG Bot"
@@ -5284,6 +5322,9 @@ telegram_bot_manager_menu() {
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
     echo "  4. 关闭TG Bot"
+    if [ "$role" = "center" ]; then
+      echo "  5. 更新/重启TG Bot服务"
+    fi
     echo "  0. 返回上一级"
     local act
     read -r -p "请选择操作: " act
@@ -5292,6 +5333,7 @@ telegram_bot_manager_menu() {
       2) tg_generate_bind_link_menu ;;
       3) tg_notify_test ;;
       4) tg_disable_menu ;;
+      5) tg_reload_center_service_menu ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

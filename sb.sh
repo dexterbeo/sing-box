@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 10:30:42 UTC
+# 构建时间: 2026-05-02 10:45:11 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.9"
+SCRIPT_VERSION="5.8.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3614,7 +3614,7 @@ def user_home_keyboard(bindings=None):
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "绑定/解绑", "callback_data": "u:bind"}])
+    rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "解除绑定", "callback_data": "u:bind"}])
     return rows
 
 
@@ -3746,7 +3746,7 @@ def binding_list(chat_id, tg_id, message_id=None):
     for idx, b in enumerate(bindings):
         label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
         lines.append(f"- {label}")
-        keyboard.append([{"text": f"解除 {label}", "callback_data": f"u:ask_unbind:{idx}"}])
+        keyboard.append([{"text": f"解绑 {label}", "callback_data": f"u:ask_unbind:{idx}"}])
     keyboard.append([{"text": "返回", "callback_data": "u:home"}])
     render_page(chat_id, "\n".join(lines), keyboard, message_id)
 
@@ -3957,8 +3957,10 @@ def admin_overview(chat_id, message_id=None):
             if exp is not None and 1 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
-        state_mark = "✅" if age <= 900 else "❌"
-        lines.append(f"{report.get('vps_name') or vps_id}：用户{len(users)}，预警{warn_count}，到期{expire_count}，{max(age // 60, 0)}分钟前 {state_mark}")
+        state_text = "在线 ✅" if age <= 900 else "离线 ❌"
+        warn_text = f"{warn_count}⚠️" if warn_count > 0 else "0"
+        expire_text = f"{expire_count}⚠️" if expire_count > 0 else "0"
+        lines.append(f"{report.get('vps_name') or vps_id}：用户{len(users)}，预警{warn_text}，到期{expire_text}，{state_text}")
     render_page(chat_id, "\n".join(lines), admin_machine_keyboard(reports), message_id)
 
 

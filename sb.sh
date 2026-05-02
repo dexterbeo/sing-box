@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 04:23:00 UTC
+# 构建时间: 2026-05-02 04:27:43 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.2"
+SCRIPT_VERSION="5.7.3"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3619,11 +3619,19 @@ def is_admin(cfg, tg_id):
     return str(tg_id) in {str(x) for x in cfg.get("admin_chat_ids") or []}
 
 
-def user_home_keyboard():
-    return [
-        [{"text": "刷新", "callback_data": "u:home"}, {"text": "提醒设置", "callback_data": "u:notify"}],
-        [{"text": "绑定/解绑", "callback_data": "u:bind"}],
-    ]
+def user_home_keyboard(bindings=None):
+    rows = []
+    row = []
+    for idx, binding in enumerate(bindings or []):
+        label = binding.get("vps_name") or binding.get("vps_id") or str(idx + 1)
+        row.append({"text": label, "callback_data": f"u:detail:{idx}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "绑定/解绑", "callback_data": "u:bind"}])
+    return rows
 
 
 def back_keyboard(back_to):
@@ -3690,45 +3698,32 @@ def user_bindings(cfg, tg_id):
 
 def user_status(chat_id, tg_id, message_id=None):
     cfg = load_config()
-    lines = []
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
         render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", user_home_keyboard(), message_id)
         return
+    lines = ["我的绑定", ""]
     for b in bindings:
-        report, user = find_report_user(cfg, b)
-        title = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
-        if lines:
-            lines.append("")
-        if report is None:
-            lines += [title, "状态：节点暂无上报"]
-            continue
-        if user is None:
-            lines += [title, "状态：绑定已失效，请联系管理员"]
-            continue
-        total = user_total(user)
-        quota = int(user.get("quota_gb") or 0)
-        used_text = fmt_bytes(total)
-        if quota > 0:
-            ratio = int(total * 100 / (quota * 1024 ** 3))
-            used_text = f"{used_text} / {quota}GB（{ratio}%）"
-        else:
-            used_text = f"{used_text} / 不限"
-        expire = user.get("expire_at") or "0"
-        exp_date = parse_date(expire)
-        if exp_date is None:
-            exp_text = "永久"
-        else:
-            days = (exp_date - today()).days
-            exp_text = f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
-        lines += [
-            title,
-            f"状态：{status_text(user)}",
-            f"已用：{used_text}",
-            f"到期：{exp_text}",
-            f"更新时间：{report.get('updated_at_text') or '未知'}",
-        ]
-    render_page(chat_id, "\n".join(lines), user_home_keyboard(), message_id)
+        lines.append(f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}")
+    render_page(chat_id, "\n".join(lines), user_home_keyboard(bindings), message_id)
+
+
+def user_detail(chat_id, tg_id, idx, message_id=None):
+    cfg = load_config()
+    bindings = user_bindings(cfg, tg_id)
+    if idx < 0 or idx >= len(bindings):
+        user_status(chat_id, tg_id, message_id)
+        return
+    binding = bindings[idx]
+    report, user = find_report_user(cfg, binding)
+    title = f"{binding.get('vps_name') or binding.get('vps_id')} / {binding.get('username')}"
+    if report is None:
+        render_page(chat_id, f"{title}\n状态：节点暂无上报", back_keyboard("u:home"), message_id)
+        return
+    if user is None:
+        render_page(chat_id, f"{title}\n状态：绑定已失效，请联系管理员", back_keyboard("u:home"), message_id)
+        return
+    render_page(chat_id, "\n".join(user_detail_lines(title, report, user)), back_keyboard("u:home"), message_id)
 
 
 def notify_settings(chat_id, tg_id, admin=False, message_id=None):
@@ -3822,12 +3817,47 @@ def expire_display(value):
     return "永久" if not value or value == "0" else str(value)
 
 
-def usage_summary(user):
+def usage_current_line(user):
+    return f"当前用量：{fmt_bytes(user_total(user))} / {quota_text(user.get('quota_gb') or 0)}"
+
+
+def traffic_detail_lines(user):
     return [
-        f"当前用量：{fmt_bytes(user_total(user))} / {quota_text(user.get('quota_gb') or 0)}",
         f"上传：{fmt_bytes(user.get('used_up_bytes') or 0)}",
         f"下载：{fmt_bytes(user.get('used_down_bytes') or 0)}",
         f"补正：{fmt_bytes(user.get('manual_added_bytes') or 0)}",
+    ]
+
+
+def usage_summary(user):
+    return [usage_current_line(user)]
+
+
+def used_detail_text(user):
+    total = user_total(user)
+    quota = int(user.get("quota_gb") or 0)
+    if quota > 0:
+        return f"{fmt_bytes(total)} / {quota}GB（{int(total * 100 / (quota * 1024 ** 3))}%）"
+    return f"{fmt_bytes(total)} / 不限"
+
+
+def expire_detail_text(user):
+    expire = user.get("expire_at") or "0"
+    exp = parse_date(expire)
+    if exp is None:
+        return "永久"
+    days = (exp - today()).days
+    return f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
+
+
+def user_detail_lines(title, report, user):
+    return [
+        title,
+        f"状态：{status_text(user)}",
+        f"已用：{used_detail_text(user)}",
+        *traffic_detail_lines(user),
+        f"到期：{expire_detail_text(user)}",
+        f"更新时间：{report.get('updated_at_text') or '未知'}",
     ]
 
 
@@ -3974,27 +4004,7 @@ def admin_user_detail(chat_id, vps_id, idx, message_id=None):
     if not report or not user:
         admin_vps(chat_id, vps_id, message_id)
         return
-    total = user_total(user)
-    quota = int(user.get("quota_gb") or 0)
-    if quota > 0:
-        used = f"{fmt_bytes(total)} / {quota}GB（{int(total * 100 / (quota * 1024 ** 3))}%）"
-    else:
-        used = f"{fmt_bytes(total)} / 不限"
-    expire = user.get("expire_at") or "0"
-    exp = parse_date(expire)
-    if exp is None:
-        exp_text = "永久"
-    else:
-        days = (exp - today()).days
-        exp_text = f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
-    lines = [
-        f"{report.get('vps_name') or vps_id} / {user.get('username')}",
-        f"状态：{status_text(user)}",
-        f"已用：{used}",
-        f"到期：{exp_text}",
-        f"更新时间：{report.get('updated_at_text') or '未知'}",
-    ]
-    render_page(chat_id, "\n".join(lines), admin_user_keyboard(vps_id, idx, user), message_id)
+    render_page(chat_id, "\n".join(user_detail_lines(report_user_title(report, vps_id, user), report, user)), admin_user_keyboard(vps_id, idx, user), message_id)
 
 
 def admin_quota_menu(chat_id, vps_id, idx, message_id=None):
@@ -4264,6 +4274,9 @@ def handle_callback(cb):
     elif data == "u:bind":
         clear_waiting_input(tg_id)
         binding_list(chat_id, tg_id, message_id)
+    elif data.startswith("u:detail:"):
+        clear_waiting_input(tg_id)
+        user_detail(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
     elif data.startswith("u:ask_unbind:"):
         clear_waiting_input(tg_id)
         ask_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
@@ -4566,12 +4579,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 task["message"] = message
                 task["completed_at"] = int(time.time())
                 chat_id = task.get("created_chat_id")
+                tg_id = task.get("created_by")
                 username = task.get("username") or ""
                 save_config(cfg)
             if chat_id:
                 title = f"{vps_id} / {username}".strip(" /")
                 prefix = "执行成功" if ok_value else "执行失败"
                 send_message(chat_id, f"{prefix}：{title}\n{message}")
+                if ok_value and tg_id:
+                    send_home(chat_id, tg_id)
             write_json(self, 200, {"ok": True})
             return
 
@@ -4601,7 +4617,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not admin_ids:
                 errors.append("管理员 TG ID 未配置")
             for chat_id in admin_ids:
-                resp = send_message(chat_id, f"通知测试成功：{payload.get('vps_name') or payload.get('vps_id') or '中心 Bot'}")
+                resp = send_message(chat_id, f"通知测试成功：{payload.get('vps_name') or payload.get('vps_id') or '主控节点'}")
                 if not resp.get("ok"):
                     errors.append(resp.get("description") or "sendMessage failed")
             write_json(self, 200, {"ok": len(errors) == 0, "errors": errors})
@@ -4666,7 +4682,7 @@ EOF
       rc-service "$TG_CENTER_SERVICE" restart
       ;;
     *)
-      err "未识别的 init 系统，无法安装中心 Bot 服务。"
+      err "未识别的 init 系统，无法安装主控服务。"
       return 1
       ;;
   esac
@@ -4988,7 +5004,7 @@ tg_setup_center() {
   [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
   read -r -p "管理员 TG ID: " admin_id
   [[ "$admin_id" =~ ^[0-9]+$ ]] || { warn "管理员 TG ID 必须是数字。"; pause; return 1; }
-  read -r -p "中心监听端口 (默认: 25888): " port
+  read -r -p "主控监听端口 (默认: 25888): " port
   port="${port:-25888}"
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
   read -r -p "本机名称（支持中文）: " vps_name
@@ -5022,15 +5038,15 @@ tg_setup_center() {
       | .vps_name = $vps_name
     ')"
   tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
-  tg_install_center_service || { err "中心 Bot 服务安装失败。"; pause; return 1; }
+  tg_install_center_service || { err "主控服务安装失败。"; pause; return 1; }
   install_tg_agent_cron || warn "TG 节点上报定时任务安装失败。"
   if tg_agent_sync_now; then
     ok "本机数据已立即上报。"
   else
     warn "TG Bot 已配置，但首次上报失败，请检查服务状态或稍后再试。"
   fi
-  ok "中心 Bot 已配置。"
-  param_echo "中心地址" "$public_url"
+  ok "主控节点已配置。"
+  param_echo "主控地址" "$public_url"
   param_echo "接入密钥" "$secret"
   param_echo "Bot 用户名" "@${username}"
   pause
@@ -5039,9 +5055,9 @@ tg_setup_center() {
 tg_setup_agent() {
   local cfg center_url secret vps_id vps_name
   cfg="$(tg_config_load)"
-  read -r -p "中心 Bot 地址: " center_url
+  read -r -p "主控地址: " center_url
   center_url="$(tg_normalize_url "$center_url")"
-  [ -n "$center_url" ] || { warn "中心 Bot 地址不能为空。"; pause; return 1; }
+  [ -n "$center_url" ] || { warn "主控地址不能为空。"; pause; return 1; }
   read -r -p "接入密钥: " secret
   [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
   read -r -p "本机名称（支持中文）: " vps_name
@@ -5065,7 +5081,7 @@ tg_setup_agent() {
   if tg_agent_sync_now; then
     ok "本机数据已立即上报。"
   else
-    warn "已保存配置，但首次上报失败，请检查中心地址、接入密钥或防火墙。"
+    warn "已保存配置，但首次上报失败，请检查主控地址、接入密钥或防火墙。"
   fi
   ok "普通节点已配置。"
   pause
@@ -5074,11 +5090,11 @@ tg_setup_agent() {
 tg_setup_menu() {
   clear
   print_rect_title "设置TG Bot"
-  echo "  1. 中心 Bot"
+  echo "  1. 主控节点"
   echo "  2. 普通节点"
   echo "  0. 返回上一级"
   local role
-  read -r -p "请选择本机角色: " role
+  read -r -p "请选择本机模式: " role
   case "${role:-}" in
     1) tg_setup_center ;;
     2) tg_setup_agent ;;
@@ -5129,7 +5145,7 @@ tg_generate_bind_link_menu() {
     param_echo "用户" "$username"
     param_echo "链接" "$link"
   else
-    err "绑定链接生成失败，请检查中心 Bot 服务和接入密钥。"
+    err "绑定链接生成失败，请检查主控服务和接入密钥。"
   fi
   pause
 }
@@ -5156,7 +5172,7 @@ tg_notify_test() {
     ok "通知测试已发送到管理员。"
   else
     err_msg="$(echo "$resp" | jq -r '(.errors // []) | join("; ")' 2>/dev/null || true)"
-    [ -n "$err_msg" ] || err_msg="请检查中心 Bot 服务、Bot Token、管理员 TG ID，且管理员需先向 Bot 发送 /start。"
+    [ -n "$err_msg" ] || err_msg="请检查主控服务、Bot Token、管理员 TG ID，且管理员需先向 Bot 发送 /start。"
     err "通知测试失败：$err_msg"
   fi
   pause
@@ -5179,7 +5195,7 @@ telegram_bot_manager_menu() {
   while true; do
     clear
     print_rect_title "Telegram Bot 管理"
-    local cfg role vps_name center_url access_secret
+    local cfg role role_label vps_name center_url access_secret
     cfg="$(tg_config_load)"
     role="$(echo "$cfg" | jq -r '.role // "未设置"')"
     vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
@@ -5188,9 +5204,15 @@ telegram_bot_manager_menu() {
     if [ "$role" = "center" ] || [ "$role" = "agent" ]; then
       install_tg_agent_cron >/dev/null 2>&1 || true
     fi
-    echo "当前角色：${role:-未设置}"
+    case "$role" in
+      center) role_label="主控节点" ;;
+      agent) role_label="普通节点" ;;
+      ""|"未设置") role_label="未设置" ;;
+      *) role_label="$role" ;;
+    esac
+    echo "当前模式：$role_label"
     [ -n "$vps_name" ] && echo "本机名称：$vps_name"
-    [ -n "$center_url" ] && echo "中心地址：$center_url"
+    [ -n "$center_url" ] && echo "主控地址：$center_url"
     if [ "$role" = "center" ] && [ -n "$access_secret" ]; then
       echo "接入密钥：$access_secret"
     fi

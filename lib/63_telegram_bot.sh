@@ -444,8 +444,7 @@ def ask_unbind(chat_id, tg_id, idx, message_id=None):
     b = bindings[idx]
     label = f"{b.get('vps_name') or b.get('vps_id')} / {b.get('username')}"
     render_page(chat_id, f"确认解除绑定：{label}？", [
-        [{"text": "确认解除", "callback_data": f"u:do_unbind:{idx}"}],
-        [{"text": "取消", "callback_data": "u:bind"}],
+        [{"text": "确认解除", "callback_data": f"u:do_unbind:{idx}"}, {"text": "取消", "callback_data": "u:bind"}],
     ], message_id)
 
 
@@ -481,6 +480,74 @@ def user_summary_line(user):
         days = (exp - today()).days
         exp_text = f"剩{days}天" if days >= 0 else "已过期"
     return f"{user.get('username')}：{total}/{quota}，{exp_text}，{status_text(user)}"
+
+
+def expire_display(value):
+    return "永久" if not value or value == "0" else str(value)
+
+
+def usage_summary(user):
+    return [
+        f"当前用量：{fmt_bytes(user_total(user))} / {quota_text(user.get('quota_gb') or 0)}",
+        f"上传：{fmt_bytes(user.get('used_up_bytes') or 0)}",
+        f"下载：{fmt_bytes(user.get('used_down_bytes') or 0)}",
+        f"补正：{fmt_bytes(user.get('manual_added_bytes') or 0)}",
+    ]
+
+
+def report_user_title(report, vps_id, user):
+    return f"{report.get('vps_name') or vps_id} / {user.get('username')}"
+
+
+def add_calendar_months(base_date, months):
+    def last_day(year, month):
+        if month == 12:
+            nxt = datetime.date(year + 1, 1, 1)
+        else:
+            nxt = datetime.date(year, month + 1, 1)
+        return (nxt - datetime.timedelta(days=1)).day
+
+    is_eom = base_date.day == last_day(base_date.year, base_date.month)
+    total = base_date.year * 12 + (base_date.month - 1) + int(months)
+    year = total // 12
+    month = total % 12 + 1
+    day = last_day(year, month) if is_eom else min(base_date.day, last_day(year, month))
+    return datetime.date(year, month, day)
+
+
+def renewal_preview(user, months):
+    current = user.get("expire_at") or "0"
+    current_date = parse_date(current)
+    if current_date is None:
+        return None
+    base_date = today() if today() > current_date else current_date
+    return add_calendar_months(base_date, int(months)).isoformat()
+
+
+def renew_months_text(months):
+    months = int(months)
+    if months == 1:
+        return "1 个月"
+    if months == 3:
+        return "1 个季度"
+    return f"{months} 个月"
+
+
+def renew_confirm_text(report, vps_id, user, months):
+    new_expire = renewal_preview(user, months)
+    if new_expire is None:
+        return None
+    return "\n".join([
+        f"当前到期：{expire_display(user.get('expire_at') or '0')}",
+        f"续期后：{new_expire}",
+        "",
+        f"确认将 {report_user_title(report, vps_id, user)}",
+        f"续期 {renew_months_text(months)}？",
+    ])
+
+
+def signed_gb_text(bytes_value):
+    return f"{float(bytes_value) / (1024 ** 3):+.1f}GB"
 
 
 def admin_machine_keyboard(reports):
@@ -631,17 +698,16 @@ def admin_more_menu(chat_id, vps_id, idx, message_id=None):
     text = f"更多操作\n\n{report.get('vps_name') or vps_id} / {user.get('username')}"
     keyboard = [
         [{"text": "重置流量", "callback_data": f"a:reset:{vps_id}:{idx}"}, {"text": "补正流量", "callback_data": f"a:add_usage:{vps_id}:{idx}"}],
-        [{"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
+        [{"text": "到期设置", "callback_data": f"a:expire_set:{vps_id}:{idx}"}, {"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
     ]
     render_page(chat_id, text, keyboard, message_id)
 
 
 def parse_quota_input(text):
-    raw = (text or "").strip().upper()
-    m = re.fullmatch(r"(\d+)\s*(G|GB)?", raw)
-    if not m:
+    raw = (text or "").strip()
+    if not re.fullmatch(r"\d+", raw):
         return None
-    return int(m.group(1))
+    return int(raw)
 
 
 def parse_months_input(text):
@@ -653,14 +719,22 @@ def parse_months_input(text):
 
 
 def parse_traffic_input(text):
-    raw = (text or "").strip().upper().replace(" ", "")
-    m = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)(KB|K|MB|M|GB|G|TB|T)", raw)
+    raw = (text or "").strip().replace(" ", "")
+    m = re.fullmatch(r"([+-]?\d+(?:\.\d)?)", raw)
     if not m:
         return None
     value = float(m.group(1))
-    unit = m.group(2)[0]
-    power = {"K": 1, "M": 2, "G": 3, "T": 4}[unit]
-    return int(value * (1024 ** power))
+    return int(value * (1024 ** 3))
+
+
+def parse_expire_input(text):
+    raw = (text or "").strip()
+    if raw == "0":
+        return "0"
+    try:
+        return datetime.date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
 
 
 def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, params, back_data, message_id=None):
@@ -742,29 +816,68 @@ def handle_waiting_input(chat_id, tg_id, text):
     idx = int(waiting.get("idx") or 0)
     username = waiting.get("username")
     back_data = f"a:user:{vps_id}:{idx}"
+    report, user = find_report_user_by_index(cfg, vps_id, idx)
+    title = f"{vps_id} / {username}" if not report or not user else report_user_title(report, vps_id, user)
     if action == "set_quota":
         quota = parse_quota_input(text)
         if quota is None:
-            send_message(chat_id, "输入无效，请输入套餐流量，例如 300G；输入 0 表示不限。")
+            send_message(chat_id, "输入无效，请输入数字，例如 300；输入 0 表示不限。")
             return True
         clear_waiting_input(tg_id)
-        create_admin_confirmation(chat_id, tg_id, f"确认将 {vps_id} / {username} 套餐改为 {quota_text(quota)}？", "set_quota", vps_id, username, {"quota_gb": quota}, back_data)
+        create_admin_confirmation(chat_id, tg_id, "\n".join([
+            f"确认将 {title}",
+            f"套餐改为 {quota_text(quota)}？",
+        ]), "set_quota", vps_id, username, {"quota_gb": quota}, back_data)
         return True
     if action == "renew":
         months = parse_months_input(text)
         if months is None:
             send_message(chat_id, "输入无效，请输入需要续期的月数，例如 2。")
             return True
+        if not user:
+            send_message(chat_id, "用户状态已变化，请重新操作。")
+            clear_waiting_input(tg_id)
+            return True
+        confirm_text = renew_confirm_text(report, vps_id, user, months)
+        if confirm_text is None:
+            send_message(chat_id, "永久用户无需续期。")
+            clear_waiting_input(tg_id)
+            return True
         clear_waiting_input(tg_id)
-        create_admin_confirmation(chat_id, tg_id, f"确认将 {vps_id} / {username} 续期 {months} 个月？", "renew", vps_id, username, {"months": months}, back_data)
+        create_admin_confirmation(chat_id, tg_id, confirm_text, "renew", vps_id, username, {"months": months}, back_data)
         return True
     if action == "add_usage":
         bytes_value = parse_traffic_input(text)
         if bytes_value is None:
-            send_message(chat_id, "输入无效，请输入补正流量，例如 +10G 或 -5G。")
+            send_message(chat_id, "输入无效，请输入数字，单位G，最多1位小数。例如 +10.1 或 -5.5。")
             return True
         clear_waiting_input(tg_id)
-        create_admin_confirmation(chat_id, tg_id, f"确认给 {vps_id} / {username} 补正流量 {fmt_bytes(bytes_value)}？", "add_usage", vps_id, username, {"bytes": bytes_value}, back_data)
+        lines = []
+        if user:
+            lines += usage_summary(user) + [""]
+        lines += [
+            f"补正变化：{signed_gb_text(bytes_value)}",
+            "",
+            f"确认给 {title}",
+            "补正流量？",
+        ]
+        create_admin_confirmation(chat_id, tg_id, "\n".join(lines), "add_usage", vps_id, username, {"bytes": bytes_value}, back_data)
+        return True
+    if action == "set_expire":
+        expire_at = parse_expire_input(text)
+        if expire_at is None:
+            send_message(chat_id, "输入无效，请输入 YYYY-MM-DD，或输入 0 表示永久。")
+            return True
+        clear_waiting_input(tg_id)
+        current = expire_display(user.get("expire_at") if user else "")
+        new_value = expire_display(expire_at)
+        create_admin_confirmation(chat_id, tg_id, "\n".join([
+            f"当前到期：{current}",
+            f"修改后：{new_value}",
+            "",
+            f"确认修改 {title}",
+            "的到期时间？",
+        ]), "set_expire", vps_id, username, {"expire_at": expire_at}, back_data)
         return True
     clear_waiting_input(tg_id)
     return False
@@ -858,7 +971,11 @@ def handle_callback(cb):
         cfg = load_config()
         report, user = find_report_user_by_index(cfg, vps_id, idx)
         if user:
-            create_admin_confirmation(chat_id, tg_id, f"确认将 {report.get('vps_name') or vps_id} / {user.get('username')} 续期 {months} 个月？", "renew", vps_id, user.get("username"), {"months": int(months)}, f"a:user:{vps_id}:{idx}", message_id)
+            confirm_text = renew_confirm_text(report, vps_id, user, int(months))
+            if confirm_text is None:
+                render_page(chat_id, "永久用户无需续期。", back_keyboard(f"a:user:{vps_id}:{idx}"), message_id)
+            else:
+                create_admin_confirmation(chat_id, tg_id, confirm_text, "renew", vps_id, user.get("username"), {"months": int(months)}, f"a:user:{vps_id}:{idx}", message_id)
     elif admin and data.startswith("a:renew_custom:"):
         _, _, vps_id, idx = data.split(":", 3)
         idx = int(idx)
@@ -878,14 +995,23 @@ def handle_callback(cb):
         cfg = load_config()
         report, user = find_report_user_by_index(cfg, vps_id, idx)
         if user:
-            create_admin_confirmation(chat_id, tg_id, f"确认将 {report.get('vps_name') or vps_id} / {user.get('username')} 套餐改为 {quota_text(quota)}？", "set_quota", vps_id, user.get("username"), {"quota_gb": quota}, f"a:user:{vps_id}:{idx}", message_id)
+            create_admin_confirmation(chat_id, tg_id, "\n".join([
+                f"确认将 {report_user_title(report, vps_id, user)}",
+                f"套餐改为 {quota_text(quota)}？",
+            ]), "set_quota", vps_id, user.get("username"), {"quota_gb": quota}, f"a:user:{vps_id}:{idx}", message_id)
     elif admin and data.startswith("a:quota_custom:"):
         _, _, vps_id, idx = data.split(":", 3)
         idx = int(idx)
         cfg = load_config()
         report, user = find_report_user_by_index(cfg, vps_id, idx)
         if user:
-            start_waiting_input(chat_id, tg_id, "set_quota", vps_id, idx, user.get("username"), "请输入新的套餐流量，例如 300G；输入 0 表示不限。", message_id)
+            start_waiting_input(chat_id, tg_id, "set_quota", vps_id, idx, user.get("username"), "\n".join([
+                "折算成单向流量填入。",
+                "双向800G流量填写400。",
+                "单向500G流量填写500。",
+                "",
+                "请输入新的套餐流量，0 表示不限。",
+            ]), message_id)
     elif admin and data.startswith("a:more:"):
         clear_waiting_input(tg_id)
         _, _, vps_id, idx = data.split(":", 3)
@@ -897,14 +1023,40 @@ def handle_callback(cb):
         cfg = load_config()
         report, user = find_report_user_by_index(cfg, vps_id, idx)
         if user:
-            create_admin_confirmation(chat_id, tg_id, f"确认重置 {report.get('vps_name') or vps_id} / {user.get('username')} 的流量？", "reset_usage", vps_id, user.get("username"), {}, f"a:user:{vps_id}:{idx}", message_id)
+            create_admin_confirmation(chat_id, tg_id, "\n".join(
+                usage_summary(user) + [
+                    "",
+                    f"确认重置 {report_user_title(report, vps_id, user)}",
+                    "的流量？",
+                ]
+            ), "reset_usage", vps_id, user.get("username"), {}, f"a:user:{vps_id}:{idx}", message_id)
     elif admin and data.startswith("a:add_usage:"):
         _, _, vps_id, idx = data.split(":", 3)
         idx = int(idx)
         cfg = load_config()
         report, user = find_report_user_by_index(cfg, vps_id, idx)
         if user:
-            start_waiting_input(chat_id, tg_id, "add_usage", vps_id, idx, user.get("username"), "请输入补正流量，例如 +10G 或 -5G。", message_id)
+            start_waiting_input(chat_id, tg_id, "add_usage", vps_id, idx, user.get("username"), "\n".join(
+                usage_summary(user) + [
+                    "",
+                    "单位G，精确到小数点后1位",
+                    "例如 +10.1 或 -5.5",
+                    "",
+                    "请输入补正流量：",
+                ]
+            ), message_id)
+    elif admin and data.startswith("a:expire_set:"):
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            start_waiting_input(chat_id, tg_id, "set_expire", vps_id, idx, user.get("username"), "\n".join([
+                f"当前到期：{expire_display(user.get('expire_at') or '0')}",
+                "",
+                "请输入新的到期日期：",
+                "YYYY-MM-DD，输入 0 表示永久。",
+            ]), message_id)
     elif admin and data.startswith("a:confirm:"):
         clear_waiting_input(tg_id)
         create_task_from_confirmation(chat_id, tg_id, data.rsplit(":", 1)[1], message_id)
@@ -1347,6 +1499,31 @@ tg_task_exec_add_usage() {
   tg_task_apply_db "$new_db" && echo "补正流量已更新：$(format_bytes_human "$bytes")。"
 }
 
+tg_task_exec_set_expire() {
+  local db_json="$1" username="$2" expire_at="$3" today active new_db
+  if [ "$expire_at" != "0" ] && ! is_valid_ymd_date "$expire_at"; then
+    return 1
+  fi
+  today="$(date +%F)"
+  active=false
+  if [ "$expire_at" = "0" ] || [[ "$today" == "$expire_at" || "$today" < "$expire_at" ]]; then
+    active=true
+  fi
+  new_db="$(echo "$db_json" | jq --arg u "$username" --arg exp "$expire_at" --argjson active "$active" '
+    .users[$u].expire_at = $exp
+    | if $active == true then
+        if (.users[$u].disabled_reason // null) == "expired" then
+          .users[$u].enabled = true | .users[$u].disabled_reason = null
+        else . end
+      else
+        if (.users[$u].disabled_reason // null) == "manual" then .
+        else .users[$u].enabled = false | .users[$u].disabled_reason = "expired"
+        end
+      end
+  ')" || return 1
+  tg_task_apply_db "$new_db" && echo "到期时间已修改为 $(expire_text "$expire_at")。"
+}
+
 tg_execute_task() {
   local task="$1" action username db_json exists params result
   action="$(echo "$task" | jq -r '.action // empty')"
@@ -1369,6 +1546,8 @@ tg_execute_task() {
       tg_task_exec_reset_usage "$db_json" "$username" ;;
     add_usage)
       tg_task_exec_add_usage "$db_json" "$username" "$(echo "$params" | jq -r '.bytes // empty')" ;;
+    set_expire)
+      tg_task_exec_set_expire "$db_json" "$username" "$(echo "$params" | jq -r '.expire_at // empty')" ;;
     *)
       echo "不支持的任务类型：$action"
       return 1

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 09:06:39 UTC
+# 构建时间: 2026-05-02 09:26:40 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.6"
+SCRIPT_VERSION="5.7.7"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3785,6 +3785,18 @@ def quota_text(quota):
     return "不限" if quota == 0 else f"{quota}GB"
 
 
+def reset_day_text(value):
+    try:
+        value = int(value or 0)
+    except Exception:
+        value = 0
+    if value == 0:
+        return "不重置"
+    if value == 32:
+        return "月底"
+    return f"{value}号"
+
+
 def user_summary_line(user):
     total = fmt_bytes(user_total(user))
     quota = quota_text(user.get("quota_gb") or 0)
@@ -3841,6 +3853,7 @@ def user_detail_lines(title, report, user):
         f"状态：{status_text(user)}",
         f"已用：{used_detail_text(user)}",
         *traffic_detail_lines(user),
+        f"重置日期：{reset_day_text(user.get('reset_day') or 0)}",
         f"到期：{expire_detail_text(user)}",
         f"更新时间：{report.get('updated_at_text') or '未知'}",
     ]
@@ -4029,7 +4042,8 @@ def admin_more_menu(chat_id, vps_id, idx, message_id=None):
     text = f"更多操作\n\n{report.get('vps_name') or vps_id} / {user.get('username')}"
     keyboard = [
         [{"text": "重置流量", "callback_data": f"a:reset:{vps_id}:{idx}"}, {"text": "补正流量", "callback_data": f"a:add_usage:{vps_id}:{idx}"}],
-        [{"text": "到期设置", "callback_data": f"a:expire_set:{vps_id}:{idx}"}, {"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
+        [{"text": "到期设置", "callback_data": f"a:expire_set:{vps_id}:{idx}"}, {"text": "重置日期", "callback_data": f"a:reset_day_set:{vps_id}:{idx}"}],
+        [{"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
     ]
     render_page(chat_id, text, keyboard, message_id)
 
@@ -4066,6 +4080,17 @@ def parse_expire_input(text):
         return datetime.date.fromisoformat(raw).isoformat()
     except ValueError:
         return None
+
+
+def parse_reset_day_input(text):
+    raw = (text or "").strip()
+    if raw in {"0", "32"}:
+        return int(raw)
+    if re.fullmatch(r"\d+", raw):
+        value = int(raw)
+        if 1 <= value <= 29:
+            return value
+    return None
 
 
 def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, params, back_data, message_id=None):
@@ -4209,6 +4234,22 @@ def handle_waiting_input(chat_id, tg_id, text):
             f"确认修改 {title}",
             "的到期时间？",
         ]), "set_expire", vps_id, username, {"expire_at": expire_at}, back_data)
+        return True
+    if action == "set_reset_day":
+        reset_day = parse_reset_day_input(text)
+        if reset_day is None:
+            send_message(chat_id, "输入无效，请输入 0、1-29 或 32。")
+            return True
+        clear_waiting_input(tg_id)
+        current = reset_day_text(user.get("reset_day") if user else 0)
+        new_value = reset_day_text(reset_day)
+        create_admin_confirmation(chat_id, tg_id, "\n".join([
+            f"当前重置日期：{current}",
+            f"修改后：{new_value}",
+            "",
+            f"确认修改 {title}",
+            "的重置日期？",
+        ]), "set_reset_day", vps_id, username, {"reset_day": reset_day}, back_data)
         return True
     clear_waiting_input(tg_id)
     return False
@@ -4390,6 +4431,19 @@ def handle_callback(cb):
                 "",
                 "请输入新的到期日期：",
                 "YYYY-MM-DD，输入 0 表示永久。",
+            ]), message_id)
+    elif admin and data.startswith("a:reset_day_set:"):
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            start_waiting_input(chat_id, tg_id, "set_reset_day", vps_id, idx, user.get("username"), "\n".join([
+                f"当前重置日期：{reset_day_text(user.get('reset_day') or 0)}",
+                "0. 不重置",
+                "1-29. 指定日期",
+                "32. 月底",
+                "请输入重置日期：",
             ]), message_id)
     elif admin and data.startswith("a:confirm:"):
         clear_waiting_input(tg_id)
@@ -4857,6 +4911,20 @@ tg_task_exec_set_expire() {
   tg_task_apply_db "$new_db" && echo "到期时间已修改为 $(expire_text "$expire_at")。"
 }
 
+tg_task_exec_set_reset_day() {
+  local db_json="$1" username="$2" reset_day="$3" new_db
+  [[ "$reset_day" =~ ^[0-9]+$ ]] || return 1
+  if [ "$reset_day" != "0" ] && [ "$reset_day" != "32" ] && { [ "$reset_day" -lt 1 ] || [ "$reset_day" -gt 29 ]; }; then
+    return 1
+  fi
+  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson reset "$reset_day" '
+    (.users[$u].reset_day // 0) as $old_reset
+    | .users[$u].reset_day = $reset
+    | if ($old_reset != $reset) then .users[$u].last_reset_period = "" else . end
+  ')" || return 1
+  tg_task_apply_db "$new_db" && echo "重置日期已修改为 $(reset_day_text "$reset_day")。"
+}
+
 tg_execute_task() {
   local task="$1" action username db_json exists params result
   action="$(echo "$task" | jq -r '.action // empty')"
@@ -4881,6 +4949,8 @@ tg_execute_task() {
       tg_task_exec_add_usage "$db_json" "$username" "$(echo "$params" | jq -r '.bytes // empty')" ;;
     set_expire)
       tg_task_exec_set_expire "$db_json" "$username" "$(echo "$params" | jq -r '.expire_at // empty')" ;;
+    set_reset_day)
+      tg_task_exec_set_reset_day "$db_json" "$username" "$(echo "$params" | jq -r '.reset_day // empty')" ;;
     *)
       echo "不支持的任务类型：$action"
       return 1

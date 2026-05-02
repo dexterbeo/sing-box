@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 04:43:10 UTC
+# 构建时间: 2026-05-02 05:37:29 UTC
 # ============================================================
 
 
@@ -2515,7 +2515,7 @@ user_current_period() {
   date +%Y-%m
 }
 
-apply_automatic_user_controls() {
+user_manager_reconcile_user_state() {
   init_manager_env || return 1
   user_db_exists || return 0
   sync_user_usage_counters || true
@@ -2588,6 +2588,10 @@ apply_automatic_user_controls() {
     user_manager_apply_changes "$result" "$json" >/dev/null 2>&1 || return 1
   fi
   return 0
+}
+
+apply_automatic_user_controls() {
+  user_manager_reconcile_user_state
 }
 
 user_watch_run() {
@@ -4928,13 +4932,20 @@ tg_process_tasks() {
   done < <(echo "$tasks" | jq -c '.[]')
 }
 
+tg_prepare_report_state() {
+  if user_manager_reconcile_user_state >/dev/null 2>&1; then
+    return 0
+  fi
+  sync_user_usage_counters >/dev/null 2>&1 || true
+}
+
 tg_agent_sync_once() {
   local cfg role center_url secret vps_id
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
-  sync_user_usage_counters || true
+  tg_prepare_report_state
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
   else

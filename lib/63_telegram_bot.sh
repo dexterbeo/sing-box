@@ -1592,13 +1592,20 @@ tg_process_tasks() {
   done < <(echo "$tasks" | jq -c '.[]')
 }
 
+tg_prepare_report_state() {
+  if user_manager_reconcile_user_state >/dev/null 2>&1; then
+    return 0
+  fi
+  sync_user_usage_counters >/dev/null 2>&1 || true
+}
+
 tg_agent_sync_once() {
   local cfg role center_url secret vps_id
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
-  sync_user_usage_counters || true
+  tg_prepare_report_state
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
   else

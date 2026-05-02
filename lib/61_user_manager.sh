@@ -162,7 +162,7 @@ user_current_period() {
   date +%Y-%m
 }
 
-apply_automatic_user_controls() {
+user_manager_reconcile_user_state() {
   init_manager_env || return 1
   user_db_exists || return 0
   sync_user_usage_counters || true
@@ -235,6 +235,10 @@ apply_automatic_user_controls() {
     user_manager_apply_changes "$result" "$json" >/dev/null 2>&1 || return 1
   fi
   return 0
+}
+
+apply_automatic_user_controls() {
+  user_manager_reconcile_user_state
 }
 
 user_watch_run() {

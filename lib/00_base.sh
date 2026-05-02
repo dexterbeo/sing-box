@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.6.2"
+SCRIPT_VERSION="5.7.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -28,7 +28,7 @@ USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 TG_AGENT_CRON_MARK="sb.sh --tg-agent-sync"
-TG_AGENT_CRON_SCHEDULE="*/5 * * * *"
+TG_AGENT_CRON_SCHEDULE="* * * * *"
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
@@ -37,6 +37,7 @@ TG_CONFIG_FILE="/etc/sing-box-manager/telegram.json"
 TG_CENTER_APP="/etc/sing-box-manager/tg-center-bot.py"
 TG_CENTER_SERVICE="sb-tg-bot"
 SB_LOCK_FILE="/var/lock/singbox-manager.lock"
+TG_AGENT_LOCK_FILE="/var/lock/singbox-tg-agent.lock"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'

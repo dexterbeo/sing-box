@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-01 07:14:06 UTC
+# 构建时间: 2026-05-02 03:05:57 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.6.2"
+SCRIPT_VERSION="5.7.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -38,7 +38,7 @@ USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 TG_AGENT_CRON_MARK="sb.sh --tg-agent-sync"
-TG_AGENT_CRON_SCHEDULE="*/5 * * * *"
+TG_AGENT_CRON_SCHEDULE="* * * * *"
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
@@ -47,6 +47,7 @@ TG_CONFIG_FILE="/etc/sing-box-manager/telegram.json"
 TG_CENTER_APP="/etc/sing-box-manager/tg-center-bot.py"
 TG_CENTER_SERVICE="sb-tg-bot"
 SB_LOCK_FILE="/var/lock/singbox-manager.lock"
+TG_AGENT_LOCK_FILE="/var/lock/singbox-tg-agent.lock"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'
@@ -3360,7 +3361,10 @@ tg_config_min_template() {
   "bindings": [],
   "pending_bind_tokens": {},
   "user_settings": {},
-  "notify_state": {}
+  "notify_state": {},
+  "tasks": {},
+  "pending_admin_actions": {},
+  "waiting_inputs": {}
 }
 JSON
 }
@@ -3448,6 +3452,7 @@ import datetime
 import http.server
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -3625,6 +3630,15 @@ def back_keyboard(back_to):
     return [[{"text": "返回", "callback_data": back_to}]]
 
 
+def clear_waiting_input(tg_id):
+    with CFG_LOCK:
+        cfg = load_config()
+        waiting = cfg.setdefault("waiting_inputs", {})
+        if str(tg_id) in waiting:
+            waiting.pop(str(tg_id), None)
+            save_config(cfg)
+
+
 def send_home(chat_id, tg_id, message_id=None):
     cfg = load_config()
     if is_admin(cfg, tg_id):
@@ -3787,6 +3801,24 @@ def do_unbind(chat_id, tg_id, idx, message_id=None):
     render_page(chat_id, "绑定已解除。", user_home_keyboard(), message_id)
 
 
+def quota_text(quota):
+    quota = int(quota or 0)
+    return "不限" if quota == 0 else f"{quota}GB"
+
+
+def user_summary_line(user):
+    total = fmt_bytes(user_total(user))
+    quota = quota_text(user.get("quota_gb") or 0)
+    expire = user.get("expire_at") or "0"
+    exp = parse_date(expire)
+    if exp is None:
+        exp_text = "永久"
+    else:
+        days = (exp - today()).days
+        exp_text = f"剩{days}天" if days >= 0 else "已过期"
+    return f"{user.get('username')}：{total}/{quota}，{exp_text}，{status_text(user)}"
+
+
 def admin_machine_keyboard(reports):
     buttons = [
         {"text": (report.get("vps_name") or vps_id), "callback_data": f"a:vps:{vps_id}"}
@@ -3835,19 +3867,243 @@ def admin_vps(chat_id, vps_id, message_id=None):
         admin_overview(chat_id, message_id)
         return
     lines = [report.get("vps_name") or vps_id]
-    for user in report.get("users") or []:
-        total = fmt_bytes(user_total(user))
-        quota = int(user.get("quota_gb") or 0)
-        quota_text = f"{quota}GB" if quota > 0 else "不限"
-        expire = user.get("expire_at") or "0"
-        exp = parse_date(expire)
-        if exp is None:
-            exp_text = "永久"
-        else:
-            days = (exp - today()).days
-            exp_text = f"剩{days}天" if days >= 0 else "已过期"
-        lines.append(f"{user.get('username')}：{total}/{quota_text}，{exp_text}，{status_text(user)}")
-    render_page(chat_id, "\n".join(lines), [[{"text": "刷新", "callback_data": f"a:vps:{vps_id}"}, {"text": "返回", "callback_data": "a:home"}]], message_id)
+    users = report.get("users") or []
+    keyboard = []
+    row = []
+    for idx, user in enumerate(users):
+        lines.append(user_summary_line(user))
+        row.append({"text": str(user.get("username") or idx), "callback_data": f"a:user:{vps_id}:{idx}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([{"text": "返回", "callback_data": "a:home"}])
+    render_page(chat_id, "\n".join(lines), keyboard, message_id)
+
+
+def find_report_user_by_index(cfg, vps_id, idx):
+    report = (cfg.get("reports") or {}).get(vps_id)
+    if not report:
+        return None, None
+    users = report.get("users") or []
+    if idx < 0 or idx >= len(users):
+        return report, None
+    return report, users[idx]
+
+
+def admin_user_keyboard(vps_id, idx, user):
+    toggle_text = "停用" if user.get("enabled") is True else "启用"
+    return [
+        [{"text": toggle_text, "callback_data": f"a:toggle:{vps_id}:{idx}"}, {"text": "续期", "callback_data": f"a:renew_menu:{vps_id}:{idx}"}],
+        [{"text": "套餐", "callback_data": f"a:quota_menu:{vps_id}:{idx}"}, {"text": "更多", "callback_data": f"a:more:{vps_id}:{idx}"}],
+        [{"text": "返回", "callback_data": f"a:vps:{vps_id}"}],
+    ]
+
+
+def admin_user_detail(chat_id, vps_id, idx, message_id=None):
+    cfg = load_config()
+    report, user = find_report_user_by_index(cfg, vps_id, idx)
+    if not report or not user:
+        admin_vps(chat_id, vps_id, message_id)
+        return
+    total = user_total(user)
+    quota = int(user.get("quota_gb") or 0)
+    if quota > 0:
+        used = f"{fmt_bytes(total)} / {quota}GB（{int(total * 100 / (quota * 1024 ** 3))}%）"
+    else:
+        used = f"{fmt_bytes(total)} / 不限"
+    expire = user.get("expire_at") or "0"
+    exp = parse_date(expire)
+    if exp is None:
+        exp_text = "永久"
+    else:
+        days = (exp - today()).days
+        exp_text = f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
+    lines = [
+        f"{report.get('vps_name') or vps_id} / {user.get('username')}",
+        f"状态：{status_text(user)}",
+        f"已用：{used}",
+        f"到期：{exp_text}",
+        f"更新时间：{report.get('updated_at_text') or '未知'}",
+    ]
+    render_page(chat_id, "\n".join(lines), admin_user_keyboard(vps_id, idx, user), message_id)
+
+
+def admin_quota_menu(chat_id, vps_id, idx, message_id=None):
+    cfg = load_config()
+    report, user = find_report_user_by_index(cfg, vps_id, idx)
+    if not report or not user:
+        admin_vps(chat_id, vps_id, message_id)
+        return
+    text = f"套餐设置\n\n{report.get('vps_name') or vps_id} / {user.get('username')}\n当前套餐：{quota_text(user.get('quota_gb') or 0)}"
+    keyboard = [
+        [{"text": "50G", "callback_data": f"a:quota:{vps_id}:{idx}:50"}, {"text": "100G", "callback_data": f"a:quota:{vps_id}:{idx}:100"}, {"text": "250G", "callback_data": f"a:quota:{vps_id}:{idx}:250"}],
+        [{"text": "自定义", "callback_data": f"a:quota_custom:{vps_id}:{idx}"}, {"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
+    ]
+    render_page(chat_id, text, keyboard, message_id)
+
+
+def admin_renew_menu(chat_id, vps_id, idx, message_id=None):
+    cfg = load_config()
+    report, user = find_report_user_by_index(cfg, vps_id, idx)
+    if not report or not user:
+        admin_vps(chat_id, vps_id, message_id)
+        return
+    text = f"一键续期\n\n{report.get('vps_name') or vps_id} / {user.get('username')}\n当前到期：{user.get('expire_at') or '0'}"
+    keyboard = [
+        [{"text": "1个月", "callback_data": f"a:renew:{vps_id}:{idx}:1"}, {"text": "1季度", "callback_data": f"a:renew:{vps_id}:{idx}:3"}],
+        [{"text": "自定义", "callback_data": f"a:renew_custom:{vps_id}:{idx}"}, {"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
+    ]
+    render_page(chat_id, text, keyboard, message_id)
+
+
+def admin_more_menu(chat_id, vps_id, idx, message_id=None):
+    cfg = load_config()
+    report, user = find_report_user_by_index(cfg, vps_id, idx)
+    if not report or not user:
+        admin_vps(chat_id, vps_id, message_id)
+        return
+    text = f"更多操作\n\n{report.get('vps_name') or vps_id} / {user.get('username')}"
+    keyboard = [
+        [{"text": "重置流量", "callback_data": f"a:reset:{vps_id}:{idx}"}, {"text": "补正流量", "callback_data": f"a:add_usage:{vps_id}:{idx}"}],
+        [{"text": "返回", "callback_data": f"a:user:{vps_id}:{idx}"}],
+    ]
+    render_page(chat_id, text, keyboard, message_id)
+
+
+def parse_quota_input(text):
+    raw = (text or "").strip().upper()
+    m = re.fullmatch(r"(\d+)\s*(G|GB)?", raw)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def parse_months_input(text):
+    raw = (text or "").strip()
+    if not re.fullmatch(r"\d+", raw):
+        return None
+    months = int(raw)
+    return months if months >= 1 else None
+
+
+def parse_traffic_input(text):
+    raw = (text or "").strip().upper().replace(" ", "")
+    m = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)(KB|K|MB|M|GB|G|TB|T)", raw)
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2)[0]
+    power = {"K": 1, "M": 2, "G": 3, "T": 4}[unit]
+    return int(value * (1024 ** power))
+
+
+def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, params, back_data, message_id=None):
+    token = secrets.token_urlsafe(6)
+    with CFG_LOCK:
+        cfg = load_config()
+        pending = cfg.setdefault("pending_admin_actions", {})
+        pending[token] = {
+            "tg_user_id": str(tg_id),
+            "chat_id": chat_id,
+            "action": action,
+            "vps_id": vps_id,
+            "username": username,
+            "params": params or {},
+            "back_data": back_data,
+            "expires_at": int(time.time()) + 300,
+        }
+        save_config(cfg)
+    keyboard = [[
+        {"text": "确认执行", "callback_data": f"a:confirm:{token}"},
+        {"text": "取消", "callback_data": back_data},
+    ]]
+    render_page(chat_id, text, keyboard, message_id)
+
+
+def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
+    with CFG_LOCK:
+        cfg = load_config()
+        pending = cfg.setdefault("pending_admin_actions", {})
+        action = pending.pop(token, None)
+        if not action or str(action.get("tg_user_id")) != str(tg_id) or int(action.get("expires_at") or 0) < int(time.time()):
+            save_config(cfg)
+            render_page(chat_id, "确认已失效，请重新操作。", back_keyboard("a:home"), message_id)
+            return
+        task_id = secrets.token_urlsafe(8)
+        tasks = cfg.setdefault("tasks", {})
+        tasks[task_id] = {
+            "id": task_id,
+            "status": "pending",
+            "created_at": int(time.time()),
+            "created_by": str(tg_id),
+            "created_chat_id": chat_id,
+            "action": action.get("action"),
+            "vps_id": action.get("vps_id"),
+            "username": action.get("username"),
+            "params": action.get("params") or {},
+            "attempts": 0,
+        }
+        save_config(cfg)
+    render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", back_keyboard(action.get("back_data") or "a:home"), message_id)
+
+
+def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, message_id=None):
+    with CFG_LOCK:
+        cfg = load_config()
+        waiting = cfg.setdefault("waiting_inputs", {})
+        waiting[str(tg_id)] = {
+            "action": action,
+            "vps_id": vps_id,
+            "idx": idx,
+            "username": username,
+            "expires_at": int(time.time()) + 300,
+        }
+        save_config(cfg)
+    render_page(chat_id, prompt, back_keyboard(f"a:user:{vps_id}:{idx}"), message_id)
+
+
+def handle_waiting_input(chat_id, tg_id, text):
+    cfg = load_config()
+    waiting = (cfg.get("waiting_inputs") or {}).get(str(tg_id))
+    if not waiting or not is_admin(cfg, tg_id):
+        return False
+    if int(waiting.get("expires_at") or 0) < int(time.time()):
+        clear_waiting_input(tg_id)
+        send_message(chat_id, "输入已超时，请重新操作。")
+        return True
+    action = waiting.get("action")
+    vps_id = waiting.get("vps_id")
+    idx = int(waiting.get("idx") or 0)
+    username = waiting.get("username")
+    back_data = f"a:user:{vps_id}:{idx}"
+    if action == "set_quota":
+        quota = parse_quota_input(text)
+        if quota is None:
+            send_message(chat_id, "输入无效，请输入套餐流量，例如 300G；输入 0 表示不限。")
+            return True
+        clear_waiting_input(tg_id)
+        create_admin_confirmation(chat_id, tg_id, f"确认将 {vps_id} / {username} 套餐改为 {quota_text(quota)}？", "set_quota", vps_id, username, {"quota_gb": quota}, back_data)
+        return True
+    if action == "renew":
+        months = parse_months_input(text)
+        if months is None:
+            send_message(chat_id, "输入无效，请输入需要续期的月数，例如 2。")
+            return True
+        clear_waiting_input(tg_id)
+        create_admin_confirmation(chat_id, tg_id, f"确认将 {vps_id} / {username} 续期 {months} 个月？", "renew", vps_id, username, {"months": months}, back_data)
+        return True
+    if action == "add_usage":
+        bytes_value = parse_traffic_input(text)
+        if bytes_value is None:
+            send_message(chat_id, "输入无效，请输入补正流量，例如 +10G 或 -5G。")
+            return True
+        clear_waiting_input(tg_id)
+        create_admin_confirmation(chat_id, tg_id, f"确认给 {vps_id} / {username} 补正流量 {fmt_bytes(bytes_value)}？", "add_usage", vps_id, username, {"bytes": bytes_value}, back_data)
+        return True
+    clear_waiting_input(tg_id)
+    return False
 
 
 def handle_message(msg):
@@ -3857,6 +4113,8 @@ def handle_message(msg):
     chat_id = chat.get("id")
     tg_id = user.get("id")
     if not chat_id or not tg_id:
+        return
+    if handle_waiting_input(chat_id, tg_id, text):
         return
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
@@ -3882,30 +4140,112 @@ def handle_callback(cb):
     cfg = load_config()
     admin = is_admin(cfg, tg_id)
     if data == "u:home":
+        clear_waiting_input(tg_id)
         send_home(chat_id, tg_id, message_id)
-    elif data == "u:status":
-        user_status(chat_id, tg_id, message_id)
     elif data == "u:notify":
+        clear_waiting_input(tg_id)
         notify_settings(chat_id, tg_id, message_id=message_id)
     elif data == "u:toggle_notify":
+        clear_waiting_input(tg_id)
         toggle_notify(chat_id, tg_id, message_id=message_id)
     elif data == "u:bind":
+        clear_waiting_input(tg_id)
         binding_list(chat_id, tg_id, message_id)
     elif data.startswith("u:ask_unbind:"):
+        clear_waiting_input(tg_id)
         ask_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
     elif data.startswith("u:do_unbind:"):
+        clear_waiting_input(tg_id)
         do_unbind(chat_id, tg_id, int(data.rsplit(":", 1)[1]), message_id)
     elif admin and data == "a:home":
+        clear_waiting_input(tg_id)
         send_home(chat_id, tg_id, message_id)
-    elif admin and data == "a:overview":
-        admin_overview(chat_id, message_id)
     elif admin and data == "a:notify":
+        clear_waiting_input(tg_id)
         notify_settings(chat_id, tg_id, admin=True, message_id=message_id)
     elif admin and data == "a:toggle_notify":
+        clear_waiting_input(tg_id)
         toggle_notify(chat_id, tg_id, admin=True, message_id=message_id)
     elif admin and data.startswith("a:vps:"):
+        clear_waiting_input(tg_id)
         admin_vps(chat_id, data.split(":", 2)[2], message_id)
+    elif admin and data.startswith("a:user:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        admin_user_detail(chat_id, vps_id, int(idx), message_id)
+    elif admin and data.startswith("a:toggle:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            target = not bool(user.get("enabled") is True)
+            word = "启用" if target else "停用"
+            create_admin_confirmation(chat_id, tg_id, f"确认{word}用户 {report.get('vps_name') or vps_id} / {user.get('username')}？", "set_enabled", vps_id, user.get("username"), {"enabled": target}, f"a:user:{vps_id}:{idx}", message_id)
+    elif admin and data.startswith("a:renew_menu:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        admin_renew_menu(chat_id, vps_id, int(idx), message_id)
+    elif admin and data.startswith("a:renew:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx, months = data.split(":", 4)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            create_admin_confirmation(chat_id, tg_id, f"确认将 {report.get('vps_name') or vps_id} / {user.get('username')} 续期 {months} 个月？", "renew", vps_id, user.get("username"), {"months": int(months)}, f"a:user:{vps_id}:{idx}", message_id)
+    elif admin and data.startswith("a:renew_custom:"):
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            start_waiting_input(chat_id, tg_id, "renew", vps_id, idx, user.get("username"), "请输入需要续期的月数，例如 2。", message_id)
+    elif admin and data.startswith("a:quota_menu:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        admin_quota_menu(chat_id, vps_id, int(idx), message_id)
+    elif admin and data.startswith("a:quota:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx, quota = data.split(":", 4)
+        idx = int(idx)
+        quota = int(quota)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            create_admin_confirmation(chat_id, tg_id, f"确认将 {report.get('vps_name') or vps_id} / {user.get('username')} 套餐改为 {quota_text(quota)}？", "set_quota", vps_id, user.get("username"), {"quota_gb": quota}, f"a:user:{vps_id}:{idx}", message_id)
+    elif admin and data.startswith("a:quota_custom:"):
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            start_waiting_input(chat_id, tg_id, "set_quota", vps_id, idx, user.get("username"), "请输入新的套餐流量，例如 300G；输入 0 表示不限。", message_id)
+    elif admin and data.startswith("a:more:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        admin_more_menu(chat_id, vps_id, int(idx), message_id)
+    elif admin and data.startswith("a:reset:"):
+        clear_waiting_input(tg_id)
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            create_admin_confirmation(chat_id, tg_id, f"确认重置 {report.get('vps_name') or vps_id} / {user.get('username')} 的流量？", "reset_usage", vps_id, user.get("username"), {}, f"a:user:{vps_id}:{idx}", message_id)
+    elif admin and data.startswith("a:add_usage:"):
+        _, _, vps_id, idx = data.split(":", 3)
+        idx = int(idx)
+        cfg = load_config()
+        report, user = find_report_user_by_index(cfg, vps_id, idx)
+        if user:
+            start_waiting_input(chat_id, tg_id, "add_usage", vps_id, idx, user.get("username"), "请输入补正流量，例如 +10G 或 -5G。", message_id)
+    elif admin and data.startswith("a:confirm:"):
+        clear_waiting_input(tg_id)
+        create_task_from_confirmation(chat_id, tg_id, data.rsplit(":", 1)[1], message_id)
     else:
+        clear_waiting_input(tg_id)
         send_home(chat_id, tg_id, message_id)
 
 
@@ -4020,6 +4360,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     save_config(cfg)
                 else:
                     save_config(cfg)
+            write_json(self, 200, {"ok": True})
+            return
+
+        if self.path == "/api/tasks/poll":
+            vps_id = payload.get("vps_id") or ""
+            if not vps_id:
+                write_json(self, 400, {"ok": False, "error": "vps_id_missing"})
+                return
+            now = int(time.time())
+            available = []
+            with CFG_LOCK:
+                cfg = load_config()
+                tasks = cfg.setdefault("tasks", {})
+                for task_id in list(tasks.keys()):
+                    task = tasks[task_id]
+                    if task.get("status") in {"success", "failed"} and now - int(task.get("completed_at") or now) > 86400:
+                        tasks.pop(task_id, None)
+                for task_id, task in tasks.items():
+                    if task.get("vps_id") != vps_id:
+                        continue
+                    status = task.get("status")
+                    picked_at = int(task.get("picked_at") or 0)
+                    attempts = int(task.get("attempts") or 0)
+                    runnable = status == "pending" or (status == "running" and now - picked_at > 120 and attempts < 3)
+                    if not runnable:
+                        continue
+                    task["status"] = "running"
+                    task["picked_at"] = now
+                    task["attempts"] = attempts + 1
+                    available.append({
+                        "id": task_id,
+                        "action": task.get("action"),
+                        "username": task.get("username"),
+                        "params": task.get("params") or {},
+                    })
+                save_config(cfg)
+            write_json(self, 200, {"ok": True, "tasks": available})
+            return
+
+        if self.path == "/api/tasks/result":
+            task_id = payload.get("task_id") or ""
+            vps_id = payload.get("vps_id") or ""
+            ok_value = bool(payload.get("ok"))
+            message = payload.get("message") or ("执行成功" if ok_value else "执行失败")
+            with CFG_LOCK:
+                cfg = load_config()
+                task = (cfg.setdefault("tasks", {})).get(task_id)
+                if not task or task.get("vps_id") != vps_id:
+                    write_json(self, 404, {"ok": False, "error": "task_not_found"})
+                    return
+                task["status"] = "success" if ok_value else "failed"
+                task["message"] = message
+                task["completed_at"] = int(time.time())
+                chat_id = task.get("created_chat_id")
+                username = task.get("username") or ""
+                save_config(cfg)
+            if chat_id:
+                title = f"{vps_id} / {username}".strip(" /")
+                prefix = "执行成功" if ok_value else "执行失败"
+                send_message(chat_id, f"{prefix}：{title}\n{message}")
             write_json(self, 200, {"ok": True})
             return
 
@@ -4180,8 +4580,160 @@ tg_center_api_post() {
     "${url%/}${path}"
 }
 
+tg_post_report() {
+  local cfg="$1" center_url="$2" secret="$3" payload resp
+  payload="$(tg_collect_report_json "$cfg")" || return 1
+  resp="$(tg_center_api_post "$center_url" "$secret" "/api/report" "$payload" 2>/dev/null)" || return 1
+  echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1
+}
+
+tg_post_task_result() {
+  local center_url="$1" secret="$2" task_id="$3" vps_id="$4" ok_value="$5" message="$6" payload
+  payload="$(jq -n \
+    --arg task_id "$task_id" \
+    --arg vps_id "$vps_id" \
+    --arg message "$message" \
+    --argjson ok "$ok_value" \
+    '{task_id:$task_id,vps_id:$vps_id,ok:$ok,message:$message}')"
+  tg_center_api_post "$center_url" "$secret" "/api/tasks/result" "$payload" >/dev/null 2>&1 || true
+}
+
+tg_poll_tasks() {
+  local center_url="$1" secret="$2" vps_id="$3" payload resp
+  payload="$(jq -n --arg vps_id "$vps_id" '{vps_id:$vps_id}')"
+  resp="$(tg_center_api_post "$center_url" "$secret" "/api/tasks/poll" "$payload" 2>/dev/null)" || return 1
+  echo "$resp" | jq -c '.tasks // []'
+}
+
+tg_task_apply_db() {
+  local new_db="$1" json
+  json="$(config_load)" || return 1
+  _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$new_db" "$json" >/dev/null 2>&1
+}
+
+tg_task_exec_set_enabled() {
+  local db_json="$1" username="$2" enabled="$3" new_db
+  if [ "$enabled" = "true" ]; then
+    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')" || return 1
+    tg_task_apply_db "$new_db" && echo "用户已启用。"
+  else
+    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')" || return 1
+    tg_task_apply_db "$new_db" && echo "用户已停用。"
+  fi
+}
+
+tg_task_exec_set_quota() {
+  local db_json="$1" username="$2" quota="$3" new_db text
+  [[ "$quota" =~ ^[0-9]+$ ]] || return 1
+  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" '.users[$u].quota_gb = $quota')" || return 1
+  if [ "$quota" = "0" ]; then text="不限"; else text="${quota}GB"; fi
+  tg_task_apply_db "$new_db" && echo "套餐已修改为 ${text}。"
+}
+
+tg_task_exec_renew() {
+  local db_json="$1" username="$2" months="$3" current_expire today base_date expired=0 new_expire new_db
+  [[ "$months" =~ ^[0-9]+$ ]] && [ "$months" -ge 1 ] || return 1
+  current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
+  [ "$current_expire" != "0" ] || { echo "永久用户无需续期。"; return 1; }
+  today="$(date +%F)"
+  if user_expire_is_past "$today" "$current_expire"; then
+    expired=1
+    base_date="$today"
+  else
+    base_date="$current_expire"
+  fi
+  new_expire="$(user_date_add_months "$base_date" "$months")" || return 1
+  new_db="$(echo "$db_json" | jq --arg u "$username" --arg exp "$new_expire" --argjson expired "$expired" '
+    .users[$u].expire_at = $exp
+    | if $expired == 1 then
+        .users[$u].used_up_bytes = 0
+        | .users[$u].used_down_bytes = 0
+        | .users[$u].manual_added_bytes = 0
+        | .users[$u].last_live_up_bytes = 0
+        | .users[$u].last_live_down_bytes = 0
+        | .users[$u].last_reset_period = ""
+        | if (.users[$u].disabled_reason // null) == "manual" then .
+          else .users[$u].enabled = true | .users[$u].disabled_reason = null
+          end
+      else
+        if (.users[$u].disabled_reason // null) == "expired" then
+          .users[$u].enabled = true | .users[$u].disabled_reason = null
+        else . end
+      end
+  ')" || return 1
+  tg_task_apply_db "$new_db" && echo "已续期至 ${new_expire}。"
+}
+
+tg_task_exec_reset_usage() {
+  local db_json="$1" username="$2" new_db
+  new_db="$(echo "$db_json" | jq --arg u "$username" '
+    .users[$u].used_up_bytes = 0
+    | .users[$u].used_down_bytes = 0
+    | .users[$u].manual_added_bytes = 0
+    | .users[$u].last_live_up_bytes = 0
+    | .users[$u].last_live_down_bytes = 0
+  ')" || return 1
+  tg_task_apply_db "$new_db" && echo "流量已重置。"
+}
+
+tg_task_exec_add_usage() {
+  local db_json="$1" username="$2" bytes="$3" new_db
+  [[ "$bytes" =~ ^-?[0-9]+$ ]] || return 1
+  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson add "$bytes" '.users[$u].manual_added_bytes = ((.users[$u].manual_added_bytes // 0) + $add)')" || return 1
+  tg_task_apply_db "$new_db" && echo "补正流量已更新：$(format_bytes_human "$bytes")。"
+}
+
+tg_execute_task() {
+  local task="$1" action username db_json exists params result
+  action="$(echo "$task" | jq -r '.action // empty')"
+  username="$(echo "$task" | jq -r '.username // empty')"
+  [ -n "$action" ] && [ -n "$username" ] || { echo "任务参数不完整。"; return 1; }
+  user_db_exists || { echo "用户数据库不存在。"; return 1; }
+  sync_user_usage_counters || true
+  db_json="$(user_db_load)"
+  exists="$(echo "$db_json" | jq -r --arg u "$username" 'if .users[$u] then "1" else "0" end')"
+  [ "$exists" = "1" ] || { echo "用户不存在：$username"; return 1; }
+  params="$(echo "$task" | jq -c '.params // {}')"
+  case "$action" in
+    set_enabled)
+      tg_task_exec_set_enabled "$db_json" "$username" "$(echo "$params" | jq -r '.enabled // false')" ;;
+    set_quota)
+      tg_task_exec_set_quota "$db_json" "$username" "$(echo "$params" | jq -r '.quota_gb // empty')" ;;
+    renew)
+      tg_task_exec_renew "$db_json" "$username" "$(echo "$params" | jq -r '.months // empty')" ;;
+    reset_usage)
+      tg_task_exec_reset_usage "$db_json" "$username" ;;
+    add_usage)
+      tg_task_exec_add_usage "$db_json" "$username" "$(echo "$params" | jq -r '.bytes // empty')" ;;
+    *)
+      echo "不支持的任务类型：$action"
+      return 1
+      ;;
+  esac
+}
+
+tg_process_tasks() {
+  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value
+  tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
+  echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    task_id="$(echo "$task" | jq -r '.id // empty')"
+    [ -n "$task_id" ] || continue
+    if msg="$(tg_execute_task "$task" 2>&1)"; then
+      ok_value=true
+      sync_user_usage_counters || true
+      tg_post_report "$cfg" "$center_url" "$secret" || true
+    else
+      ok_value=false
+      [ -n "$msg" ] || msg="执行失败。"
+    fi
+    tg_post_task_result "$center_url" "$secret" "$task_id" "$vps_id" "$ok_value" "$msg"
+  done < <(echo "$tasks" | jq -c '.[]')
+}
+
 tg_agent_sync_once() {
-  local cfg role center_url secret payload
+  local cfg role center_url secret vps_id
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
@@ -4193,11 +4745,28 @@ tg_agent_sync_once() {
     center_url="$(echo "$cfg" | jq -r '.center_url // empty')"
   fi
   secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
+  vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$center_url" ] && [ -n "$secret" ] || return 1
-  payload="$(tg_collect_report_json "$cfg")" || return 1
-  local resp
-  resp="$(tg_center_api_post "$center_url" "$secret" "/api/report" "$payload" 2>/dev/null)" || return 1
-  echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1
+  [ -n "$vps_id" ] || return 1
+  tg_post_report "$cfg" "$center_url" "$secret" || return 1
+  tg_process_tasks "$cfg" "$center_url" "$secret" "$vps_id" || true
+}
+
+tg_agent_poll_tasks_once() {
+  local cfg role center_url secret vps_id
+  cfg="$(tg_config_load)"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
+  user_db_exists || return 1
+  if [ "$role" = "center" ]; then
+    center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
+  else
+    center_url="$(echo "$cfg" | jq -r '.center_url // empty')"
+  fi
+  secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
+  vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
+  [ -n "$center_url" ] && [ -n "$secret" ] && [ -n "$vps_id" ] || return 1
+  tg_process_tasks "$cfg" "$center_url" "$secret" "$vps_id" || true
 }
 
 tg_agent_sync_now() {
@@ -4212,7 +4781,25 @@ tg_agent_sync_now() {
 }
 
 tg_agent_sync() {
-  tg_agent_sync_once >/dev/null 2>&1 || true
+  local lock_fd lock_dir i
+  mkdir -p "$(dirname "$TG_AGENT_LOCK_FILE")" 2>/dev/null || true
+  if has_cmd flock && { exec {lock_fd}>"$TG_AGENT_LOCK_FILE"; } 2>/dev/null; then
+    flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
+  else
+    lock_fd=""
+    lock_dir="${TG_AGENT_LOCK_FILE}.d"
+    mkdir "$lock_dir" 2>/dev/null || return 0
+  fi
+  for i in 1 2 3 4 5 6; do
+    if [ "$i" = "1" ]; then
+      tg_agent_sync_once >/dev/null 2>&1 || true
+    else
+      tg_agent_poll_tasks_once >/dev/null 2>&1 || true
+    fi
+    [ "$i" -lt 6 ] && sleep 10
+  done
+  [ -n "${lock_fd:-}" ] && exec {lock_fd}>&-
+  [ -n "${lock_dir:-}" ] && rmdir "$lock_dir" 2>/dev/null || true
 }
 
 tg_setup_center() {
@@ -4225,7 +4812,7 @@ tg_setup_center() {
   read -r -p "中心监听端口 (默认: 25888): " port
   port="${port:-25888}"
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
-  read -r -p "本机名称 (如 新加坡01): " vps_name
+  read -r -p "本机名称（支持中文）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   public_url="$(tg_normalize_url "http://$(get_public_ip):${port}")"
   username="$(tg_bot_username_from_token "$token")" || username=""
@@ -4278,7 +4865,7 @@ tg_setup_agent() {
   [ -n "$center_url" ] || { warn "中心 Bot 地址不能为空。"; pause; return 1; }
   read -r -p "接入密钥: " secret
   [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
-  read -r -p "本机名称 (如 日本01): " vps_name
+  read -r -p "本机名称（支持中文）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
@@ -4404,6 +4991,7 @@ tg_disable_menu() {
   remove_tg_agent_cron || true
   tg_stop_center_service || true
   rm -f "$TG_CONFIG_FILE" "$TG_CENTER_APP" >/dev/null 2>&1 || true
+  rmdir "${TG_AGENT_LOCK_FILE}.d" >/dev/null 2>&1 || true
   ok "TG Bot 已关闭，配置已清除。"
   pause
 }
@@ -4412,14 +5000,18 @@ telegram_bot_manager_menu() {
   while true; do
     clear
     print_rect_title "Telegram Bot 管理"
-    local cfg role vps_name center_url
+    local cfg role vps_name center_url access_secret
     cfg="$(tg_config_load)"
     role="$(echo "$cfg" | jq -r '.role // "未设置"')"
     vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
     center_url="$(echo "$cfg" | jq -r '.center_url // ""')"
+    access_secret="$(echo "$cfg" | jq -r '.access_secret // ""')"
     echo "当前角色：${role:-未设置}"
     [ -n "$vps_name" ] && echo "本机名称：$vps_name"
     [ -n "$center_url" ] && echo "中心地址：$center_url"
+    if [ "$role" = "center" ] && [ -n "$access_secret" ]; then
+      echo "接入密钥：$access_secret"
+    fi
     echo -e "${B}--------------------------------------------------------${NC}"
     echo "  1. 设置TG Bot"
     echo "  2. 生成用户绑定链接"

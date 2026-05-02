@@ -350,7 +350,8 @@ def bind_token(chat_id, tg_id, token):
         settings = cfg.setdefault("user_settings", {})
         settings.setdefault(str(tg_id), {"notify": True})
         save_config(cfg)
-    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}", user_home_keyboard())
+    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}")
+    send_home(chat_id, tg_id)
 
 
 def user_bindings(cfg, tg_id):
@@ -794,7 +795,7 @@ def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
             "attempts": 0,
         }
         save_config(cfg)
-    render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", back_keyboard(action.get("back_data") or "a:home"), message_id)
+    render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", None, message_id)
 
 
 def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, message_id=None):

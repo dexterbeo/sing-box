@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 04:27:43 UTC
+# 构建时间: 2026-05-02 04:43:10 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.3"
+SCRIPT_VERSION="5.7.4"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3686,7 +3686,8 @@ def bind_token(chat_id, tg_id, token):
         settings = cfg.setdefault("user_settings", {})
         settings.setdefault(str(tg_id), {"notify": True})
         save_config(cfg)
-    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}", user_home_keyboard())
+    send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}")
+    send_home(chat_id, tg_id)
 
 
 def user_bindings(cfg, tg_id):
@@ -4130,7 +4131,7 @@ def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
             "attempts": 0,
         }
         save_config(cfg)
-    render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", back_keyboard(action.get("back_data") or "a:home"), message_id)
+    render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", None, message_id)
 
 
 def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, message_id=None):

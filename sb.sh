@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 06:52:26 UTC
+# 构建时间: 2026-05-02 06:54:36 UTC
 # ============================================================
 
 
@@ -3021,7 +3021,7 @@ user_reset_usage_menu() {
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
-  ui_echo "将清零该用户的上传流量、下载流量、手动补正流量以及统计基线。"
+  ui_echo "将清零该用户的上传流量、下载流量和手动补正流量。"
   ui_echo "此操作不会修改用户的启用状态、套餐设置、到期时间或重置日。"
   local ans
   read -r -p "输入 YES 确认重置该用户流量，其它任意输入取消: " ans

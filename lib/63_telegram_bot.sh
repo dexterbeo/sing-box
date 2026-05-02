@@ -474,7 +474,7 @@ def user_summary_line(user):
         exp_text = "永久"
     else:
         days = (exp - today()).days
-        exp_text = f"剩{days}天" if days >= 0 else "已过期"
+        exp_text = f"剩{days}天" if days > 0 else "已过期"
     return f"{user.get('username')}：{total}/{quota}，{exp_text}，{status_text(user)}"
 
 
@@ -512,7 +512,7 @@ def expire_detail_text(user):
     if exp is None:
         return "永久"
     days = (exp - today()).days
-    return f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
+    return f"{expire}（剩余{days}天）" if days > 0 else f"{expire}（已过期）"
 
 
 def user_detail_lines(title, report, user):
@@ -551,7 +551,7 @@ def renewal_preview(user, months):
     current_date = parse_date(current)
     if current_date is None:
         return None
-    base_date = today() if today() > current_date else current_date
+    base_date = today() if today() >= current_date else current_date
     return add_calendar_months(base_date, int(months)).isoformat()
 
 
@@ -614,7 +614,7 @@ def admin_overview(chat_id, message_id=None):
             if quota > 0 and user_total(user) >= quota * 1024 ** 3 * int(cfg.get("notify_threshold", 90)) / 100:
                 warn_count += 1
             exp = parse_date(user.get("expire_at") or "0")
-            if exp is not None and 0 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
+            if exp is not None and 1 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
         online = "在线" if age <= 900 else "离线"
@@ -1149,13 +1149,13 @@ def evaluate_reminders(cfg, report):
         exp = parse_date(user.get("expire_at") or "0")
         if exp is not None:
             days = (exp - today()).days
-            if 0 <= days <= expire_days:
+            if 1 <= days <= expire_days:
                 key = f"{tg_id}:{report.get('vps_id')}:{b.get('username')}:expire:{exp.isoformat()}:{days}"
                 if not notify_state.get(key):
                     send_message(b.get("chat_id"), f"{title}\n距离到期还有 {days} 天。")
                     notify_state[key] = int(time.time())
                     changed = True
-            elif days < 0 and user.get("disabled_reason") == "expired":
+            elif days <= 0 and user.get("disabled_reason") == "expired":
                 key = f"{tg_id}:{report.get('vps_id')}:{b.get('username')}:expired:{exp.isoformat()}"
                 if not notify_state.get(key):
                     send_message(b.get("chat_id"), f"{title}\n用户已到期。")
@@ -1519,7 +1519,7 @@ tg_task_exec_set_expire() {
   fi
   today="$(date +%F)"
   active=false
-  if [ "$expire_at" = "0" ] || [[ "$today" == "$expire_at" || "$today" < "$expire_at" ]]; then
+  if [ "$expire_at" = "0" ] || [[ "$today" < "$expire_at" ]]; then
     active=true
   fi
   new_db="$(echo "$db_json" | jq --arg u "$username" --arg exp "$expire_at" --argjson active "$active" '

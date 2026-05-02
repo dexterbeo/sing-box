@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 08:22:56 UTC
+# 构建时间: 2026-05-02 09:06:39 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.5"
+SCRIPT_VERSION="5.7.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -2540,6 +2540,7 @@ user_manager_reconcile_user_state() {
       | ($v.last_reset_period // "") as $last_reset
       | ($v.quota_gb // 0) as $quota
       | ($v.disabled_reason // null) as $reason
+      | ($expire != "0" and ($today >= $expire)) as $expired
       | (
           if ($reset_day == 32) then $last_day
           elif ($reset_day >= 1 and $reset_day <= 29) then
@@ -2547,8 +2548,8 @@ user_manager_reconcile_user_state() {
           else 0 end
         ) as $effective_reset_day
 
-      # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
-      | if ($expire != "0" and ($today > $expire)) then
+      # 1. 到期检查：expire_at 为到期停用日，当天即禁用
+      | if $expired then
           .value.enabled = false
           | if ($reason == "manual") then
               .value.disabled_reason = "manual"
@@ -2557,7 +2558,7 @@ user_manager_reconcile_user_state() {
             end
         end
       # 2. 重置检查
-      | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+      | if (($expired | not) and $effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
           .value.used_up_bytes = 0
           | .value.used_down_bytes = 0
           | .value.manual_added_bytes = 0
@@ -3061,7 +3062,7 @@ user_date_add_months() {
 
 user_expire_is_past() {
   local today="$1" expire_at="$2"
-  [ "$expire_at" != "0" ] && [[ "$today" > "$expire_at" ]]
+  [ "$expire_at" != "0" ] && { [[ "$today" > "$expire_at" ]] || [[ "$today" == "$expire_at" ]]; }
 }
 
 user_renew_menu() {
@@ -3297,23 +3298,6 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
-    # 配额预警：显示已用 ≥90% 的用户
-    local _warnings
-    _warnings="$(echo "$db_json" | jq -r '
-      .users | to_entries[]
-      | select(.value.quota_gb > 0)
-      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
-      | (.value.quota_gb * 1073741824) as $quota
-      | select($used >= ($quota * 0.9))
-      | .key + " (" + (($used / $quota * 100) | floor | tostring) + "%)"
-    ' 2>/dev/null || true)"
-    if [ -n "$_warnings" ]; then
-      echo -e "  ${Y}[!] 流量即将耗尽:${NC}"
-      while IFS= read -r _w; do
-        echo -e "      ${Y}${_w}${NC}"
-      done <<< "$_warnings"
-      echo ""
-    fi
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"
@@ -3810,7 +3794,7 @@ def user_summary_line(user):
         exp_text = "永久"
     else:
         days = (exp - today()).days
-        exp_text = f"剩{days}天" if days >= 0 else "已过期"
+        exp_text = f"剩{days}天" if days > 0 else "已过期"
     return f"{user.get('username')}：{total}/{quota}，{exp_text}，{status_text(user)}"
 
 
@@ -3848,7 +3832,7 @@ def expire_detail_text(user):
     if exp is None:
         return "永久"
     days = (exp - today()).days
-    return f"{expire}（剩余{days}天）" if days >= 0 else f"{expire}（已过期）"
+    return f"{expire}（剩余{days}天）" if days > 0 else f"{expire}（已过期）"
 
 
 def user_detail_lines(title, report, user):
@@ -3887,7 +3871,7 @@ def renewal_preview(user, months):
     current_date = parse_date(current)
     if current_date is None:
         return None
-    base_date = today() if today() > current_date else current_date
+    base_date = today() if today() >= current_date else current_date
     return add_calendar_months(base_date, int(months)).isoformat()
 
 
@@ -3950,7 +3934,7 @@ def admin_overview(chat_id, message_id=None):
             if quota > 0 and user_total(user) >= quota * 1024 ** 3 * int(cfg.get("notify_threshold", 90)) / 100:
                 warn_count += 1
             exp = parse_date(user.get("expire_at") or "0")
-            if exp is not None and 0 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
+            if exp is not None and 1 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
         online = "在线" if age <= 900 else "离线"
@@ -4485,13 +4469,13 @@ def evaluate_reminders(cfg, report):
         exp = parse_date(user.get("expire_at") or "0")
         if exp is not None:
             days = (exp - today()).days
-            if 0 <= days <= expire_days:
+            if 1 <= days <= expire_days:
                 key = f"{tg_id}:{report.get('vps_id')}:{b.get('username')}:expire:{exp.isoformat()}:{days}"
                 if not notify_state.get(key):
                     send_message(b.get("chat_id"), f"{title}\n距离到期还有 {days} 天。")
                     notify_state[key] = int(time.time())
                     changed = True
-            elif days < 0 and user.get("disabled_reason") == "expired":
+            elif days <= 0 and user.get("disabled_reason") == "expired":
                 key = f"{tg_id}:{report.get('vps_id')}:{b.get('username')}:expired:{exp.isoformat()}"
                 if not notify_state.get(key):
                     send_message(b.get("chat_id"), f"{title}\n用户已到期。")
@@ -4855,7 +4839,7 @@ tg_task_exec_set_expire() {
   fi
   today="$(date +%F)"
   active=false
-  if [ "$expire_at" = "0" ] || [[ "$today" == "$expire_at" || "$today" < "$expire_at" ]]; then
+  if [ "$expire_at" = "0" ] || [[ "$today" < "$expire_at" ]]; then
     active=true
   fi
   new_db="$(echo "$db_json" | jq --arg u "$username" --arg exp "$expire_at" --argjson active "$active" '

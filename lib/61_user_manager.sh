@@ -187,6 +187,7 @@ user_manager_reconcile_user_state() {
       | ($v.last_reset_period // "") as $last_reset
       | ($v.quota_gb // 0) as $quota
       | ($v.disabled_reason // null) as $reason
+      | ($expire != "0" and ($today >= $expire)) as $expired
       | (
           if ($reset_day == 32) then $last_day
           elif ($reset_day >= 1 and $reset_day <= 29) then
@@ -194,8 +195,8 @@ user_manager_reconcile_user_state() {
           else 0 end
         ) as $effective_reset_day
 
-      # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
-      | if ($expire != "0" and ($today > $expire)) then
+      # 1. 到期检查：expire_at 为到期停用日，当天即禁用
+      | if $expired then
           .value.enabled = false
           | if ($reason == "manual") then
               .value.disabled_reason = "manual"
@@ -204,7 +205,7 @@ user_manager_reconcile_user_state() {
             end
         end
       # 2. 重置检查
-      | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+      | if (($expired | not) and $effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
           .value.used_up_bytes = 0
           | .value.used_down_bytes = 0
           | .value.manual_added_bytes = 0

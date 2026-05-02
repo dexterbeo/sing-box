@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 03:44:03 UTC
+# 构建时间: 2026-05-02 04:23:00 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.7.1"
+SCRIPT_VERSION="5.7.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -7073,10 +7073,10 @@ main_menu() {
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
     echo -e "  ${C}1.${NC} 安装/更新 sing-box"
     echo -e "  ${C}2.${NC} 清空/重置 config.json"
-    echo -e "  ${C}3.${NC} 查看配置文件"
+    echo -e "  ${C}3.${NC} 查看配置"
     echo -e "  ${C}4.${NC} 协议管理"
     echo -e "  ${C}5.${NC} 中转管理"
-    echo -e "  ${C}6.${NC} 导出客户端配置"
+    echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
     echo -e "  ${C}8.${NC} 系统工具"
     echo -e "  ${C}9.${NC} 卸载 sing-box"

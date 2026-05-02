@@ -185,10 +185,14 @@ user_manager_reconcile_user_state() {
       | ($v.expire_at // "0") as $expire
       | ($v.reset_day // 0) as $reset_day
       | ($v.last_reset_period // "") as $last_reset
-      | ($v.enabled // false) as $enabled
       | ($v.quota_gb // 0) as $quota
       | ($v.disabled_reason // null) as $reason
-      | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
+      | (
+          if ($reset_day == 32) then $last_day
+          elif ($reset_day >= 1 and $reset_day <= 29) then
+            (if ($reset_day > $last_day) then $last_day else $reset_day end)
+          else 0 end
+        ) as $effective_reset_day
 
       # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
       | if ($expire != "0" and ($today > $expire)) then
@@ -198,34 +202,26 @@ user_manager_reconcile_user_state() {
             else
               .value.disabled_reason = "expired"
             end
-        else
-          # 2. 重置检查
-          (
-            if ($reset_day == 32) then $last_day
-            elif ($reset_day >= 1 and $reset_day <= 29) then
-              (if ($reset_day > $last_day) then $last_day else $reset_day end)
-            else 0 end
-          ) as $effective_reset_day
-          | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
-              .value.used_up_bytes = 0
-              | .value.used_down_bytes = 0
-              | .value.last_live_up_bytes = 0
-              | .value.last_live_down_bytes = 0
-              | .value.last_reset_period = $period
-              | if ($reason == "quota_exceeded") then
-                  .value.enabled = true
-                  | .value.disabled_reason = null
-                else . end
-            else . end
-          # 3. 超额检查（重置后 billable 已清零，不会误判）
-          | if ($quota > 0 and .value.enabled == true) then
-              ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
-              | if ($current_billable >= ($quota * 1073741824)) then
-                  .value.enabled = false
-                  | .value.disabled_reason = "quota_exceeded"
-                else . end
-            else . end
         end
+      # 2. 重置检查
+      | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+          .value.used_up_bytes = 0
+          | .value.used_down_bytes = 0
+          | .value.manual_added_bytes = 0
+          | .value.last_reset_period = $period
+          | if ((.value.disabled_reason // null) == "quota_exceeded") then
+              .value.enabled = true
+              | .value.disabled_reason = null
+            else . end
+        else . end
+      # 3. 超额检查（重置后 billable 已清零，不会误判）
+      | if ($quota > 0 and .value.enabled == true) then
+          ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
+          | if ($current_billable >= ($quota * 1073741824)) then
+              .value.enabled = false
+              | .value.disabled_reason = "quota_exceeded"
+            else . end
+        else . end
     )
   ')" || return 1
 

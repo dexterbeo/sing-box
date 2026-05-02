@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 05:51:29 UTC
+# 构建时间: 2026-05-02 06:52:26 UTC
 # ============================================================
 
 
@@ -2538,10 +2538,14 @@ user_manager_reconcile_user_state() {
       | ($v.expire_at // "0") as $expire
       | ($v.reset_day // 0) as $reset_day
       | ($v.last_reset_period // "") as $last_reset
-      | ($v.enabled // false) as $enabled
       | ($v.quota_gb // 0) as $quota
       | ($v.disabled_reason // null) as $reason
-      | (($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) as $billable
+      | (
+          if ($reset_day == 32) then $last_day
+          elif ($reset_day >= 1 and $reset_day <= 29) then
+            (if ($reset_day > $last_day) then $last_day else $reset_day end)
+          else 0 end
+        ) as $effective_reset_day
 
       # 1. 到期检查：expire_at 为包含当天的截止日，次日才禁用
       | if ($expire != "0" and ($today > $expire)) then
@@ -2551,34 +2555,26 @@ user_manager_reconcile_user_state() {
             else
               .value.disabled_reason = "expired"
             end
-        else
-          # 2. 重置检查
-          (
-            if ($reset_day == 32) then $last_day
-            elif ($reset_day >= 1 and $reset_day <= 29) then
-              (if ($reset_day > $last_day) then $last_day else $reset_day end)
-            else 0 end
-          ) as $effective_reset_day
-          | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
-              .value.used_up_bytes = 0
-              | .value.used_down_bytes = 0
-              | .value.last_live_up_bytes = 0
-              | .value.last_live_down_bytes = 0
-              | .value.last_reset_period = $period
-              | if ($reason == "quota_exceeded") then
-                  .value.enabled = true
-                  | .value.disabled_reason = null
-                else . end
-            else . end
-          # 3. 超额检查（重置后 billable 已清零，不会误判）
-          | if ($quota > 0 and .value.enabled == true) then
-              ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
-              | if ($current_billable >= ($quota * 1073741824)) then
-                  .value.enabled = false
-                  | .value.disabled_reason = "quota_exceeded"
-                else . end
-            else . end
         end
+      # 2. 重置检查
+      | if ($effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+          .value.used_up_bytes = 0
+          | .value.used_down_bytes = 0
+          | .value.manual_added_bytes = 0
+          | .value.last_reset_period = $period
+          | if ((.value.disabled_reason // null) == "quota_exceeded") then
+              .value.enabled = true
+              | .value.disabled_reason = null
+            else . end
+        else . end
+      # 3. 超额检查（重置后 billable 已清零，不会误判）
+      | if ($quota > 0 and .value.enabled == true) then
+          ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
+          | if ($current_billable >= ($quota * 1073741824)) then
+              .value.enabled = false
+              | .value.disabled_reason = "quota_exceeded"
+            else . end
+        else . end
     )
   ')" || return 1
 
@@ -3020,6 +3016,8 @@ user_add_usage_menu() {
 
 user_reset_usage_menu() {
   local db_json="$1" username="$2"
+  sync_user_usage_counters || true
+  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
@@ -3034,8 +3032,6 @@ user_reset_usage_menu() {
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
     | .users[$u].manual_added_bytes = 0
-    | .users[$u].last_live_up_bytes = 0
-    | .users[$u].last_live_down_bytes = 0
   '
 }
 
@@ -3072,6 +3068,8 @@ user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
 
+  sync_user_usage_counters || true
+  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
@@ -3136,8 +3134,6 @@ user_renew_menu() {
         .users[$u].used_up_bytes = 0
         | .users[$u].used_down_bytes = 0
         | .users[$u].manual_added_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
         | .users[$u].last_reset_period = ""
         | if (.users[$u].disabled_reason // null) == "manual" then .
           else .users[$u].enabled = true | .users[$u].disabled_reason = null
@@ -4822,8 +4818,6 @@ tg_task_exec_renew() {
         .users[$u].used_up_bytes = 0
         | .users[$u].used_down_bytes = 0
         | .users[$u].manual_added_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
         | .users[$u].last_reset_period = ""
         | if (.users[$u].disabled_reason // null) == "manual" then .
           else .users[$u].enabled = true | .users[$u].disabled_reason = null
@@ -4843,8 +4837,6 @@ tg_task_exec_reset_usage() {
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
     | .users[$u].manual_added_bytes = 0
-    | .users[$u].last_live_up_bytes = 0
-    | .users[$u].last_live_down_bytes = 0
   ')" || return 1
   tg_task_apply_db "$new_db" && echo "流量已重置。"
 }

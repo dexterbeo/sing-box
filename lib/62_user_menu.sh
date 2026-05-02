@@ -383,6 +383,8 @@ user_add_usage_menu() {
 
 user_reset_usage_menu() {
   local db_json="$1" username="$2"
+  sync_user_usage_counters || true
+  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
@@ -397,8 +399,6 @@ user_reset_usage_menu() {
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
     | .users[$u].manual_added_bytes = 0
-    | .users[$u].last_live_up_bytes = 0
-    | .users[$u].last_live_down_bytes = 0
   '
 }
 
@@ -435,6 +435,8 @@ user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
 
+  sync_user_usage_counters || true
+  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
@@ -499,8 +501,6 @@ user_renew_menu() {
         .users[$u].used_up_bytes = 0
         | .users[$u].used_down_bytes = 0
         | .users[$u].manual_added_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
         | .users[$u].last_reset_period = ""
         | if (.users[$u].disabled_reason // null) == "manual" then .
           else .users[$u].enabled = true | .users[$u].disabled_reason = null

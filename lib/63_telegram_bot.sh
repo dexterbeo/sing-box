@@ -1482,8 +1482,6 @@ tg_task_exec_renew() {
         .users[$u].used_up_bytes = 0
         | .users[$u].used_down_bytes = 0
         | .users[$u].manual_added_bytes = 0
-        | .users[$u].last_live_up_bytes = 0
-        | .users[$u].last_live_down_bytes = 0
         | .users[$u].last_reset_period = ""
         | if (.users[$u].disabled_reason // null) == "manual" then .
           else .users[$u].enabled = true | .users[$u].disabled_reason = null
@@ -1503,8 +1501,6 @@ tg_task_exec_reset_usage() {
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
     | .users[$u].manual_added_bytes = 0
-    | .users[$u].last_live_up_bytes = 0
-    | .users[$u].last_live_down_bytes = 0
   ')" || return 1
   tg_task_apply_db "$new_db" && echo "流量已重置。"
 }

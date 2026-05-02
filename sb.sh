@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-02 05:37:29 UTC
+# 构建时间: 2026-05-02 05:51:29 UTC
 # ============================================================
 
 
@@ -4914,6 +4914,7 @@ tg_execute_task() {
 
 tg_process_tasks() {
   local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value
+  TG_TASKS_REPORTED_STATE=0
   tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
   echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
   while IFS= read -r task; do
@@ -4922,8 +4923,10 @@ tg_process_tasks() {
     [ -n "$task_id" ] || continue
     if msg="$(tg_execute_task "$task" 2>&1)"; then
       ok_value=true
-      sync_user_usage_counters || true
-      tg_post_report "$cfg" "$center_url" "$secret" || true
+      tg_prepare_report_state
+      if tg_post_report "$cfg" "$center_url" "$secret"; then
+        TG_TASKS_REPORTED_STATE=1
+      fi
     else
       ok_value=false
       [ -n "$msg" ] || msg="执行失败。"
@@ -4945,7 +4948,6 @@ tg_agent_sync_once() {
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
-  tg_prepare_report_state
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
   else
@@ -4955,8 +4957,11 @@ tg_agent_sync_once() {
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$center_url" ] && [ -n "$secret" ] || return 1
   [ -n "$vps_id" ] || return 1
-  tg_post_report "$cfg" "$center_url" "$secret" || return 1
   tg_process_tasks "$cfg" "$center_url" "$secret" "$vps_id" || true
+  if [ "${TG_TASKS_REPORTED_STATE:-0}" != "1" ]; then
+    tg_prepare_report_state
+    tg_post_report "$cfg" "$center_url" "$secret" || return 1
+  fi
 }
 
 tg_agent_poll_tasks_once() {

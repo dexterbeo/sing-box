@@ -50,7 +50,7 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl_maybe_warp -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
@@ -475,8 +475,12 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
+  if local_warp_socks_proxy_url >/dev/null 2>&1; then
+    say "检测到本机 WARP SOCKS，将优先通过 WARP 下载 sing-box。"
+  fi
+
   say "下载 sing-box ${latest_ver}..."
-  if ! curl -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
     err "下载失败。"
     pause
@@ -484,7 +488,7 @@ install_or_update_singbox() {
   fi
 
   say "校验安装包..."
-  if curl -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+  if curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then

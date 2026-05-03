@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-03 07:18:04 UTC
+# 构建时间: 2026-05-03 07:57:56 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.8.4"
+SCRIPT_VERSION="5.8.5"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -433,6 +433,37 @@ get_public_ip() {
   [ -z "$ip" ] && ip="IP"
   _CACHED_PUBLIC_IP="$ip"
   echo "$ip"
+}
+
+local_warp_socks_proxy_url() {
+  local proxy_file="/etc/wireguard/proxy.conf"
+  local port
+  [ -s "$proxy_file" ] || return 1
+  port="$(awk -F: '/^[[:space:]]*BindAddress[[:space:]]*=/{gsub(/[[:space:]]/,"",$NF); print $NF; exit}' "$proxy_file" 2>/dev/null || true)"
+  [ -n "$port" ] || port="40000"
+  has_cmd ss || return 1
+  ss -nltp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {found=1} END {exit !found}' || return 1
+  echo "socks5h://127.0.0.1:${port}"
+}
+
+curl_maybe_warp() {
+  local proxy tmp_file
+  proxy="$(local_warp_socks_proxy_url 2>/dev/null || true)"
+  if [ -n "$proxy" ]; then
+    tmp_file="$(mktemp /tmp/sb-curl-warp.XXXXXX)" || {
+      curl --proxy "$proxy" "$@" || curl "$@"
+      return $?
+    }
+    if curl --proxy "$proxy" "$@" > "$tmp_file"; then
+      cat "$tmp_file"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 0
+    fi
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    curl "$@"
+  else
+    curl "$@"
+  fi
 }
 
 parse_plus_selections() {
@@ -2083,12 +2114,12 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  tag="$(curl -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
+  tag="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
-  download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
+  download_url="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(mktemp -d)"
-  if ! curl -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
+  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
     return 1
@@ -5466,6 +5497,31 @@ warp_meta_clear() {
   warp_meta_save_obj '{"mode":"off","rules":[]}'
 }
 
+warp_init_env() {
+  [ "${_WARP_ENV_READY:-0}" = "1" ] && return 0
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    err "请使用 root 运行此脚本。"
+    return 1
+  fi
+  has_cmd jq || { err "未找到 jq，无法管理 WARP 元数据。"; return 1; }
+  has_cmd curl || { err "未找到 curl，无法安装或测试 WARP。"; return 1; }
+  [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; return 1; }
+  _WARP_ENV_READY=1
+}
+
+warp_init_routing_env() {
+  if ! warp_init_env; then
+    return 1
+  fi
+  has_cmd sing-box || {
+    err "未找到 sing-box，无法写入全局/分流策略。"
+    warn "IPv6 only 机器可先在 1. WARP 服务管理 中安装并启动 WARP，再回主菜单安装/更新 sing-box。"
+    return 1
+  }
+  config_ensure_exists
+  ensure_manager_file_permissions
+}
+
 warp_port() {
   if [ -s "$WARP_PROXY_FILE" ]; then
     awk -F: '/^[[:space:]]*BindAddress[[:space:]]*=/{gsub(/[[:space:]]/,"",$NF); print $NF; exit}' "$WARP_PROXY_FILE"
@@ -5509,7 +5565,7 @@ warp_normalize_rule_file() {
 warp_validate_rule_file() {
   local file="$1" url
   url="$(warp_rule_url_for_file "$file")"
-  curl -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+  curl_maybe_warp -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
 }
 
 warp_rule_add_meta() {
@@ -5571,27 +5627,32 @@ warp_service_status_text() {
 
 warp_mode_text() {
   case "$(warp_meta_mode)" in
-    global) echo "全局 WARP（普通直连流量）" ;;
-    rules)  echo "常用网站分流" ;;
+    global)
+      if has_cmd sing-box; then echo "全局 WARP（普通直连流量）"; else echo "全局 WARP（sing-box 未安装，未生效）"; fi
+      ;;
+    rules)
+      if has_cmd sing-box; then echo "常用网站分流"; else echo "常用网站分流（sing-box 未安装，未生效）"; fi
+      ;;
     *)      echo "未使用" ;;
   esac
 }
 
 warp_install_deps() {
   install_pkg curl
+  install_pkg jq
   install_pkg tar
   install_pkg iproute2 || true
 }
 
 warp_download_wireproxy() {
   local arch="$1" tmp_dir="$2" latest url fallback
-  latest="$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/pufferffish/wireproxy/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' | sed 's/^v//' || true)"
+  latest="$(curl_maybe_warp -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/pufferffish/wireproxy/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' | sed 's/^v//' || true)"
   [ -n "$latest" ] || latest="1.0.9"
   url="https://github.com/pufferffish/wireproxy/releases/download/v${latest}/wireproxy_linux_${arch}.tar.gz"
   fallback="https://gitlab.com/fscarmen/warp/-/raw/main/wireproxy/wireproxy_linux_${arch}.tar.gz"
 
-  if ! curl -fL --connect-timeout 20 --retry 3 "$url" -o "${tmp_dir}/wireproxy.tar.gz"; then
-    curl -fL --connect-timeout 20 --retry 3 "$fallback" -o "${tmp_dir}/wireproxy.tar.gz"
+  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$url" -o "${tmp_dir}/wireproxy.tar.gz"; then
+    curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$fallback" -o "${tmp_dir}/wireproxy.tar.gz"
   fi
   tar -xzf "${tmp_dir}/wireproxy.tar.gz" -C "$tmp_dir"
   [ -x "${tmp_dir}/wireproxy" ] || return 1
@@ -5910,6 +5971,25 @@ warp_apply_removed_state() {
   _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt"
 }
 
+warp_apply_current_state_if_routing_ready() {
+  if has_cmd sing-box; then
+    warp_init_routing_env || return 1
+    warp_apply_current_state
+    return $?
+  fi
+  warn "sing-box 未安装，已只处理 WARP 服务；全局/分流策略将在安装 sing-box 后再设置。"
+  return 0
+}
+
+warp_apply_removed_state_if_routing_ready() {
+  if has_cmd sing-box; then
+    warp_init_routing_env || return 1
+    warp_apply_removed_state
+    return $?
+  fi
+  return 0
+}
+
 warp_install_and_start() {
   local port arch tmp_dir account
   if warp_service_installed; then
@@ -5920,7 +6000,7 @@ warp_install_and_start() {
     fi
     ok "WARP 已启动。"
     warp_warn_if_trace_failed || true
-    warp_apply_current_state || return 1
+    warp_apply_current_state_if_routing_ready || return 1
     return 0
   fi
 
@@ -5961,7 +6041,7 @@ warp_install_and_start() {
     pause
     return 1
   }
-  warp_apply_current_state || return 1
+  warp_apply_current_state_if_routing_ready || return 1
   ok "WARP 已安装并启动。"
   echo "本地 SOCKS：127.0.0.1:${port}"
   warp_warn_if_trace_failed || true
@@ -5969,10 +6049,11 @@ warp_install_and_start() {
 }
 
 warp_disable_keep_config() {
-  warn "停用 WARP 会关闭 sing-box 中的 WARP 使用策略，并停止 WireProxy；账号和配置会保留。"
+  warn "停用 WARP 会停止 WireProxy；如果 sing-box 已安装，也会关闭 sing-box 中的 WARP 使用策略。"
+  warn "WARP 账号和配置会保留，后续可直接启动。"
   ask_confirm_yn "确认停用 WARP？(y/N): " || return 0
   warp_meta_set_mode off || return 1
-  warp_apply_current_state || return 1
+  warp_apply_current_state_if_routing_ready || return 1
   warp_stop_service
   ok "WARP 已停用，配置已保留。"
   pause
@@ -5983,7 +6064,7 @@ warp_uninstall_all() {
   ask_confirm_yes "输入 YES 确认彻底卸载 WARP，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
 
   warp_meta_clear || return 1
-  warp_apply_removed_state || return 1
+  warp_apply_removed_state_if_routing_ready || return 1
   warp_stop_service
   warp_api_cancel || true
 
@@ -6078,6 +6159,7 @@ warp_global_menu_body() {
 }
 
 warp_global_menu() {
+  warp_init_routing_env || { pause; return 0; }
   warp_require_ready_or_install "设置全局出站" warp_global_menu_body
 }
 
@@ -6243,6 +6325,7 @@ warp_common_rules_from_global() {
 }
 
 warp_common_rules_menu() {
+  warp_init_routing_env || { pause; return 0; }
   warp_require_ready_or_install "设置网站分流" _warp_common_rules_entry
 }
 
@@ -6291,7 +6374,7 @@ warp_service_manage_menu() {
           if warp_start_service_checked; then
             ok "WARP 已启动。"
             warp_warn_if_trace_failed || true
-            warp_apply_current_state || true
+            warp_apply_current_state_if_routing_ready || true
           else
             err "WireProxy 服务启动失败。"
           fi
@@ -6330,12 +6413,15 @@ warp_cleanup_menu() {
 
 warp_manager_menu() {
   local act
-  init_manager_env || { pause; return 0; }
+  warp_init_env || { pause; return 0; }
   while true; do
     clear
     print_rect_title "WARP 管理"
     echo "服务状态：$(warp_service_status_text)"
     echo "使用模式：$(warp_mode_text)"
+    if ! has_cmd sing-box; then
+      echo "sing-box：未安装（可先安装/启动 WARP 服务，暂不能设置全局/分流策略）"
+    fi
     if warp_service_installed; then
       echo "本地 SOCKS：127.0.0.1:$(warp_effective_port)"
     fi
@@ -6724,7 +6810,7 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl_maybe_warp -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
@@ -7149,8 +7235,12 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
+  if local_warp_socks_proxy_url >/dev/null 2>&1; then
+    say "检测到本机 WARP SOCKS，将优先通过 WARP 下载 sing-box。"
+  fi
+
   say "下载 sing-box ${latest_ver}..."
-  if ! curl -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
     err "下载失败。"
     pause
@@ -7158,7 +7248,7 @@ install_or_update_singbox() {
   fi
 
   say "校验安装包..."
-  if curl -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+  if curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then

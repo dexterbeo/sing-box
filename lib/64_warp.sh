@@ -282,6 +282,8 @@ command="${WARP_BIN}"
 command_args="-c ${WARP_PROXY_FILE}"
 command_background=true
 pidfile="/var/run/${WARP_SERVICE}.pid"
+output_log="/var/log/${WARP_SERVICE}.log"
+error_log="/var/log/${WARP_SERVICE}.log"
 EOF
       chmod +x "/etc/init.d/${WARP_SERVICE}"
       ;;
@@ -340,6 +342,23 @@ warp_trace() {
   return 1
 }
 
+warp_socks_listening() {
+  local port
+  port="$(warp_effective_port)"
+  ss -nltp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {found=1} END {exit !found}'
+}
+
+warp_wait_socks_listener() {
+  local i max=5
+  for ((i=1; i<=max; i++)); do
+    if warp_service_running && warp_socks_listening; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 warp_verify_trace_with_retries() {
   local i max=5
   say "后台获取 WARP 出口中，最大尝试 ${max} 次..."
@@ -355,23 +374,30 @@ warp_verify_trace_with_retries() {
   return 1
 }
 
-warp_start_service_verified() {
+warp_start_service_checked() {
   warp_start_service || return 1
-  sleep 1
+  warp_wait_socks_listener
+}
+
+warp_restart_service_checked() {
+  warp_restart_service || return 1
+  warp_wait_socks_listener
+}
+
+warp_warn_if_trace_failed() {
   if warp_verify_trace_with_retries; then
     return 0
   fi
-  warp_stop_service
+  warn "WARP 服务已启动，但出口检测失败。"
+  warn "常见原因：NAT 机 UDP 出站受限、Cloudflare WARP endpoint 不通，或当前 IPv4/IPv6 栈不可达。"
   return 1
 }
 
-warp_restart_service_verified() {
-  warp_restart_service || return 1
-  sleep 1
-  if warp_verify_trace_with_retries; then
-    return 0
-  fi
-  warp_stop_service
+warp_require_trace_for_routing() {
+  warp_verify_trace_with_retries && return 0
+  err "WARP 服务已启动，但出口检测失败，暂不应用全局/分流策略。"
+  warn "请先在 4. 测试 WARP 出口 IP 中确认 WARP 可用。"
+  pause
   return 1
 }
 
@@ -458,12 +484,13 @@ warp_apply_removed_state() {
 warp_install_and_start() {
   local port arch tmp_dir account
   if warp_service_installed; then
-    if ! warp_start_service_verified; then
-      err "WARP 启动后出口检测失败。"
+    if ! warp_start_service_checked; then
+      err "WireProxy 服务启动失败。"
       pause
       return 1
     fi
     ok "WARP 已启动。"
+    warp_warn_if_trace_failed || true
     warp_apply_current_state || return 1
     return 0
   fi
@@ -500,7 +527,7 @@ warp_install_and_start() {
 
   warp_write_configs "$port" || return 1
   warp_write_service || return 1
-  warp_start_service_verified || {
+  warp_start_service_checked || {
     err "WireProxy 服务启动失败。"
     pause
     return 1
@@ -508,6 +535,7 @@ warp_install_and_start() {
   warp_apply_current_state || return 1
   ok "WARP 已安装并启动。"
   echo "本地 SOCKS：127.0.0.1:${port}"
+  warp_warn_if_trace_failed || true
   pause
 }
 
@@ -533,7 +561,9 @@ warp_uninstall_all() {
   rm -f "$WARP_BIN" \
     "/lib/systemd/system/${WARP_SERVICE}.service" \
     "/etc/systemd/system/${WARP_SERVICE}.service" \
-    "/etc/init.d/${WARP_SERVICE}" >/dev/null 2>&1 || true
+    "/etc/init.d/${WARP_SERVICE}" \
+    "/var/log/${WARP_SERVICE}.log" \
+    "/var/run/${WARP_SERVICE}.pid" >/dev/null 2>&1 || true
   rm -f "$WARP_ACCOUNT_FILE" "$WARP_WG_FILE" "$WARP_PROXY_FILE" \
     "${WARP_DIR}/menu.sh" "${WARP_DIR}/language" \
     "${WARP_DIR}/NonGlobalUp.sh" "${WARP_DIR}/NonGlobalDown.sh" \
@@ -559,7 +589,7 @@ warp_require_ready_or_install() {
     echo -e "  ${R}0.${NC} 返回上一级"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) warp_install_and_start && "$next_func" ;;
+      1) warp_install_and_start && warp_require_trace_for_routing && "$next_func" ;;
       *) return 0 ;;
     esac
     return 0
@@ -572,11 +602,11 @@ warp_require_ready_or_install() {
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1)
-        if warp_start_service_verified; then
+        if warp_start_service_checked; then
           ok "WARP 已启动。"
-          "$next_func"
+          warp_require_trace_for_routing && "$next_func"
         else
-          err "WARP 启动后出口检测失败。"
+          err "WireProxy 服务启动失败。"
           pause
         fi
         ;;
@@ -584,7 +614,7 @@ warp_require_ready_or_install() {
     esac
     return 0
   fi
-  "$next_func"
+  warp_require_trace_for_routing && "$next_func"
 }
 
 warp_global_menu_body() {
@@ -821,18 +851,20 @@ warp_service_manage_menu() {
         if ! warp_service_installed; then
           warp_install_and_start || true
         elif warp_service_running; then
-          if warp_restart_service_verified; then
+          if warp_restart_service_checked; then
             ok "WARP 已重启。"
+            warp_warn_if_trace_failed || true
           else
-            err "WARP 重启后出口检测失败。"
+            err "WireProxy 服务重启失败。"
           fi
           pause
         else
-          if warp_start_service_verified; then
+          if warp_start_service_checked; then
             ok "WARP 已启动。"
+            warp_warn_if_trace_failed || true
             warp_apply_current_state || true
           else
-            err "WARP 启动后出口检测失败。"
+            err "WireProxy 服务启动失败。"
           fi
           pause
         fi

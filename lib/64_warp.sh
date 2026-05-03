@@ -328,11 +328,16 @@ warp_stop_service() {
 }
 
 warp_trace() {
-  local port result
+  local port result flag
   port="$(warp_effective_port)"
-  result="$(curl -fsS --connect-timeout 8 --max-time 15 -x "socks5h://127.0.0.1:${port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
-  [ -n "$result" ] || return 1
-  echo "$result"
+  for flag in -4 -6 ""; do
+    result="$(curl $flag -fsS --connect-timeout 8 --max-time 15 -x "socks5h://127.0.0.1:${port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
+    if echo "$result" | awk -F= '$1=="warp" && ($2=="on" || $2=="plus") {found=1} END {exit !found}'; then
+      echo "$result"
+      return 0
+    fi
+  done
+  return 1
 }
 
 warp_verify_trace_with_retries() {
@@ -463,7 +468,7 @@ warp_install_and_start() {
     return 0
   fi
 
-  ask_port_or_return "请输入 WARP 本地 SOCKS 端口 [${WARP_DEFAULT_PORT}]: " "$WARP_DEFAULT_PORT" port || return 1
+  ask_port_or_return "请输入 WARP 本地 SOCKS 端口 [默认${WARP_DEFAULT_PORT}]: " "$WARP_DEFAULT_PORT" port || return 1
   arch="$(warp_arch)" || {
     err "当前架构暂不支持 WireProxy：$(uname -m)"
     pause

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-03 06:28:20 UTC
+# 构建时间: 2026-05-03 06:40:53 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.8.1"
+SCRIPT_VERSION="5.8.2"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -3348,7 +3348,6 @@ user_manager_menu() {
     echo -e "  ${C}2.${NC} 管理用户"
     echo -e "  ${C}3.${NC} 删除用户"
     echo -e "  ${C}4.${NC} Telegram Bot 管理"
-    echo -e "  ${C}5.${NC} WARP 解锁管理"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
@@ -3356,7 +3355,6 @@ user_manager_menu() {
       2) user_select_and_manage_menu || true ;;
       3) user_delete_menu || true ;;
       4) telegram_bot_manager_menu || true ;;
-      5) warp_manager_menu || true ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
@@ -5742,11 +5740,16 @@ warp_stop_service() {
 }
 
 warp_trace() {
-  local port result
+  local port result flag
   port="$(warp_effective_port)"
-  result="$(curl -fsS --connect-timeout 8 --max-time 15 -x "socks5h://127.0.0.1:${port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
-  [ -n "$result" ] || return 1
-  echo "$result"
+  for flag in -4 -6 ""; do
+    result="$(curl $flag -fsS --connect-timeout 8 --max-time 15 -x "socks5h://127.0.0.1:${port}" "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
+    if echo "$result" | awk -F= '$1=="warp" && ($2=="on" || $2=="plus") {found=1} END {exit !found}'; then
+      echo "$result"
+      return 0
+    fi
+  done
+  return 1
 }
 
 warp_verify_trace_with_retries() {
@@ -5877,7 +5880,7 @@ warp_install_and_start() {
     return 0
   fi
 
-  ask_port_or_return "请输入 WARP 本地 SOCKS 端口 [${WARP_DEFAULT_PORT}]: " "$WARP_DEFAULT_PORT" port || return 1
+  ask_port_or_return "请输入 WARP 本地 SOCKS 端口 [默认${WARP_DEFAULT_PORT}]: " "$WARP_DEFAULT_PORT" port || return 1
   arch="$(warp_arch)" || {
     err "当前架构暂不支持 WireProxy：$(uname -m)"
     pause
@@ -8172,8 +8175,9 @@ main_menu() {
     echo -e "  ${C}5.${NC} 中转管理"
     echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} 系统工具"
-    echo -e "  ${C}9.${NC} 卸载 sing-box"
+    echo -e "  ${C}8.${NC} WARP 解锁管理"
+    echo -e "  ${C}9.${NC} 系统工具"
+    echo -e "  ${C}10.${NC} 卸载 sing-box"
     echo -e "  ${R}0.${NC} 退出系统"
     echo -e "${B}--------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " opt
@@ -8185,8 +8189,9 @@ main_menu() {
       5) manage_relay_nodes || true ;;
       6) export_configs || true ;;
       7) user_manager_menu || true ;;
-      8) system_tools_menu || true ;;
-      9) uninstall_singbox_keep_config ;;
+      8) warp_manager_menu || true ;;
+      9) system_tools_menu || true ;;
+      10) uninstall_singbox_keep_config ;;
       0|q|Q) exit 0 ;;
       *) warn "无效输入：$opt"; sleep 1 ;;
     esac

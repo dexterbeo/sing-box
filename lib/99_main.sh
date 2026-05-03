@@ -17,8 +17,9 @@ main_menu() {
     echo -e "  ${C}5.${NC} 中转管理"
     echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} 系统工具"
-    echo -e "  ${C}9.${NC} 卸载 sing-box"
+    echo -e "  ${C}8.${NC} WARP 解锁管理"
+    echo -e "  ${C}9.${NC} 系统工具"
+    echo -e "  ${C}10.${NC} 卸载 sing-box"
     echo -e "  ${R}0.${NC} 退出系统"
     echo -e "${B}--------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " opt
@@ -30,8 +31,9 @@ main_menu() {
       5) manage_relay_nodes || true ;;
       6) export_configs || true ;;
       7) user_manager_menu || true ;;
-      8) system_tools_menu || true ;;
-      9) uninstall_singbox_keep_config ;;
+      8) warp_manager_menu || true ;;
+      9) system_tools_menu || true ;;
+      10) uninstall_singbox_keep_config ;;
       0|q|Q) exit 0 ;;
       *) warn "无效输入：$opt"; sleep 1 ;;
     esac

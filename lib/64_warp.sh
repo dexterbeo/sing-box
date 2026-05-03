@@ -384,18 +384,34 @@ warp_restart_service_checked() {
   warp_wait_socks_listener
 }
 
+warp_trace_failure_hint() {
+  local port
+  port="$(warp_effective_port)"
+  if warp_socks_listening; then
+    warn "WireProxy 服务正在运行，SOCKS 已监听 127.0.0.1:${port}，但 WARP 出口检测失败。"
+    warn "这通常不是 bind 或服务进程问题，而是 Cloudflare WARP endpoint 握手不通。"
+  else
+    warn "WireProxy 服务状态正常，但未检测到 127.0.0.1:${port} 的 SOCKS 监听。"
+  fi
+  warn "NAT 机常见原因：UDP 出站受限、机房屏蔽 WARP UDP 端点，或当前 IPv4/IPv6 栈不可达。"
+  case "$INIT_SYSTEM" in
+    openrc)  warn "OpenRC 可查看：tail -80 /var/log/wireproxy.log；持续出现 Handshake did not complete 表示隧道未握手成功。" ;;
+    systemd) warn "systemd 可查看：journalctl -u wireproxy -n 80 --no-pager；持续出现 Handshake did not complete 表示隧道未握手成功。" ;;
+  esac
+}
+
 warp_warn_if_trace_failed() {
   if warp_verify_trace_with_retries; then
     return 0
   fi
-  warn "WARP 服务已启动，但出口检测失败。"
-  warn "常见原因：NAT 机 UDP 出站受限、Cloudflare WARP endpoint 不通，或当前 IPv4/IPv6 栈不可达。"
+  warp_trace_failure_hint
   return 1
 }
 
 warp_require_trace_for_routing() {
   warp_verify_trace_with_retries && return 0
   err "WARP 服务已启动，但出口检测失败，暂不应用全局/分流策略。"
+  warp_trace_failure_hint
   warn "请先在 4. 测试 WARP 出口 IP 中确认 WARP 可用。"
   pause
   return 1
@@ -415,7 +431,8 @@ warp_test_print() {
     return 1
   fi
   trace="$(warp_trace)" || {
-    err "WARP 出口测试失败，请检查 WireProxy 服务。"
+    err "WARP 出口测试失败。"
+    warp_trace_failure_hint
     pause
     return 1
   }
@@ -719,32 +736,34 @@ warp_rules_print() {
   echo "$rules_json" | jq -r '.[] | "  - \(.name)：\(.file)"'
 }
 
-warp_rules_view_menu() {
-  warp_rules_print
-  pause
-}
-
 warp_rules_delete_menu() {
-  local rules_json count raw tags_json
+  local rules_json count raw n tag tags_json
   local -a idx=()
+  local -a selected_tags=()
   rules_json="$(warp_meta_rules_json)"
   count="$(echo "$rules_json" | jq 'length')"
   [ "$count" -gt 0 ] || { warn "当前没有可删除的 WARP 分流。"; pause; return 0; }
+
+  clear
+  print_rect_title "删除 WARP 分流"
   echo "$rules_json" | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name)：\(.value.file)"'
-  read -r -p "请输入要删除的编号，多个用+连接: " raw
+  echo
+  echo "多个编号用+连接，例如：1+3"
+  read -r -p "请输入要删除的编号（回车返回）: " raw
+  [ -n "${raw:-}" ] || return 0
+
   mapfile -t idx < <(parse_plus_selections "$raw")
-  tags_json="$(
-    {
-      local n
-      for n in "${idx[@]}"; do
-        if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "$count" ]; then
-          err "编号超出范围：$n"
-          return 1
-        fi
-        echo "$rules_json" | jq -r --argjson i "$((n-1))" '.[$i].tag'
-      done
-    } | jq -R . | jq -s '.'
-  )" || { pause; return 1; }
+  [ "${#idx[@]}" -gt 0 ] || { warn "未选择任何分流。"; pause; return 0; }
+  for n in "${idx[@]}"; do
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "$count" ]; then
+      err "编号超出范围：$n"
+      pause
+      return 1
+    fi
+    tag="$(echo "$rules_json" | jq -r --argjson i "$((n-1))" '.[$i].tag')"
+    [ -n "$tag" ] && [ "$tag" != "null" ] && selected_tags+=("$tag")
+  done
+  tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
   warp_rule_remove_meta_by_tags_json "$tags_json" || return 1
   warp_apply_current_state || return 1
   ok "已删除指定 WARP 分流。"
@@ -772,9 +791,8 @@ warp_common_rules_menu_body() {
     echo -e "  ${C}4.${NC} YouTube"
     echo -e "  ${C}5.${NC} TikTok"
     echo -e "  ${C}6.${NC} 自定义网站规则"
-    echo -e "  ${C}7.${NC} 查看当前分流"
-    echo -e "  ${C}8.${NC} 删除指定分流"
-    echo -e "  ${C}9.${NC} 清空全部分流"
+    echo -e "  ${C}7.${NC} 删除指定分流"
+    echo -e "  ${C}8.${NC} 清空全部分流"
     echo -e "  ${R}0.${NC} 返回上一级"
     echo
     echo "1-5支持用+连接，例如：1+3+5"
@@ -782,9 +800,8 @@ warp_common_rules_menu_body() {
     case "${act:-}" in
       0|q|Q|"") return 0 ;;
       6) warp_custom_rule_menu || true ;;
-      7) warp_rules_view_menu || true ;;
-      8) warp_rules_delete_menu || true ;;
-      9) warp_rules_clear_menu || true ;;
+      7) warp_rules_delete_menu || true ;;
+      8) warp_rules_clear_menu || true ;;
       *+*|[1-5]) warp_add_preset_rules "$act" || true ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
@@ -904,7 +921,7 @@ warp_manager_menu() {
   init_manager_env || { pause; return 0; }
   while true; do
     clear
-    print_rect_title "WARP 解锁管理"
+    print_rect_title "WARP 管理"
     echo "服务状态：$(warp_service_status_text)"
     echo "使用模式：$(warp_mode_text)"
     if warp_service_installed; then

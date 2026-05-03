@@ -17,7 +17,7 @@ main_menu() {
     echo -e "  ${C}5.${NC} 中转管理"
     echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} WARP 管理"
+    echo -e "  ${C}8.${NC} WARP 分流"
     echo -e "  ${C}9.${NC} 系统工具"
     echo -e "  ${C}10.${NC} 卸载 sing-box"
     echo -e "  ${R}0.${NC} 退出系统"

@@ -118,8 +118,36 @@ list_all_node_keys() {
 route_rebuild(){
   local json="$1"
   local normalized core_users_json relay_pairs_json preserved_rules_json
+  local warp_mode="off" warp_core_outbound="direct" warp_tags_json='[]'
+  local warp_available_tags_json='[]'
 
   normalized="$(config_normalize "$json")" || return 1
+
+  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
+    warp_mode="$(jq -r '.warp.mode // "off"' "$META_FILE" 2>/dev/null || echo "off")"
+    warp_tags_json="$(jq -c '[.warp.rules[]?.tag // empty | select(. != "")] | unique' "$META_FILE" 2>/dev/null || echo '[]')"
+  fi
+  if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
+    warp_mode="off"
+    warp_tags_json='[]'
+  fi
+  if [ "$warp_mode" = "global" ]; then
+    warp_core_outbound="warp"
+  elif [ "$warp_mode" = "rules" ]; then
+    warp_core_outbound="direct"
+    warp_available_tags_json="$(
+      echo "$normalized" | jq -c --argjson wanted "$warp_tags_json" '
+        [
+          .route.rule_set[]?
+          | .tag // empty
+          | select(($wanted | index(.)) != null)
+        ] | unique
+      '
+    )" || warp_available_tags_json='[]'
+  else
+    warp_core_outbound="direct"
+    warp_available_tags_json='[]'
+  fi
 
   core_users_json="$({
     while IFS=$'\x01' read -r entry user_name; do
@@ -146,13 +174,30 @@ route_rebuild(){
     '
   )" || return 1
 
-  echo "$normalized" | jq --argjson core "$core_users_json" --argjson relay "$relay_pairs_json" --argjson kept "$preserved_rules_json" '
+  echo "$normalized" | jq \
+    --argjson core "$core_users_json" \
+    --argjson relay "$relay_pairs_json" \
+    --argjson kept "$preserved_rules_json" \
+    --arg core_out "$warp_core_outbound" \
+    --argjson warp_tags "$warp_available_tags_json" '
+    def auth_key:
+      (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
+    def rule_set_key:
+      (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
-      + (if ($core | length) > 0 then [{auth_user:($core | unique | sort),outbound:"direct"}] else [] end)
+      + (if (($core | length) > 0 and ($warp_tags | length) > 0 and $core_out != "warp") then [{auth_user:($core | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
+      + (if ($core | length) > 0 then [{auth_user:($core | unique | sort),outbound:$core_out}] else [] end)
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
     )
-    | .route.rules |= unique_by((.outbound // "") + "|" + (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(",")))
+    | .route.rules |= (
+        (reduce .[] as $r ({seen:{}, out:[]};
+          ($r | ((.outbound // "") + "|" + auth_key + "|" + rule_set_key)) as $key
+          | if .seen[$key] then .
+            else .seen[$key] = true | .out += [$r]
+            end
+        ) | .out)
+      )
     | . as $root
     | .outbounds |= map(
         (.tag // "") as $tag

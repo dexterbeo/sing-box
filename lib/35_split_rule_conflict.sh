@@ -35,6 +35,12 @@ split_rule_warp_conflicts_json() {
   '
 }
 
+split_rule_has_warp_conflicts() {
+  local files_json="$1" conflicts
+  conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
+  [ "$(echo "$conflicts" | jq 'length')" -gt 0 ]
+}
+
 split_rule_take_over_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
@@ -51,11 +57,10 @@ split_rule_take_over_relay_to_warp() {
 }
 
 split_rule_take_over_warp_to_relay() {
-  local files_json="$1" landing_json="$2" conflicts count landing_id
+  local files_json="$1" landing_id="$2" conflicts count
   conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
   count="$(echo "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
-  landing_id="$(echo "$landing_json" | jq -r '.id // "未设置"')" || landing_id="未设置"
 
   warn "以下规则已在 WARP 分流中使用："
   echo "$conflicts" | jq -r '

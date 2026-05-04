@@ -19,7 +19,11 @@ warp_meta_json() {
   meta_load | jq -c '
     (.warp // {mode:"off", rules:[]})
     | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
-    | .rules = (.rules // [])
+    | .rules = [
+        (.rules // [])[]?
+        | select((.file // "") != "")
+        | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
+      ]
   '
 }
 
@@ -47,7 +51,7 @@ warp_rule_tag_for_file() {
   local file="$1" base tag
   base="${file%.srs}"
   tag="${base//[^A-Za-z0-9_-]/-}"
-  echo "warp-${tag}"
+  echo "relay-${tag}"
 }
 
 warp_rule_url_for_file() {
@@ -227,17 +231,24 @@ warp_config_project_json() {
     --argjson port "$port" '
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
+    ($rules | map(.tag // "") | unique) as $managed_tags
+    |
     .route = (.route // {"rules":[],"final":"reject"})
     | .route.rules = (.route.rules // [])
     | .route.rules = (
         .route.rules
         | map(select(
             ((.outbound // "") != "warp")
-            and ((rule_set_array | any(startswith("warp-geosite-"))) | not)
+            and ((rule_set_array | any(. as $tag | ($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null))) | not)
           ))
       )
     | .route.rule_set = (
-        ((.route.rule_set // []) | map(select(((.tag // "") | startswith("warp-geosite-")) | not)))
+        ((.route.rule_set // [])
+          | map(
+              (.tag // "") as $tag
+              | select((($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null)) | not)
+            )
+        )
         + (if $ready then
             ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url}))
           else [] end)

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 09:38:25 UTC
+# 构建时间: 2026-05-04 10:01:13 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.0"
+SCRIPT_VERSION="6.0.1"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -1672,7 +1672,14 @@ route_rebuild(){
 
   if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
     warp_mode="$(jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' "$META_FILE" 2>/dev/null || echo "off")"
-    warp_tags_json="$(jq -c '[.warp.rules[]?.tag // empty | select(. != "")] | unique' "$META_FILE" 2>/dev/null || echo '[]')"
+    warp_tags_json="$(jq -c '
+      [
+        .warp.rules[]?
+        | (.file // "") as $file
+        | select($file != "")
+        | "relay-" + (($file | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-"))
+      ] | unique
+    ' "$META_FILE" 2>/dev/null || echo '[]')"
   fi
   if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
     warp_mode="off"
@@ -1980,6 +1987,12 @@ split_rule_warp_conflicts_json() {
   '
 }
 
+split_rule_has_warp_conflicts() {
+  local files_json="$1" conflicts
+  conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
+  [ "$(echo "$conflicts" | jq 'length')" -gt 0 ]
+}
+
 split_rule_take_over_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
@@ -1996,11 +2009,10 @@ split_rule_take_over_relay_to_warp() {
 }
 
 split_rule_take_over_warp_to_relay() {
-  local files_json="$1" landing_json="$2" conflicts count landing_id
+  local files_json="$1" landing_id="$2" conflicts count
   conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
   count="$(echo "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
-  landing_id="$(echo "$landing_json" | jq -r '.id // "未设置"')" || landing_id="未设置"
 
   warn "以下规则已在 WARP 分流中使用："
   echo "$conflicts" | jq -r '
@@ -2135,16 +2147,20 @@ relay_socks_outbound_json() {
   '
 }
 
-relay_prompt_socks_landing() {
-  local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
-  local _land _ip _relay_port _username _password
-
+relay_prompt_landing_id() {
+  local land_var="$1" _land
   read -r -p "落地标识（回车返回，如 sg01）: " _land
   [ -z "${_land:-}" ] && { warn "已取消，返回上一级。"; return 1; }
   if ! [[ "$_land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     warn "落地标识仅允许字母、数字、点、下划线、短横线。"
     return 1
   fi
+  printf -v "$land_var" '%s' "$_land"
+}
+
+relay_prompt_landing_details() {
+  local ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
+  local _ip _relay_port _username _password
 
   read -r -p "落地 IP 地址（回车返回）: " _ip
   [ -z "${_ip:-}" ] && { warn "已取消，返回上一级。"; return 1; }
@@ -2163,12 +2179,19 @@ relay_prompt_socks_landing() {
     _password=""
   fi
 
-  printf -v "$land_var" '%s' "$_land"
   printf -v "$ip_var" '%s' "$_ip"
   printf -v "$port_var" '%s' "$_relay_port"
   printf -v "$username_var" '%s' "${_username:-}"
   printf -v "$password_var" '%s' "${_password:-}"
   return 0
+}
+
+relay_prompt_socks_landing() {
+  local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
+  local _land
+  relay_prompt_landing_id _land || return 1
+  relay_prompt_landing_details "$_land" "$ip_var" "$port_var" "$username_var" "$password_var" || return 1
+  printf -v "$land_var" '%s' "$_land"
 }
 
 relay_landing_to_meta_json() {
@@ -2213,20 +2236,6 @@ relay_known_landing_json() {
   echo "null"
 }
 
-relay_landing_equal() {
-  local left="$1" right="$2"
-  jq -e --argjson a "$left" --argjson b "$right" -n '
-    def norm($x): {
-      id:($x.id // ""),
-      server:($x.server // ""),
-      port:(($x.port // 0) | tonumber),
-      username:($x.username // ""),
-      password:($x.password // "")
-    };
-    norm($a) == norm($b)
-  ' >/dev/null 2>&1
-}
-
 relay_landing_display() {
   local landing_json="$1"
   echo "$landing_json" | jq -r '
@@ -2238,22 +2247,21 @@ relay_landing_display() {
 
 relay_choose_landing_or_return() {
   local json="$1" outvar="$2"
-  local selected_land selected_ip selected_port selected_username selected_password candidate existing choice
+  local selected_land
 
-  relay_prompt_socks_landing selected_land selected_ip selected_port selected_username selected_password || return 1
-  candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
+  relay_prompt_landing_id selected_land || return 1
+  relay_choose_landing_by_id_or_return "$json" "$selected_land" "$outvar"
+}
+
+relay_choose_landing_by_id_or_return() {
+  local json="$1" selected_land="$2" outvar="$3"
+  local selected_ip selected_port selected_username selected_password candidate existing choice
+
   existing="$(relay_known_landing_json "$json" "$selected_land")"
 
   if echo "$existing" | jq -e 'type == "object" and (.server // "") != ""' >/dev/null 2>&1; then
-    if relay_landing_equal "$existing" "$candidate"; then
-      printf -v "$outvar" '%s' "$existing"
-      return 0
-    fi
-
     echo
-    warn "落地标识 ${selected_land} 已存在，但信息不一致。"
-    echo "当前：$(relay_landing_display "$existing")"
-    echo "新输入：$(relay_landing_display "$candidate")"
+    echo "当前落地机：$(relay_landing_display "$existing")"
     echo
     echo -e "  ${C}1.${NC} 使用已有落地机"
     echo -e "  ${C}2.${NC} 更新落地机信息"
@@ -2261,11 +2269,18 @@ relay_choose_landing_or_return() {
     read -r -p "请选择操作: " choice
     case "${choice:-}" in
       1) printf -v "$outvar" '%s' "$existing"; return 0 ;;
-      2) printf -v "$outvar" '%s' "$candidate"; return 0 ;;
+      2)
+        relay_prompt_landing_details "$selected_land" selected_ip selected_port selected_username selected_password || return 1
+        candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
+        printf -v "$outvar" '%s' "$candidate"
+        return 0
+        ;;
       *) warn "已取消，返回上一级。"; return 1 ;;
     esac
   fi
 
+  relay_prompt_landing_details "$selected_land" selected_ip selected_port selected_username selected_password || return 1
+  candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
   printf -v "$outvar" '%s' "$candidate"
   return 0
 }
@@ -2569,6 +2584,8 @@ relay_config_project_json() {
       | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end);
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
+    ($rules | map(.tag // "") | unique) as $managed_tags
+    |
     ($rules | map(.landing_id // "") | unique | map(select(. != "" and (($landings[.] // null) != null)))) as $used_landings
     |
     .route = (.route // {"rules":[],"final":"reject"})
@@ -2578,11 +2595,13 @@ relay_config_project_json() {
         | map(select(
             (((.outbound // "") == "relay-partial") | not)
             and (((.outbound // "") | startswith("relay-")) | not)
-            and ((rule_set_array | any(startswith("relay-geosite-"))) | not)
+            and ((rule_set_array | any(. as $tag | ($managed_tags | index($tag)) != null)) | not)
           ))
       )
     | .route.rule_set = (
-        ((.route.rule_set // []) | map(select(((.tag // "") | startswith("relay-geosite-")) | not)))
+        ((.route.rule_set // [])
+          | map((.tag // "") as $tag | select(($managed_tags | index($tag)) == null))
+        )
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
             ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url}))
           else [] end)
@@ -2621,7 +2640,7 @@ relay_apply_partial_state() {
 }
 
 relay_add_preset_rules() {
-  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json
+  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json landing_id
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -2633,7 +2652,6 @@ relay_add_preset_rules() {
       return 1
     fi
   done
-  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   for pick in "${picks[@]}"; do
     preset=$((pick - 1))
     item="$(relay_preset_rule "$preset")" || return 1
@@ -2643,11 +2661,17 @@ relay_add_preset_rules() {
     files+=("$file")
   done
   files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
-  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
-    warn "已取消，未修改部分流量中转规则。"
-    pause
-    return 0
-  }
+  if split_rule_has_warp_conflicts "$files_json"; then
+    relay_prompt_landing_id landing_id || { pause; return 0; }
+    split_rule_take_over_warp_to_relay "$files_json" "$landing_id" || {
+      warn "已取消，未修改部分流量中转规则。"
+      pause
+      return 0
+    }
+    relay_choose_landing_by_id_or_return "$json" "$landing_id" landing_json || { pause; return 0; }
+  else
+    relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  fi
   for pick in "${!files[@]}"; do
     relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
   done
@@ -2657,7 +2681,7 @@ relay_add_preset_rules() {
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json files_json
+  local raw file name landing_json json files_json landing_id
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -2675,14 +2699,19 @@ relay_custom_rule_menu() {
     pause
     return 1
   fi
-  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   name="自定义：${file%.srs}"
   files_json="$(split_rule_files_json_from_args "$file")" || return 1
-  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
-    warn "已取消，未修改部分流量中转规则。"
-    pause
-    return 0
-  }
+  if split_rule_has_warp_conflicts "$files_json"; then
+    relay_prompt_landing_id landing_id || { pause; return 0; }
+    split_rule_take_over_warp_to_relay "$files_json" "$landing_id" || {
+      warn "已取消，未修改部分流量中转规则。"
+      pause
+      return 0
+    }
+    relay_choose_landing_by_id_or_return "$json" "$landing_id" landing_json || { pause; return 0; }
+  else
+    relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  fi
   relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
   relay_apply_partial_state || return 1
   ok "自定义部分流量中转已添加：$file"
@@ -6504,7 +6533,11 @@ warp_meta_json() {
   meta_load | jq -c '
     (.warp // {mode:"off", rules:[]})
     | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
-    | .rules = (.rules // [])
+    | .rules = [
+        (.rules // [])[]?
+        | select((.file // "") != "")
+        | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
+      ]
   '
 }
 
@@ -6532,7 +6565,7 @@ warp_rule_tag_for_file() {
   local file="$1" base tag
   base="${file%.srs}"
   tag="${base//[^A-Za-z0-9_-]/-}"
-  echo "warp-${tag}"
+  echo "relay-${tag}"
 }
 
 warp_rule_url_for_file() {
@@ -6712,17 +6745,24 @@ warp_config_project_json() {
     --argjson port "$port" '
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
+    ($rules | map(.tag // "") | unique) as $managed_tags
+    |
     .route = (.route // {"rules":[],"final":"reject"})
     | .route.rules = (.route.rules // [])
     | .route.rules = (
         .route.rules
         | map(select(
             ((.outbound // "") != "warp")
-            and ((rule_set_array | any(startswith("warp-geosite-"))) | not)
+            and ((rule_set_array | any(. as $tag | ($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null))) | not)
           ))
       )
     | .route.rule_set = (
-        ((.route.rule_set // []) | map(select(((.tag // "") | startswith("warp-geosite-")) | not)))
+        ((.route.rule_set // [])
+          | map(
+              (.tag // "") as $tag
+              | select((($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null)) | not)
+            )
+        )
         + (if $ready then
             ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url}))
           else [] end)

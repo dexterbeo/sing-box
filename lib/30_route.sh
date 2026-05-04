@@ -127,7 +127,14 @@ route_rebuild(){
 
   if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
     warp_mode="$(jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' "$META_FILE" 2>/dev/null || echo "off")"
-    warp_tags_json="$(jq -c '[.warp.rules[]?.tag // empty | select(. != "")] | unique' "$META_FILE" 2>/dev/null || echo '[]')"
+    warp_tags_json="$(jq -c '
+      [
+        .warp.rules[]?
+        | (.file // "") as $file
+        | select($file != "")
+        | "relay-" + (($file | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-"))
+      ] | unique
+    ' "$META_FILE" 2>/dev/null || echo '[]')"
   fi
   if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
     warp_mode="off"

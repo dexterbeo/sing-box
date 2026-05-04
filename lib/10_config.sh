@@ -44,6 +44,30 @@ config_normalize() {
     | .route = (.route // {"rules": [], "final": "reject"})
     | .route.rules = (.route.rules // [])
     | .route.final = "reject"
+    | if (.route.rule_set? == null) then .
+      else
+        .route.rule_set = (
+          (.route.rule_set | if type == "array" then . else [.] end)
+          | map(
+              if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
+                del(.download_detour)
+              else .
+              end
+            )
+          | reduce .[] as $rs ({seen:{}, out:[]};
+              ($rs.tag // "") as $tag
+              | if $tag == "" then
+                  .out += [$rs]
+                elif (.seen[$tag] == null) then
+                  .seen[$tag] = (.out | length)
+                  | .out += [$rs]
+                else
+                  .out[.seen[$tag]] = $rs
+                end
+            )
+          | .out
+        )
+      end
     | .experimental = (.experimental // {})
     | .experimental.cache_file = (.experimental.cache_file // {})
     | .experimental.cache_file.enabled = true

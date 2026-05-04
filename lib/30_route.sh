@@ -138,8 +138,9 @@ route_rebuild(){
       echo "$normalized" | jq -c --argjson wanted "$warp_tags_json" '
         [
           .route.rule_set[]?
-          | .tag // empty
-          | select(($wanted | index(.)) != null)
+          | (.tag // empty) as $tag
+          | select(($wanted | index($tag)) != null)
+          | $tag
         ] | unique
       '
     )" || warp_available_tags_json='[]'

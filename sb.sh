@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 09:09:48 UTC
+# 构建时间: 2026-05-04 09:19:09 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.9"
+SCRIPT_VERSION="5.9.10"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -721,6 +721,30 @@ config_normalize() {
     | .route = (.route // {"rules": [], "final": "reject"})
     | .route.rules = (.route.rules // [])
     | .route.final = "reject"
+    | if (.route.rule_set? == null) then .
+      else
+        .route.rule_set = (
+          (.route.rule_set | if type == "array" then . else [.] end)
+          | map(
+              if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
+                del(.download_detour)
+              else .
+              end
+            )
+          | reduce .[] as $rs ({seen:{}, out:[]};
+              ($rs.tag // "") as $tag
+              | if $tag == "" then
+                  .out += [$rs]
+                elif (.seen[$tag] == null) then
+                  .seen[$tag] = (.out | length)
+                  | .out += [$rs]
+                else
+                  .out[.seen[$tag]] = $rs
+                end
+            )
+          | .out
+        )
+      end
     | .experimental = (.experimental // {})
     | .experimental.cache_file = (.experimental.cache_file // {})
     | .experimental.cache_file.enabled = true
@@ -1659,8 +1683,9 @@ route_rebuild(){
       echo "$normalized" | jq -c --argjson wanted "$warp_tags_json" '
         [
           .route.rule_set[]?
-          | .tag // empty
-          | select(($wanted | index(.)) != null)
+          | (.tag // empty) as $tag
+          | select(($wanted | index($tag)) != null)
+          | $tag
         ] | unique
       '
     )" || warp_available_tags_json='[]'

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 08:30:21 UTC
+# 构建时间: 2026-05-04 08:48:58 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.7"
+SCRIPT_VERSION="5.9.8"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -691,7 +691,8 @@ config_min_template() {
     {"type": "direct", "tag": "direct"},
     {"type": "block", "tag": "reject"}
   ],
-  "route": {"rules": [], "final": "reject"}
+  "route": {"rules": [], "final": "reject"},
+  "experimental": {"cache_file": {"enabled": true}}
 }
 JSON
 }
@@ -720,6 +721,9 @@ config_normalize() {
     | .route = (.route // {"rules": [], "final": "reject"})
     | .route.rules = (.route.rules // [])
     | .route.final = "reject"
+    | .experimental = (.experimental // {})
+    | .experimental.cache_file = (.experimental.cache_file // {})
+    | .experimental.cache_file.enabled = true
     | if (.outbounds | any((.tag // "")=="direct")) then . else .outbounds += [{"type":"direct","tag":"direct"}] end
     | if (.outbounds | any((.tag // "")=="reject")) then . else .outbounds += [{"type":"block","tag":"reject"}] end
   '

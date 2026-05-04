@@ -14,7 +14,8 @@ config_min_template() {
     {"type": "direct", "tag": "direct"},
     {"type": "block", "tag": "reject"}
   ],
-  "route": {"rules": [], "final": "reject"}
+  "route": {"rules": [], "final": "reject"},
+  "experimental": {"cache_file": {"enabled": true}}
 }
 JSON
 }
@@ -43,6 +44,9 @@ config_normalize() {
     | .route = (.route // {"rules": [], "final": "reject"})
     | .route.rules = (.route.rules // [])
     | .route.final = "reject"
+    | .experimental = (.experimental // {})
+    | .experimental.cache_file = (.experimental.cache_file // {})
+    | .experimental.cache_file.enabled = true
     | if (.outbounds | any((.tag // "")=="direct")) then . else .outbounds += [{"type":"direct","tag":"direct"}] end
     | if (.outbounds | any((.tag // "")=="reject")) then . else .outbounds += [{"type":"block","tag":"reject"}] end
   '

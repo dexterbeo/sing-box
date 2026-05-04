@@ -56,7 +56,7 @@ ensure_grpcurl() {
   if [ -x "$GRPCURL_BIN" ]; then
     return 0
   fi
-  local arch asset tag api tmp_dir download_url
+  local asset_pattern tag api api_json tmp_dir download_url
   case "$(uname -m)" in
     x86_64) asset_pattern='linux_x86_64.tar.gz' ;;
     aarch64|arm64) asset_pattern='linux_arm64.tar.gz' ;;
@@ -66,12 +66,16 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  tag="$(curl -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
+  say "获取流量统计组件信息..."
+  api_json="$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "$api" 2>/dev/null || true)"
+  [ -n "$api_json" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
+  tag="$(echo "$api_json" | jq -r '.tag_name // empty' 2>/dev/null)" || true
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
-  download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
+  download_url="$(echo "$api_json" | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' 2>/dev/null | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
-  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
+  say "下载流量统计组件..."
+  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
     return 1

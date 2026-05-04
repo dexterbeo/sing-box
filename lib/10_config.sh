@@ -230,11 +230,16 @@ enable_now_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      systemctl enable --now sing-box
+      systemctl enable sing-box >/dev/null 2>&1 || return 1
+      systemctl start sing-box >/dev/null 2>&1 || return 1
+      sleep 1
+      systemctl is-active --quiet sing-box 2>/dev/null || return 1
       ;;
     openrc)
-      openrc_enable_service sing-box default >/dev/null 2>&1
-      openrc_start_service sing-box >/dev/null 2>&1
+      openrc_enable_service sing-box default >/dev/null 2>&1 || return 1
+      openrc_start_service sing-box >/dev/null 2>&1 || return 1
+      sleep 1
+      openrc_service_running sing-box || return 1
       ;;
     *)
       err "未识别的 init 系统，无法启动 sing-box。"

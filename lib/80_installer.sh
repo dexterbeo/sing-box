@@ -187,10 +187,25 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-_cron_job_installed() {
+_cron_job_match_pattern() {
   local mark="$1"
+  case "$mark" in
+    "$USER_WATCH_CRON_MARK") echo "--user-watch" ;;
+    "$LOG_MAINTAIN_CRON_MARK") echo "--maintain-logs" ;;
+    "$TG_AGENT_CRON_MARK") echo "--tg-agent-sync" ;;
+    *) echo "$mark" ;;
+  esac
+}
+
+_cron_job_installed() {
+  local mark="$1" pattern
   has_cmd crontab || return 1
-  crontab -l 2>/dev/null | grep -Fq "$mark"
+  pattern="$(_cron_job_match_pattern "$mark")"
+  crontab -l 2>/dev/null | awk -v p="$pattern" '
+    /^[[:space:]]*#/ { next }
+    index($0, p) { found=1 }
+    END { exit !found }
+  '
 }
 
 _crond_daemon_active() {
@@ -257,9 +272,10 @@ _install_cron_job() {
   # 先让 _ensure_crond_running 负责装 cron 包 + 启动 daemon
   _ensure_crond_running || { err "cron 服务不可用（未能自动安装或启动 crond）。"; return 1; }
   # 到这里 crontab 命令必然可用（_ensure_crond_running 会主动安装）
-  local tmp
+  local tmp pattern
+  pattern="$(_cron_job_match_pattern "$mark")"
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | awk -v p="$pattern" 'index($0, p) == 0 { print }' > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
@@ -270,9 +286,10 @@ _install_cron_job() {
 _remove_cron_job() {
   local mark="$1"
   has_cmd crontab || return 0
-  local tmp
+  local tmp pattern
+  pattern="$(_cron_job_match_pattern "$mark")"
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | awk -v p="$pattern" 'index($0, p) == 0 { print }' > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -491,7 +508,7 @@ install_or_update_singbox() {
   sha_url="${base_url}/sha256sum.txt"
 
   say "下载 sing-box..."
-  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  if ! download_file "$download_url" "$tmp_dir/$file" 20 3; then
     rm -rf "$tmp_dir"
     err "下载失败，请检查网络或稍后重试。"
     pause
@@ -558,7 +575,10 @@ install_or_update_singbox() {
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
-  enable_now_singbox_safe || true
+  local singbox_started=0
+  if enable_now_singbox_safe; then
+    singbox_started=1
+  fi
   ensure_sb_shortcut || true
   say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
@@ -583,10 +603,14 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  # 所有关键步骤成功后才写入版本 stamp（事务提交点）
+  # 安装流程完成后写入版本 stamp；服务运行状态单独提示。
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
-  ok "安装完成。"
+  if [ "$singbox_started" = "1" ]; then
+    ok "安装完成。"
+  else
+    warn "安装完成，但 sing-box 未能正常运行，请进入系统工具查看状态或日志。"
+  fi
   pause
 }
 

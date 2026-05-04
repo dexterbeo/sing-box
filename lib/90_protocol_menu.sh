@@ -719,12 +719,40 @@ view_config_formatted() {
 }
 
 singbox_status_summary() {
-  local _status _version
-  if singbox_service_active; then
-    _status="${G}运行中${NC}"
-  else
-    _status="${R}已停止${NC}"
-  fi
+  local _status _version _state
+  case "$INIT_SYSTEM" in
+    systemd)
+      _state="$(systemctl is-active sing-box 2>/dev/null || true)"
+      case "$_state" in
+        active) _status="${G}运行中${NC}" ;;
+        failed) _status="${Y}异常${NC}" ;;
+        activating) _status="${Y}启动中${NC}" ;;
+        *) _status="${R}已停止${NC}" ;;
+      esac
+      ;;
+    openrc)
+      _state="$(rc-service sing-box status 2>&1 || true)"
+      case "$_state" in
+        *crashed*) _status="${Y}异常${NC}" ;;
+        *started*|*running*) _status="${G}运行中${NC}" ;;
+        *stopped*) _status="${R}已停止${NC}" ;;
+        *)
+          if singbox_service_active; then
+            _status="${G}运行中${NC}"
+          else
+            _status="${R}已停止${NC}"
+          fi
+          ;;
+      esac
+      ;;
+    *)
+      if singbox_service_active; then
+        _status="${G}运行中${NC}"
+      else
+        _status="${R}已停止${NC}"
+      fi
+      ;;
+  esac
   _version=""
   if [ -x "$SINGBOX_BIN" ]; then
     _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"

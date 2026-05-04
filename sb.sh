@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 10:15:55 UTC
+# 构建时间: 2026-05-04 11:29:28 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.2"
+SCRIPT_VERSION="6.0.3"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -343,6 +343,15 @@ run_with_timeout() {
     timeout "$seconds" "$@"
   else
     "$@"
+  fi
+}
+
+download_file() {
+  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
+  if [ -t 1 ] && [ -t 2 ]; then
+    curl -fL --progress-bar --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output"
+  else
+    curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
   fi
 }
 
@@ -907,11 +916,16 @@ enable_now_singbox_safe() {
   fi
   case "$INIT_SYSTEM" in
     systemd)
-      systemctl enable --now sing-box
+      systemctl enable sing-box >/dev/null 2>&1 || return 1
+      systemctl start sing-box >/dev/null 2>&1 || return 1
+      sleep 1
+      systemctl is-active --quiet sing-box 2>/dev/null || return 1
       ;;
     openrc)
-      openrc_enable_service sing-box default >/dev/null 2>&1
-      openrc_start_service sing-box >/dev/null 2>&1
+      openrc_enable_service sing-box default >/dev/null 2>&1 || return 1
+      openrc_start_service sing-box >/dev/null 2>&1 || return 1
+      sleep 1
+      openrc_service_running sing-box || return 1
       ;;
     *)
       err "未识别的 init 系统，无法启动 sing-box。"
@@ -2995,7 +3009,7 @@ ensure_grpcurl() {
   if [ -x "$GRPCURL_BIN" ]; then
     return 0
   fi
-  local arch asset tag api tmp_dir download_url
+  local asset_pattern tag api api_json tmp_dir download_url
   case "$(uname -m)" in
     x86_64) asset_pattern='linux_x86_64.tar.gz' ;;
     aarch64|arm64) asset_pattern='linux_arm64.tar.gz' ;;
@@ -3005,12 +3019,16 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  tag="$(curl -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
+  say "获取流量统计组件信息..."
+  api_json="$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "$api" 2>/dev/null || true)"
+  [ -n "$api_json" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
+  tag="$(echo "$api_json" | jq -r '.tag_name // empty' 2>/dev/null)" || true
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
-  download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
+  download_url="$(echo "$api_json" | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' 2>/dev/null | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
-  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
+  say "下载流量统计组件..."
+  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
     return 1
@@ -7530,10 +7548,25 @@ config_force_access_log_settings() {
 
 # ---------- Cron 管理 ----------
 
-_cron_job_installed() {
+_cron_job_match_pattern() {
   local mark="$1"
+  case "$mark" in
+    "$USER_WATCH_CRON_MARK") echo "--user-watch" ;;
+    "$LOG_MAINTAIN_CRON_MARK") echo "--maintain-logs" ;;
+    "$TG_AGENT_CRON_MARK") echo "--tg-agent-sync" ;;
+    *) echo "$mark" ;;
+  esac
+}
+
+_cron_job_installed() {
+  local mark="$1" pattern
   has_cmd crontab || return 1
-  crontab -l 2>/dev/null | grep -Fq "$mark"
+  pattern="$(_cron_job_match_pattern "$mark")"
+  crontab -l 2>/dev/null | awk -v p="$pattern" '
+    /^[[:space:]]*#/ { next }
+    index($0, p) { found=1 }
+    END { exit !found }
+  '
 }
 
 _crond_daemon_active() {
@@ -7600,9 +7633,10 @@ _install_cron_job() {
   # 先让 _ensure_crond_running 负责装 cron 包 + 启动 daemon
   _ensure_crond_running || { err "cron 服务不可用（未能自动安装或启动 crond）。"; return 1; }
   # 到这里 crontab 命令必然可用（_ensure_crond_running 会主动安装）
-  local tmp
+  local tmp pattern
+  pattern="$(_cron_job_match_pattern "$mark")"
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | awk -v p="$pattern" 'index($0, p) == 0 { print }' > "$tmp" || true
   echo "${schedule} ${cmd} >/dev/null 2>&1" >> "$tmp"
   crontab "$tmp" || { rm -f "$tmp"; err "crontab 写入失败。"; return 1; }
   rm -f "$tmp"
@@ -7613,9 +7647,10 @@ _install_cron_job() {
 _remove_cron_job() {
   local mark="$1"
   has_cmd crontab || return 0
-  local tmp
+  local tmp pattern
+  pattern="$(_cron_job_match_pattern "$mark")"
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -Fv -- "$mark" > "$tmp" || true
+  crontab -l 2>/dev/null | awk -v p="$pattern" 'index($0, p) == 0 { print }' > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
@@ -7834,7 +7869,7 @@ install_or_update_singbox() {
   sha_url="${base_url}/sha256sum.txt"
 
   say "下载 sing-box..."
-  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  if ! download_file "$download_url" "$tmp_dir/$file" 20 3; then
     rm -rf "$tmp_dir"
     err "下载失败，请检查网络或稍后重试。"
     pause
@@ -7901,7 +7936,10 @@ install_or_update_singbox() {
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
-  enable_now_singbox_safe || true
+  local singbox_started=0
+  if enable_now_singbox_safe; then
+    singbox_started=1
+  fi
   ensure_sb_shortcut || true
   say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
@@ -7926,10 +7964,14 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  # 所有关键步骤成功后才写入版本 stamp（事务提交点）
+  # 安装流程完成后写入版本 stamp；服务运行状态单独提示。
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
-  ok "安装完成。"
+  if [ "$singbox_started" = "1" ]; then
+    ok "安装完成。"
+  else
+    warn "安装完成，但 sing-box 未能正常运行，请进入系统工具查看状态或日志。"
+  fi
   pause
 }
 
@@ -8903,12 +8945,40 @@ view_config_formatted() {
 }
 
 singbox_status_summary() {
-  local _status _version
-  if singbox_service_active; then
-    _status="${G}运行中${NC}"
-  else
-    _status="${R}已停止${NC}"
-  fi
+  local _status _version _state
+  case "$INIT_SYSTEM" in
+    systemd)
+      _state="$(systemctl is-active sing-box 2>/dev/null || true)"
+      case "$_state" in
+        active) _status="${G}运行中${NC}" ;;
+        failed) _status="${Y}异常${NC}" ;;
+        activating) _status="${Y}启动中${NC}" ;;
+        *) _status="${R}已停止${NC}" ;;
+      esac
+      ;;
+    openrc)
+      _state="$(rc-service sing-box status 2>&1 || true)"
+      case "$_state" in
+        *crashed*) _status="${Y}异常${NC}" ;;
+        *started*|*running*) _status="${G}运行中${NC}" ;;
+        *stopped*) _status="${R}已停止${NC}" ;;
+        *)
+          if singbox_service_active; then
+            _status="${G}运行中${NC}"
+          else
+            _status="${R}已停止${NC}"
+          fi
+          ;;
+      esac
+      ;;
+    *)
+      if singbox_service_active; then
+        _status="${G}运行中${NC}"
+      else
+        _status="${R}已停止${NC}"
+      fi
+      ;;
+  esac
   _version=""
   if [ -x "$SINGBOX_BIN" ]; then
     _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"

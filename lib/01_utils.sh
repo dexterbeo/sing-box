@@ -39,6 +39,15 @@ run_with_timeout() {
   fi
 }
 
+download_file() {
+  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
+  if [ -t 1 ] && [ -t 2 ]; then
+    curl -fL --progress-bar --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output"
+  else
+    curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
+  fi
+}
+
 now_ms() {
   local value
   value="$(date +%s%3N 2>/dev/null || true)"

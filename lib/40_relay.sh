@@ -613,7 +613,7 @@ relay_apply_partial_state() {
 }
 
 relay_add_preset_rules() {
-  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json landing_id
+  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json has_warp_conflict=0
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -635,16 +635,15 @@ relay_add_preset_rules() {
   done
   files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
   if split_rule_has_warp_conflicts "$files_json"; then
-    relay_prompt_landing_id landing_id || { pause; return 0; }
-    split_rule_take_over_warp_to_relay "$files_json" "$landing_id" || {
+    has_warp_conflict=1
+    split_rule_confirm_warp_to_relay "$files_json" || {
       warn "已取消，未修改部分流量中转规则。"
       pause
       return 0
     }
-    relay_choose_landing_by_id_or_return "$json" "$landing_id" landing_json || { pause; return 0; }
-  else
-    relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   fi
+  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
   for pick in "${!files[@]}"; do
     relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
   done
@@ -654,7 +653,7 @@ relay_add_preset_rules() {
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json files_json landing_id
+  local raw file name landing_json json files_json has_warp_conflict=0
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -675,16 +674,15 @@ relay_custom_rule_menu() {
   name="自定义：${file%.srs}"
   files_json="$(split_rule_files_json_from_args "$file")" || return 1
   if split_rule_has_warp_conflicts "$files_json"; then
-    relay_prompt_landing_id landing_id || { pause; return 0; }
-    split_rule_take_over_warp_to_relay "$files_json" "$landing_id" || {
+    has_warp_conflict=1
+    split_rule_confirm_warp_to_relay "$files_json" || {
       warn "已取消，未修改部分流量中转规则。"
       pause
       return 0
     }
-    relay_choose_landing_by_id_or_return "$json" "$landing_id" landing_json || { pause; return 0; }
-  else
-    relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   fi
+  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
   relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
   relay_apply_partial_state || return 1
   ok "自定义部分流量中转已添加：$file"

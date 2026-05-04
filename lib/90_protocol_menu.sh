@@ -677,7 +677,9 @@ clear_config_json() {
   echo -e "${Y}--- 清空/重置配置文件 ---${NC}"
   echo -e "${Y}注意：该操作将清空当前 config.json。${NC}"
   ask_confirm_yes || { warn "已取消清空/重置。"; pause; return 0; }
-  config_reset
+  if config_reset; then
+    split_rule_clear_all_meta || warn "配置已重置，但分流状态清理失败。"
+  fi
   pause
 }
 

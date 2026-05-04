@@ -41,6 +41,13 @@ split_rule_has_warp_conflicts() {
   [ "$(echo "$conflicts" | jq 'length')" -gt 0 ]
 }
 
+split_rule_clear_all_meta() {
+  local meta_json
+  meta_json="$(meta_load)"
+  meta_json="$(echo "$meta_json" | jq 'del(.warp) | del(.relay)')" || return 1
+  meta_save "$meta_json"
+}
+
 split_rule_take_over_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
@@ -56,8 +63,8 @@ split_rule_take_over_relay_to_warp() {
   relay_rule_remove_meta_by_files_json "$files_json"
 }
 
-split_rule_take_over_warp_to_relay() {
-  local files_json="$1" landing_id="$2" conflicts count
+split_rule_confirm_warp_to_relay() {
+  local files_json="$1" conflicts count
   conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
   count="$(echo "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
@@ -67,6 +74,10 @@ split_rule_take_over_warp_to_relay() {
     .[]?
     | "  - \(.name // .file)：\(.file // "")"
   '
-  ask_confirm_yn "是否改为中转至落地${landing_id}？(y/N): " || return 1
+  ask_confirm_yn "是否改为部分流量中转？(y/N): " || return 1
+}
+
+split_rule_take_over_warp_to_relay() {
+  local files_json="$1"
   warp_rule_remove_meta_by_files_json "$files_json"
 }

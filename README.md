@@ -103,8 +103,9 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 ```bash
 rm -f /root/sb.sh
 rm -f /usr/local/bin/s
-rm -rf /etc/sing-box
 rm -rf /etc/sing-box-manager
+rm -rf /etc/sing-box
 rm -rf /var/log/sing-box
-rm -rf /var/lib/sing-box
+rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock
+rm -rf /var/lock/singbox-tg-agent.lock.d
 ```

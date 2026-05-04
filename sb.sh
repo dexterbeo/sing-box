@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 03:28:13 UTC
+# 构建时间: 2026-05-04 05:26:55 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.8.8"
+SCRIPT_VERSION="5.9.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -372,8 +372,22 @@ pkg_update_once() {
   local stamp="/tmp/.sb_pkg_updated"
   [ -f "$stamp" ] && return 0
   case "$PKG_MANAGER" in
-    apt) say "更新包索引..."; apt-get update -y ;;
-    apk) say "更新包索引..."; apk update -q ;;
+    apt)
+      [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "更新包索引..."
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apt-get update -y >/dev/null 2>&1
+      else
+        apt-get update -y
+      fi
+      ;;
+    apk)
+      [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "更新包索引..."
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apk update -q >/dev/null 2>&1
+      else
+        apk update -q
+      fi
+      ;;
   esac
   touch "$stamp"
 }
@@ -382,10 +396,22 @@ install_pkg() {
   local pkg="$1"
   pkg_installed "$pkg" && return 0
   pkg_update_once
-  say "安装依赖: $pkg"
+  [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "安装依赖: $pkg"
   case "$PKG_MANAGER" in
-    apt) apt-get install -y "$pkg" ;;
-    apk) apk add -q "$pkg" ;;
+    apt)
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apt-get install -y "$pkg" >/dev/null 2>&1 || { err "依赖安装失败：$pkg"; return 1; }
+      else
+        apt-get install -y "$pkg"
+      fi
+      ;;
+    apk)
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apk add -q "$pkg" >/dev/null 2>&1 || { err "依赖安装失败：$pkg"; return 1; }
+      else
+        apk add -q "$pkg"
+      fi
+      ;;
     *)   err "不支持的包管理器，请手动安装: $pkg"; return 1 ;;
   esac
 }
@@ -2109,12 +2135,12 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  tag="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
+  tag="$(curl -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
-  download_url="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
+  download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(mktemp -d)"
-  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
+  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
     return 1
@@ -3466,6 +3492,31 @@ tg_config_save() {
   fi
 }
 
+tg_config_enabled_value() {
+  local cfg="$1"
+  echo "$cfg" | jq -r '
+    if has("enabled") then
+      (.enabled == true)
+    else
+      ((.role // "") == "center" or (.role // "") == "agent")
+    end
+  '
+}
+
+tg_config_is_enabled() {
+  local cfg="${1:-}"
+  [ -n "$cfg" ] || cfg="$(tg_config_load)"
+  [ "$(tg_config_enabled_value "$cfg")" = "true" ]
+}
+
+tg_mark_disabled_keep_config() {
+  [ -s "$TG_CONFIG_FILE" ] || return 0
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq '.enabled = false')" || return 1
+  tg_config_save "$cfg"
+}
+
 tg_generate_secret() {
   local raw
   raw="$(openssl rand -hex 16 2>/dev/null || true)"
@@ -3695,9 +3746,10 @@ def is_admin(cfg, tg_id):
 
 
 def user_home_keyboard(bindings=None):
+    bindings = bindings or []
     rows = []
     row = []
-    for idx, binding in enumerate(bindings or []):
+    for idx, binding in enumerate(bindings):
         label = binding.get("vps_name") or binding.get("vps_id") or str(idx + 1)
         row.append({"text": label, "callback_data": f"u:detail:{idx}"})
         if len(row) == 2:
@@ -3705,8 +3757,18 @@ def user_home_keyboard(bindings=None):
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "解除绑定", "callback_data": "u:bind"}])
+    if bindings:
+        rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "解除绑定", "callback_data": "u:bind"}])
     return rows
+
+
+def render_unbound_user_state(chat_id, message_id=None, text=None):
+    render_page(
+        chat_id,
+        text or "当前没有绑定。\n请联系管理员生成绑定链接。",
+        None,
+        message_id,
+    )
 
 
 def back_keyboard(back_to):
@@ -3776,7 +3838,7 @@ def user_status(chat_id, tg_id, message_id=None):
     cfg = load_config()
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", user_home_keyboard(), message_id)
+        render_unbound_user_state(chat_id, message_id)
         return
     lines = ["我的绑定", ""]
     for b in bindings:
@@ -3868,7 +3930,7 @@ def do_unbind(chat_id, tg_id, idx, message_id=None):
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
         save_config(cfg)
-    render_page(chat_id, "绑定已解除。", user_home_keyboard(), message_id)
+    render_unbound_user_state(chat_id, message_id, "绑定已解除。\n当前没有绑定。")
 
 
 def quota_text(quota):
@@ -5112,8 +5174,10 @@ tg_prepare_report_state() {
 }
 
 tg_agent_sync_once() {
-  local cfg role center_url secret vps_id
+  local cfg enabled role center_url secret vps_id
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  [ "$enabled" = "true" ] || return 1
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
@@ -5134,8 +5198,10 @@ tg_agent_sync_once() {
 }
 
 tg_agent_poll_tasks_once() {
-  local cfg role center_url secret vps_id
+  local cfg enabled role center_url secret vps_id
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  [ "$enabled" = "true" ] || return 1
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
@@ -5162,7 +5228,9 @@ tg_agent_sync_now() {
 }
 
 tg_agent_sync() {
-  local lock_fd lock_dir i
+  local cfg lock_fd lock_dir i
+  cfg="$(tg_config_load)"
+  tg_config_is_enabled "$cfg" || return 0
   mkdir -p "$(dirname "$TG_AGENT_LOCK_FILE")" 2>/dev/null || true
   if has_cmd flock && { exec {lock_fd}>"$TG_AGENT_LOCK_FILE"; } 2>/dev/null; then
     flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
@@ -5181,6 +5249,47 @@ tg_agent_sync() {
   done
   [ -n "${lock_fd:-}" ] && exec {lock_fd}>&-
   [ -n "${lock_dir:-}" ] && rmdir "$lock_dir" 2>/dev/null || true
+}
+
+tg_refresh_after_singbox_install() {
+  local cfg enabled role
+  cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  [ "$enabled" = "true" ] || return 0
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || return 0
+
+  say "刷新 TG Bot..."
+  if [ "$role" = "center" ]; then
+    if ! tg_install_center_service; then
+      warn "TG Bot 服务刷新失败，请稍后进入 TG Bot 管理检查。"
+      return 0
+    fi
+  fi
+  install_tg_agent_cron >/dev/null 2>&1 || warn "TG Bot 上报任务刷新失败。"
+  if tg_agent_sync_now; then
+    ok "TG Bot 已刷新，本机数据已立即上报。"
+  else
+    warn "TG Bot 已刷新，但本机立即上报失败，定时任务会继续自动上报。"
+  fi
+}
+
+tg_start_existing_config() {
+  local cfg enabled_cfg role
+  cfg="$(tg_config_load)"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "未找到可启动的 TG Bot 配置。"; return 1; }
+  enabled_cfg="$(echo "$cfg" | jq '.enabled = true')" || return 1
+  if [ "$role" = "center" ]; then
+    tg_install_center_service || { err "主控服务启动失败。"; return 1; }
+  fi
+  install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; return 1; }
+  tg_config_save "$enabled_cfg" || { err "TG Bot 配置保存失败。"; return 1; }
+  if tg_agent_sync_now; then
+    ok "TG Bot 已启动，本机数据已立即上报。"
+  else
+    warn "TG Bot 已启动，但首次上报失败，请检查服务状态或稍后再试。"
+  fi
 }
 
 tg_setup_center() {
@@ -5274,12 +5383,26 @@ tg_setup_agent() {
 }
 
 tg_setup_menu() {
+  local cfg enabled role ans
   clear
-  print_rect_title "设置TG Bot"
+  print_rect_title "设置/启动TG Bot"
+  cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
+    read -r -p "检测到已保留配置，是否直接启动？[Y/n]: " ans
+    case "${ans:-Y}" in
+      [Nn]*) ;;
+      *)
+        tg_start_existing_config
+        pause
+        return
+        ;;
+    esac
+  fi
   echo "  1. 主控节点"
   echo "  2. 普通节点"
   echo "  0. 返回上一级"
-  local role
   read -r -p "请选择本机模式: " role
   case "${role:-}" in
     1) tg_setup_center ;;
@@ -5290,10 +5413,11 @@ tg_setup_menu() {
 }
 
 tg_generate_bind_link_menu() {
-  local cfg role center_url secret db_json usernames=() ans username payload resp link
+  local cfg enabled role center_url secret db_json usernames=() ans username payload resp link
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "请先设置TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
   user_db_exists || { warn "用户数据库不存在，请先安装并创建用户。"; pause; return 0; }
   db_json="$(user_db_load)"
   mapfile -t usernames < <(echo "$db_json" | jq -r '.users | keys[] | select(. != "admin")')
@@ -5337,10 +5461,11 @@ tg_generate_bind_link_menu() {
 }
 
 tg_notify_test() {
-  local cfg role center_url secret payload resp ok_value err_msg
+  local cfg enabled role center_url secret payload resp ok_value err_msg
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "请先设置TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
     secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
@@ -5380,11 +5505,12 @@ tg_prune_offline_reports() {
 }
 
 tg_reload_center_service_menu() {
-  local cfg role pruned_count
+  local cfg enabled role pruned_count
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  if [ "$role" != "center" ]; then
-    warn "只有主控节点需要更新/重启 TG Bot 服务。"
+  if [ "$enabled" != "true" ] || [ "$role" != "center" ]; then
+    warn "只有已启动的主控节点需要更新/重启 TG Bot 服务。"
     pause
     return 1
   fi
@@ -5405,14 +5531,24 @@ tg_reload_center_service_menu() {
 
 tg_disable_menu() {
   clear
-  print_rect_title "关闭TG Bot"
-  warn "该操作将停止 TG Bot，删除定时任务，并清除 TG Bot 配置。"
-  ask_confirm_yes "输入 YES 确认关闭并清除 TG Bot 配置: " || { warn "已取消关闭TG Bot。"; pause; return 0; }
+  print_rect_title "卸载/停止TG Bot"
+  warn "该操作将停止 TG Bot 服务和上报任务。"
+  local keep_cfg
+  read -r -p "是否保留 TG Bot 配置？[Y/n]: " keep_cfg
   remove_tg_agent_cron || true
   tg_stop_center_service || true
-  rm -f "$TG_CONFIG_FILE" "$TG_CENTER_APP" >/dev/null 2>&1 || true
+  rm -f "$TG_CENTER_APP" >/dev/null 2>&1 || true
   rmdir "${TG_AGENT_LOCK_FILE}.d" >/dev/null 2>&1 || true
-  ok "TG Bot 已关闭，配置已清除。"
+  case "${keep_cfg:-Y}" in
+    [Nn]*)
+      rm -f "$TG_CONFIG_FILE" >/dev/null 2>&1 || true
+      ok "TG Bot 已停止，配置已删除。"
+      ;;
+    *)
+      tg_mark_disabled_keep_config || warn "TG Bot 配置状态保存失败。"
+      ok "TG Bot 已停止，配置已保留。"
+      ;;
+  esac
   pause
 }
 
@@ -5420,13 +5556,14 @@ telegram_bot_manager_menu() {
   while true; do
     clear
     print_rect_title "Telegram Bot 管理"
-    local cfg role role_label vps_name center_url access_secret
+    local cfg enabled role role_label vps_name center_url access_secret
     cfg="$(tg_config_load)"
+    enabled="$(tg_config_enabled_value "$cfg")"
     role="$(echo "$cfg" | jq -r '.role // "未设置"')"
     vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
     center_url="$(echo "$cfg" | jq -r '.center_url // ""')"
     access_secret="$(echo "$cfg" | jq -r '.access_secret // ""')"
-    if [ "$role" = "center" ] || [ "$role" = "agent" ]; then
+    if [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
       install_tg_agent_cron >/dev/null 2>&1 || true
     fi
     case "$role" in
@@ -5435,6 +5572,9 @@ telegram_bot_manager_menu() {
       ""|"未设置") role_label="未设置" ;;
       *) role_label="$role" ;;
     esac
+    if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
+      role_label="${role_label}（已停止）"
+    fi
     echo "当前模式：$role_label"
     [ -n "$vps_name" ] && echo "本机名称：$vps_name"
     [ -n "$center_url" ] && echo "主控地址：$center_url"
@@ -5442,14 +5582,14 @@ telegram_bot_manager_menu() {
       echo "接入密钥：$access_secret"
     fi
     echo -e "${B}--------------------------------------------------------${NC}"
-    echo "  1. 设置TG Bot"
+    echo "  1. 设置/启动TG Bot"
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
-    if [ "$role" = "center" ]; then
+    if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
       echo "  4. 更新/重启TG Bot"
-      echo "  5. 关闭TG Bot"
+      echo "  5. 卸载/停止TG Bot"
     else
-      echo "  4. 关闭TG Bot"
+      echo "  4. 卸载/停止TG Bot"
     fi
     echo "  0. 返回上一级"
     local act
@@ -5459,14 +5599,14 @@ telegram_bot_manager_menu() {
       2) tg_generate_bind_link_menu ;;
       3) tg_notify_test ;;
       4)
-        if [ "$role" = "center" ]; then
+        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
           tg_reload_center_service_menu
         else
           tg_disable_menu
         fi
         ;;
       5)
-        if [ "$role" = "center" ]; then
+        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
           tg_disable_menu
         else
           warn "无效输入：$act"; sleep 1
@@ -6251,7 +6391,8 @@ export_configs() {
 ensure_deps_for_installer() {
   require_root
   [ "$PKG_MANAGER" = "unknown" ] && { err "未找到受支持的包管理器（apt-get 或 apk）。"; exit 1; }
-  say "检查并安装必要依赖..."
+  say "安装必要依赖..."
+  local _PKG_INSTALL_QUIET=1
   install_pkg curl
   install_pkg jq
   install_pkg openssl
@@ -6291,7 +6432,7 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl_maybe_warp -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
@@ -6629,6 +6770,15 @@ is_script_managed_environment() {
   return 0
 }
 
+refresh_command_cache() {
+  hash -r 2>/dev/null || true
+}
+
+singbox_command_exists() {
+  refresh_command_cache
+  command -v sing-box >/dev/null 2>&1
+}
+
 prepare_script_runtime() {
   migrate_legacy_script_name
   write_managed_singbox_service
@@ -6644,8 +6794,6 @@ install_or_update_singbox() {
   print_rect_title "sing-box 安装/更新"
 
   ensure_deps_for_installer
-
-  sync_user_usage_counters || true
 
   local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url managed_env
   arch="$(uname -m)"
@@ -6664,6 +6812,7 @@ install_or_update_singbox() {
   tag="$(get_release_latest_tag)"
   latest_ver="$(normalize_release_tag "$tag")"
 
+  refresh_command_cache
   managed_env="0"
   inst=""
   if is_script_managed_environment; then
@@ -6677,7 +6826,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  if [ "${managed_env}" != "1" ] && command -v sing-box >/dev/null 2>&1; then
+  if [ "${managed_env}" != "1" ] && singbox_command_exists; then
     warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
     pause >&2
     return 0
@@ -6711,25 +6860,25 @@ install_or_update_singbox() {
     echo -e "将安装版本：${G}${latest_ver}${NC}"
   fi
 
+  if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
+    sync_user_usage_counters || true
+  fi
+
   tmp_dir="$(mktemp -d)"
   base_url="https://github.com/${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}/releases/download/${tag}"
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  if local_warp_socks_proxy_url >/dev/null 2>&1; then
-    say "检测到本机 WARP SOCKS，将优先通过 WARP 下载 sing-box。"
-  fi
-
-  say "下载 sing-box ${latest_ver}..."
-  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  say "下载 sing-box..."
+  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
-    err "下载失败。"
+    err "下载失败，请检查网络或稍后重试。"
     pause
     return 1
   fi
 
   say "校验安装包..."
-  if curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+  if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then
@@ -6741,9 +6890,10 @@ install_or_update_singbox() {
       return 1
     fi
   else
-    warn "未获取到 sha256sum.txt，跳过校验。"
+    warn "未获取到校验文件，已跳过校验。"
   fi
 
+  say "安装 sing-box..."
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
     err "解压失败。"
@@ -6783,11 +6933,13 @@ install_or_update_singbox() {
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
+  say "初始化服务与定时任务..."
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
+  say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"
@@ -6808,11 +6960,12 @@ install_or_update_singbox() {
     pause
     return 1
   }
+  tg_refresh_after_singbox_install || true
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
-  ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
+  ok "安装完成。"
   pause
 }
 
@@ -6972,18 +7125,61 @@ sync_system_time_chrony() {
 
 # ---------- 卸载 ----------
 
+wireproxy_warp_environment_present() {
+  [ -s /etc/wireguard/proxy.conf ] && return 0
+  local_warp_socks_proxy_url >/dev/null 2>&1 && return 0
+  if has_cmd pgrep && pgrep -x wireproxy >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+print_full_cleanup_hint() {
+  echo
+  echo "如需彻底删除脚本与相关配置，可在退出脚本后手动执行："
+  echo "rm -f /root/sb.sh"
+  echo "rm -f /usr/local/bin/s"
+  echo "rm -rf /etc/sing-box-manager"
+  echo "rm -rf /etc/sing-box"
+  echo "rm -rf /var/log/sing-box"
+  echo "rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock"
+  echo "rm -rf /var/lock/singbox-tg-agent.lock.d"
+}
+
+print_wireproxy_cleanup_hint_if_present() {
+  wireproxy_warp_environment_present || return 0
+  echo
+  echo "检测到 WireProxy/WARP 仍存在。"
+  echo
+  echo "如需卸载 WARP，可在退出脚本后执行："
+  echo "wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
+  echo "bash menu.sh u"
+}
+
 uninstall_singbox_keep_config() {
   require_root
   clear
-  echo -e "${R}--- 卸载 sing-box（保留 /etc/sing-box/ 配置）---${NC}"
-  echo -e "${Y}注意：该操作将卸载接管层、官方安装残留、cron 与运行文件，但保留配置、用户数据、日志文件。${NC}"
-  ask_confirm_yes || { warn "已取消卸载。"; pause; return 0; }
+  print_rect_title "卸载 sing-box"
+  echo "该操作将停止并删除 sing-box 运行组件："
+  echo "  - sing-box 服务"
+  echo "  - sing-box 主程序"
+  echo "  - 流量统计/日志维护定时任务"
+  echo "  - TG Bot 服务与上报任务"
+  echo
+  echo "以下内容会保留："
+  echo "  - sing-box 配置：/etc/sing-box"
+  echo "  - 用户数据与 TG 配置：/etc/sing-box-manager"
+  echo "  - 日志文件：/var/log/sing-box"
+  echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
+  echo
+  ask_confirm_yes "输入 YES 确认卸载: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   tg_stop_center_service || true
+  tg_mark_disabled_keep_config || true
   remove_all_singbox_service_units
   # 清理官方包可能创建的系统用户/组
   if has_cmd deluser; then
@@ -6997,6 +7193,7 @@ uninstall_singbox_keep_config() {
     groupdel sing-box >/dev/null 2>&1 || true
   fi
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
@@ -7010,12 +7207,11 @@ uninstall_singbox_keep_config() {
         pkg_installed sing-box-beta && apk del sing-box-beta >/dev/null 2>&1 || true
         ;;
     esac
-    ok "已清理脚本运行层并卸载官方包残留（如存在）。"
-  else
-    ok "已清理脚本运行层（如存在）。"
   fi
-  [ -d /etc/sing-box ] && ok "配置目录仍存在：/etc/sing-box" || warn "未找到 /etc/sing-box"
-  [ -d "$(dirname "$USER_DB_FILE")" ] && ok "用户数据库目录仍存在：$(dirname "$USER_DB_FILE")" || true
+  refresh_command_cache
+  ok "卸载完成，配置和用户数据已保留。"
+  print_full_cleanup_hint
+  print_wireproxy_cleanup_hint_if_present
   pause
 }
 

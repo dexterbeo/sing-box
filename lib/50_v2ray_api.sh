@@ -66,12 +66,12 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  tag="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
+  tag="$(curl -fsSL "$api" 2>/dev/null | jq -r '.tag_name // empty')" || true
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
-  download_url="$(curl_maybe_warp -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
+  download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(mktemp -d)"
-  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
+  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
     return 1

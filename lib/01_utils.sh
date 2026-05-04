@@ -70,8 +70,22 @@ pkg_update_once() {
   local stamp="/tmp/.sb_pkg_updated"
   [ -f "$stamp" ] && return 0
   case "$PKG_MANAGER" in
-    apt) say "更新包索引..."; apt-get update -y ;;
-    apk) say "更新包索引..."; apk update -q ;;
+    apt)
+      [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "更新包索引..."
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apt-get update -y >/dev/null 2>&1
+      else
+        apt-get update -y
+      fi
+      ;;
+    apk)
+      [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "更新包索引..."
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apk update -q >/dev/null 2>&1
+      else
+        apk update -q
+      fi
+      ;;
   esac
   touch "$stamp"
 }
@@ -80,10 +94,22 @@ install_pkg() {
   local pkg="$1"
   pkg_installed "$pkg" && return 0
   pkg_update_once
-  say "安装依赖: $pkg"
+  [ "${_PKG_INSTALL_QUIET:-0}" = "1" ] || say "安装依赖: $pkg"
   case "$PKG_MANAGER" in
-    apt) apt-get install -y "$pkg" ;;
-    apk) apk add -q "$pkg" ;;
+    apt)
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apt-get install -y "$pkg" >/dev/null 2>&1 || { err "依赖安装失败：$pkg"; return 1; }
+      else
+        apt-get install -y "$pkg"
+      fi
+      ;;
+    apk)
+      if [ "${_PKG_INSTALL_QUIET:-0}" = "1" ]; then
+        apk add -q "$pkg" >/dev/null 2>&1 || { err "依赖安装失败：$pkg"; return 1; }
+      else
+        apk add -q "$pkg"
+      fi
+      ;;
     *)   err "不支持的包管理器，请手动安装: $pkg"; return 1 ;;
   esac
 }

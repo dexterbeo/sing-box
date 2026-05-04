@@ -56,6 +56,31 @@ tg_config_save() {
   fi
 }
 
+tg_config_enabled_value() {
+  local cfg="$1"
+  echo "$cfg" | jq -r '
+    if has("enabled") then
+      (.enabled == true)
+    else
+      ((.role // "") == "center" or (.role // "") == "agent")
+    end
+  '
+}
+
+tg_config_is_enabled() {
+  local cfg="${1:-}"
+  [ -n "$cfg" ] || cfg="$(tg_config_load)"
+  [ "$(tg_config_enabled_value "$cfg")" = "true" ]
+}
+
+tg_mark_disabled_keep_config() {
+  [ -s "$TG_CONFIG_FILE" ] || return 0
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq '.enabled = false')" || return 1
+  tg_config_save "$cfg"
+}
+
 tg_generate_secret() {
   local raw
   raw="$(openssl rand -hex 16 2>/dev/null || true)"
@@ -285,9 +310,10 @@ def is_admin(cfg, tg_id):
 
 
 def user_home_keyboard(bindings=None):
+    bindings = bindings or []
     rows = []
     row = []
-    for idx, binding in enumerate(bindings or []):
+    for idx, binding in enumerate(bindings):
         label = binding.get("vps_name") or binding.get("vps_id") or str(idx + 1)
         row.append({"text": label, "callback_data": f"u:detail:{idx}"})
         if len(row) == 2:
@@ -295,8 +321,18 @@ def user_home_keyboard(bindings=None):
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "解除绑定", "callback_data": "u:bind"}])
+    if bindings:
+        rows.append([{"text": "提醒设置", "callback_data": "u:notify"}, {"text": "解除绑定", "callback_data": "u:bind"}])
     return rows
+
+
+def render_unbound_user_state(chat_id, message_id=None, text=None):
+    render_page(
+        chat_id,
+        text or "当前没有绑定。\n请联系管理员生成绑定链接。",
+        None,
+        message_id,
+    )
 
 
 def back_keyboard(back_to):
@@ -366,7 +402,7 @@ def user_status(chat_id, tg_id, message_id=None):
     cfg = load_config()
     bindings = user_bindings(cfg, tg_id)
     if not bindings:
-        render_page(chat_id, "当前没有绑定的用户。\n请通过管理员生成的绑定链接完成绑定。", user_home_keyboard(), message_id)
+        render_unbound_user_state(chat_id, message_id)
         return
     lines = ["我的绑定", ""]
     for b in bindings:
@@ -458,7 +494,7 @@ def do_unbind(chat_id, tg_id, idx, message_id=None):
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
         save_config(cfg)
-    render_page(chat_id, "绑定已解除。", user_home_keyboard(), message_id)
+    render_unbound_user_state(chat_id, message_id, "绑定已解除。\n当前没有绑定。")
 
 
 def quota_text(quota):
@@ -1702,8 +1738,10 @@ tg_prepare_report_state() {
 }
 
 tg_agent_sync_once() {
-  local cfg role center_url secret vps_id
+  local cfg enabled role center_url secret vps_id
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  [ "$enabled" = "true" ] || return 1
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
@@ -1724,8 +1762,10 @@ tg_agent_sync_once() {
 }
 
 tg_agent_poll_tasks_once() {
-  local cfg role center_url secret vps_id
+  local cfg enabled role center_url secret vps_id
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  [ "$enabled" = "true" ] || return 1
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 1
   user_db_exists || return 1
@@ -1752,7 +1792,9 @@ tg_agent_sync_now() {
 }
 
 tg_agent_sync() {
-  local lock_fd lock_dir i
+  local cfg lock_fd lock_dir i
+  cfg="$(tg_config_load)"
+  tg_config_is_enabled "$cfg" || return 0
   mkdir -p "$(dirname "$TG_AGENT_LOCK_FILE")" 2>/dev/null || true
   if has_cmd flock && { exec {lock_fd}>"$TG_AGENT_LOCK_FILE"; } 2>/dev/null; then
     flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
@@ -1771,6 +1813,47 @@ tg_agent_sync() {
   done
   [ -n "${lock_fd:-}" ] && exec {lock_fd}>&-
   [ -n "${lock_dir:-}" ] && rmdir "$lock_dir" 2>/dev/null || true
+}
+
+tg_refresh_after_singbox_install() {
+  local cfg enabled role
+  cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  [ "$enabled" = "true" ] || return 0
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || return 0
+
+  say "刷新 TG Bot..."
+  if [ "$role" = "center" ]; then
+    if ! tg_install_center_service; then
+      warn "TG Bot 服务刷新失败，请稍后进入 TG Bot 管理检查。"
+      return 0
+    fi
+  fi
+  install_tg_agent_cron >/dev/null 2>&1 || warn "TG Bot 上报任务刷新失败。"
+  if tg_agent_sync_now; then
+    ok "TG Bot 已刷新，本机数据已立即上报。"
+  else
+    warn "TG Bot 已刷新，但本机立即上报失败，定时任务会继续自动上报。"
+  fi
+}
+
+tg_start_existing_config() {
+  local cfg enabled_cfg role
+  cfg="$(tg_config_load)"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "未找到可启动的 TG Bot 配置。"; return 1; }
+  enabled_cfg="$(echo "$cfg" | jq '.enabled = true')" || return 1
+  if [ "$role" = "center" ]; then
+    tg_install_center_service || { err "主控服务启动失败。"; return 1; }
+  fi
+  install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; return 1; }
+  tg_config_save "$enabled_cfg" || { err "TG Bot 配置保存失败。"; return 1; }
+  if tg_agent_sync_now; then
+    ok "TG Bot 已启动，本机数据已立即上报。"
+  else
+    warn "TG Bot 已启动，但首次上报失败，请检查服务状态或稍后再试。"
+  fi
 }
 
 tg_setup_center() {
@@ -1864,12 +1947,26 @@ tg_setup_agent() {
 }
 
 tg_setup_menu() {
+  local cfg enabled role ans
   clear
-  print_rect_title "设置TG Bot"
+  print_rect_title "设置/启动TG Bot"
+  cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
+  role="$(echo "$cfg" | jq -r '.role // empty')"
+  if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
+    read -r -p "检测到已保留配置，是否直接启动？[Y/n]: " ans
+    case "${ans:-Y}" in
+      [Nn]*) ;;
+      *)
+        tg_start_existing_config
+        pause
+        return
+        ;;
+    esac
+  fi
   echo "  1. 主控节点"
   echo "  2. 普通节点"
   echo "  0. 返回上一级"
-  local role
   read -r -p "请选择本机模式: " role
   case "${role:-}" in
     1) tg_setup_center ;;
@@ -1880,10 +1977,11 @@ tg_setup_menu() {
 }
 
 tg_generate_bind_link_menu() {
-  local cfg role center_url secret db_json usernames=() ans username payload resp link
+  local cfg enabled role center_url secret db_json usernames=() ans username payload resp link
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "请先设置TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
   user_db_exists || { warn "用户数据库不存在，请先安装并创建用户。"; pause; return 0; }
   db_json="$(user_db_load)"
   mapfile -t usernames < <(echo "$db_json" | jq -r '.users | keys[] | select(. != "admin")')
@@ -1927,10 +2025,11 @@ tg_generate_bind_link_menu() {
 }
 
 tg_notify_test() {
-  local cfg role center_url secret payload resp ok_value err_msg
+  local cfg enabled role center_url secret payload resp ok_value err_msg
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "请先设置TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
     secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
@@ -1970,11 +2069,12 @@ tg_prune_offline_reports() {
 }
 
 tg_reload_center_service_menu() {
-  local cfg role pruned_count
+  local cfg enabled role pruned_count
   cfg="$(tg_config_load)"
+  enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  if [ "$role" != "center" ]; then
-    warn "只有主控节点需要更新/重启 TG Bot 服务。"
+  if [ "$enabled" != "true" ] || [ "$role" != "center" ]; then
+    warn "只有已启动的主控节点需要更新/重启 TG Bot 服务。"
     pause
     return 1
   fi
@@ -1995,14 +2095,24 @@ tg_reload_center_service_menu() {
 
 tg_disable_menu() {
   clear
-  print_rect_title "关闭TG Bot"
-  warn "该操作将停止 TG Bot，删除定时任务，并清除 TG Bot 配置。"
-  ask_confirm_yes "输入 YES 确认关闭并清除 TG Bot 配置: " || { warn "已取消关闭TG Bot。"; pause; return 0; }
+  print_rect_title "卸载/停止TG Bot"
+  warn "该操作将停止 TG Bot 服务和上报任务。"
+  local keep_cfg
+  read -r -p "是否保留 TG Bot 配置？[Y/n]: " keep_cfg
   remove_tg_agent_cron || true
   tg_stop_center_service || true
-  rm -f "$TG_CONFIG_FILE" "$TG_CENTER_APP" >/dev/null 2>&1 || true
+  rm -f "$TG_CENTER_APP" >/dev/null 2>&1 || true
   rmdir "${TG_AGENT_LOCK_FILE}.d" >/dev/null 2>&1 || true
-  ok "TG Bot 已关闭，配置已清除。"
+  case "${keep_cfg:-Y}" in
+    [Nn]*)
+      rm -f "$TG_CONFIG_FILE" >/dev/null 2>&1 || true
+      ok "TG Bot 已停止，配置已删除。"
+      ;;
+    *)
+      tg_mark_disabled_keep_config || warn "TG Bot 配置状态保存失败。"
+      ok "TG Bot 已停止，配置已保留。"
+      ;;
+  esac
   pause
 }
 
@@ -2010,13 +2120,14 @@ telegram_bot_manager_menu() {
   while true; do
     clear
     print_rect_title "Telegram Bot 管理"
-    local cfg role role_label vps_name center_url access_secret
+    local cfg enabled role role_label vps_name center_url access_secret
     cfg="$(tg_config_load)"
+    enabled="$(tg_config_enabled_value "$cfg")"
     role="$(echo "$cfg" | jq -r '.role // "未设置"')"
     vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
     center_url="$(echo "$cfg" | jq -r '.center_url // ""')"
     access_secret="$(echo "$cfg" | jq -r '.access_secret // ""')"
-    if [ "$role" = "center" ] || [ "$role" = "agent" ]; then
+    if [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
       install_tg_agent_cron >/dev/null 2>&1 || true
     fi
     case "$role" in
@@ -2025,6 +2136,9 @@ telegram_bot_manager_menu() {
       ""|"未设置") role_label="未设置" ;;
       *) role_label="$role" ;;
     esac
+    if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
+      role_label="${role_label}（已停止）"
+    fi
     echo "当前模式：$role_label"
     [ -n "$vps_name" ] && echo "本机名称：$vps_name"
     [ -n "$center_url" ] && echo "主控地址：$center_url"
@@ -2032,14 +2146,14 @@ telegram_bot_manager_menu() {
       echo "接入密钥：$access_secret"
     fi
     echo -e "${B}--------------------------------------------------------${NC}"
-    echo "  1. 设置TG Bot"
+    echo "  1. 设置/启动TG Bot"
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
-    if [ "$role" = "center" ]; then
+    if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
       echo "  4. 更新/重启TG Bot"
-      echo "  5. 关闭TG Bot"
+      echo "  5. 卸载/停止TG Bot"
     else
-      echo "  4. 关闭TG Bot"
+      echo "  4. 卸载/停止TG Bot"
     fi
     echo "  0. 返回上一级"
     local act
@@ -2049,14 +2163,14 @@ telegram_bot_manager_menu() {
       2) tg_generate_bind_link_menu ;;
       3) tg_notify_test ;;
       4)
-        if [ "$role" = "center" ]; then
+        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
           tg_reload_center_service_menu
         else
           tg_disable_menu
         fi
         ;;
       5)
-        if [ "$role" = "center" ]; then
+        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
           tg_disable_menu
         else
           warn "无效输入：$act"; sleep 1

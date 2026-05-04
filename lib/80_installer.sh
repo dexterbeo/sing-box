@@ -10,7 +10,8 @@
 ensure_deps_for_installer() {
   require_root
   [ "$PKG_MANAGER" = "unknown" ] && { err "未找到受支持的包管理器（apt-get 或 apk）。"; exit 1; }
-  say "检查并安装必要依赖..."
+  say "安装必要依赖..."
+  local _PKG_INSTALL_QUIET=1
   install_pkg curl
   install_pkg jq
   install_pkg openssl
@@ -50,7 +51,7 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl_maybe_warp -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
@@ -388,6 +389,15 @@ is_script_managed_environment() {
   return 0
 }
 
+refresh_command_cache() {
+  hash -r 2>/dev/null || true
+}
+
+singbox_command_exists() {
+  refresh_command_cache
+  command -v sing-box >/dev/null 2>&1
+}
+
 prepare_script_runtime() {
   migrate_legacy_script_name
   write_managed_singbox_service
@@ -403,8 +413,6 @@ install_or_update_singbox() {
   print_rect_title "sing-box 安装/更新"
 
   ensure_deps_for_installer
-
-  sync_user_usage_counters || true
 
   local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url managed_env
   arch="$(uname -m)"
@@ -423,6 +431,7 @@ install_or_update_singbox() {
   tag="$(get_release_latest_tag)"
   latest_ver="$(normalize_release_tag "$tag")"
 
+  refresh_command_cache
   managed_env="0"
   inst=""
   if is_script_managed_environment; then
@@ -436,7 +445,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  if [ "${managed_env}" != "1" ] && command -v sing-box >/dev/null 2>&1; then
+  if [ "${managed_env}" != "1" ] && singbox_command_exists; then
     warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
     pause >&2
     return 0
@@ -470,25 +479,25 @@ install_or_update_singbox() {
     echo -e "将安装版本：${G}${latest_ver}${NC}"
   fi
 
+  if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
+    sync_user_usage_counters || true
+  fi
+
   tmp_dir="$(mktemp -d)"
   base_url="https://github.com/${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}/releases/download/${tag}"
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  if local_warp_socks_proxy_url >/dev/null 2>&1; then
-    say "检测到本机 WARP SOCKS，将优先通过 WARP 下载 sing-box。"
-  fi
-
-  say "下载 sing-box ${latest_ver}..."
-  if ! curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
+  say "下载 sing-box..."
+  if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/$file"; then
     rm -rf "$tmp_dir"
-    err "下载失败。"
+    err "下载失败，请检查网络或稍后重试。"
     pause
     return 1
   fi
 
   say "校验安装包..."
-  if curl_maybe_warp -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+  if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then
@@ -500,9 +509,10 @@ install_or_update_singbox() {
       return 1
     fi
   else
-    warn "未获取到 sha256sum.txt，跳过校验。"
+    warn "未获取到校验文件，已跳过校验。"
   fi
 
+  say "安装 sing-box..."
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
     err "解压失败。"
@@ -542,11 +552,13 @@ install_or_update_singbox() {
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
+  say "初始化服务与定时任务..."
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
+  say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"
@@ -567,11 +579,12 @@ install_or_update_singbox() {
     pause
     return 1
   }
+  tg_refresh_after_singbox_install || true
 
   # 所有关键步骤成功后才写入版本 stamp（事务提交点）
   echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
-  ok "安装完成，已配置服务（${INIT_SYSTEM}）、定时任务、快捷命令 s。"
+  ok "安装完成。"
   pause
 }
 
@@ -731,18 +744,61 @@ sync_system_time_chrony() {
 
 # ---------- 卸载 ----------
 
+wireproxy_warp_environment_present() {
+  [ -s /etc/wireguard/proxy.conf ] && return 0
+  local_warp_socks_proxy_url >/dev/null 2>&1 && return 0
+  if has_cmd pgrep && pgrep -x wireproxy >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+print_full_cleanup_hint() {
+  echo
+  echo "如需彻底删除脚本与相关配置，可在退出脚本后手动执行："
+  echo "rm -f /root/sb.sh"
+  echo "rm -f /usr/local/bin/s"
+  echo "rm -rf /etc/sing-box-manager"
+  echo "rm -rf /etc/sing-box"
+  echo "rm -rf /var/log/sing-box"
+  echo "rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock"
+  echo "rm -rf /var/lock/singbox-tg-agent.lock.d"
+}
+
+print_wireproxy_cleanup_hint_if_present() {
+  wireproxy_warp_environment_present || return 0
+  echo
+  echo "检测到 WireProxy/WARP 仍存在。"
+  echo
+  echo "如需卸载 WARP，可在退出脚本后执行："
+  echo "wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
+  echo "bash menu.sh u"
+}
+
 uninstall_singbox_keep_config() {
   require_root
   clear
-  echo -e "${R}--- 卸载 sing-box（保留 /etc/sing-box/ 配置）---${NC}"
-  echo -e "${Y}注意：该操作将卸载接管层、官方安装残留、cron 与运行文件，但保留配置、用户数据、日志文件。${NC}"
-  ask_confirm_yes || { warn "已取消卸载。"; pause; return 0; }
+  print_rect_title "卸载 sing-box"
+  echo "该操作将停止并删除 sing-box 运行组件："
+  echo "  - sing-box 服务"
+  echo "  - sing-box 主程序"
+  echo "  - 流量统计/日志维护定时任务"
+  echo "  - TG Bot 服务与上报任务"
+  echo
+  echo "以下内容会保留："
+  echo "  - sing-box 配置：/etc/sing-box"
+  echo "  - 用户数据与 TG 配置：/etc/sing-box-manager"
+  echo "  - 日志文件：/var/log/sing-box"
+  echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
+  echo
+  ask_confirm_yes "输入 YES 确认卸载: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   tg_stop_center_service || true
+  tg_mark_disabled_keep_config || true
   remove_all_singbox_service_units
   # 清理官方包可能创建的系统用户/组
   if has_cmd deluser; then
@@ -756,6 +812,7 @@ uninstall_singbox_keep_config() {
     groupdel sing-box >/dev/null 2>&1 || true
   fi
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
@@ -769,11 +826,10 @@ uninstall_singbox_keep_config() {
         pkg_installed sing-box-beta && apk del sing-box-beta >/dev/null 2>&1 || true
         ;;
     esac
-    ok "已清理脚本运行层并卸载官方包残留（如存在）。"
-  else
-    ok "已清理脚本运行层（如存在）。"
   fi
-  [ -d /etc/sing-box ] && ok "配置目录仍存在：/etc/sing-box" || warn "未找到 /etc/sing-box"
-  [ -d "$(dirname "$USER_DB_FILE")" ] && ok "用户数据库目录仍存在：$(dirname "$USER_DB_FILE")" || true
+  refresh_command_cache
+  ok "卸载完成，配置和用户数据已保留。"
+  print_full_cleanup_hint
+  print_wireproxy_cleanup_hint_if_present
   pause
 }

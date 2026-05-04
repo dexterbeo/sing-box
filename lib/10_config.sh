@@ -224,6 +224,7 @@ reload_or_restart_singbox_safe() {
 }
 
 enable_now_singbox_safe() {
+  local quiet="${_SINGBOX_ENABLE_QUIET_OK:-0}"
   if ! check_config_or_print; then
     err "已阻止启动/自启：请先修复配置。"
     return 1
@@ -246,7 +247,7 @@ enable_now_singbox_safe() {
       return 1
       ;;
   esac
-  ok "sing-box 已启用自启并启动。"
+  [ "$quiet" = "1" ] || ok "sing-box 已启用自启并启动。"
 }
 
 with_manager_lock() {

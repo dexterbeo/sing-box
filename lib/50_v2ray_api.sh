@@ -66,7 +66,6 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  say "获取流量统计组件信息..."
   api_json="$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "$api" 2>/dev/null || true)"
   [ -n "$api_json" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
   tag="$(echo "$api_json" | jq -r '.tag_name // empty' 2>/dev/null)" || true

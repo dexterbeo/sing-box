@@ -333,7 +333,6 @@ warp_custom_rule_menu() {
   read -r -p "请输入规则名（回车返回）：" raw
   [ -n "${raw:-}" ] || return 0
   file="$(warp_normalize_rule_file "$raw")" || { pause; return 1; }
-  say "校验规则文件：$file"
   if ! warp_validate_rule_file "$file"; then
     err "未在 SagerNet rule-set 中找到：$file"
     pause

@@ -41,11 +41,93 @@ run_with_timeout() {
 
 download_file() {
   local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
-  if [ -t 1 ] && [ -t 2 ]; then
-    curl -fL --progress-bar --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output"
-  else
+  if [ ! -t 1 ] || [ ! -t 2 ]; then
     curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
+    return $?
   fi
+
+  local total tmp_err curl_pid rc size tick=0
+  total="$(download_file_total_bytes "$url" "$connect_timeout")"
+  tmp_err="$(mktemp /tmp/sb-download-err.XXXXXX)" || return 1
+  rm -f "$output" >/dev/null 2>&1 || true
+
+  curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" 2>"$tmp_err" &
+  curl_pid=$!
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    size="$(file_size_bytes "$output")"
+    print_download_progress "$size" "$total" "$tick"
+    tick=$((tick + 1))
+    sleep 1
+  done
+
+  if wait "$curl_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  clear_download_progress
+  if [ "$rc" -ne 0 ] && [ -s "$tmp_err" ]; then
+    sed 's/^/  /' "$tmp_err" >&2
+  fi
+  rm -f "$tmp_err" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+download_file_total_bytes() {
+  local url="$1" connect_timeout="${2:-20}" total
+  [ "$connect_timeout" -gt 5 ] && connect_timeout=5
+  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 10 "$url" 2>/dev/null \
+    | awk 'tolower($1) == "content-length:" {gsub(/\r/,"",$2); n=$2} END {if (n ~ /^[0-9]+$/) print n}')" || true
+  echo "${total:-0}"
+}
+
+file_size_bytes() {
+  local file="$1" size
+  [ -f "$file" ] || { echo 0; return 0; }
+  size="$(stat -c '%s' "$file" 2>/dev/null || wc -c < "$file" 2>/dev/null || echo 0)"
+  size="${size//[[:space:]]/}"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  echo "$size"
+}
+
+format_download_bytes() {
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    if (b >= 1073741824) printf "%.1fG", b / 1073741824;
+    else if (b >= 1048576) printf "%.1fM", b / 1048576;
+    else if (b >= 1024) printf "%.1fK", b / 1024;
+    else printf "%dB", b;
+  }'
+}
+
+print_download_progress() {
+  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" width=24
+  local percent filled bar spin
+  if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -gt 0 ]; then
+    percent=$((size * 100 / total))
+    [ "$percent" -gt 100 ] && percent=100
+    filled=$((percent * width / 100))
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '=')"
+    if [ "$filled" -lt "$width" ]; then
+      bar="${bar}>$(printf '%*s' $((width - filled - 1)) '')"
+    fi
+    printf '\r下载中 [%-*s] %3d%% %s/%s' "$width" "$bar" "$percent" "$(format_download_bytes "$size")" "$(format_download_bytes "$total")"
+  else
+    case $((tick % 4)) in
+      0) spin="|" ;;
+      1) spin="/" ;;
+      2) spin="-" ;;
+      *) spin="\\" ;;
+    esac
+    printf '\r下载中 [%s] %s' "$spin" "$(format_download_bytes "$size")"
+  fi
+}
+
+clear_download_progress() {
+  local cols="${COLUMNS:-80}"
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  printf '\r%*s\r' "$cols" ''
 }
 
 now_ms() {

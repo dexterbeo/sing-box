@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 11:29:28 UTC
+# 构建时间: 2026-05-04 11:45:56 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.3"
+SCRIPT_VERSION="6.0.4"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -348,11 +348,93 @@ run_with_timeout() {
 
 download_file() {
   local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
-  if [ -t 1 ] && [ -t 2 ]; then
-    curl -fL --progress-bar --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output"
-  else
+  if [ ! -t 1 ] || [ ! -t 2 ]; then
     curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
+    return $?
   fi
+
+  local total tmp_err curl_pid rc size tick=0
+  total="$(download_file_total_bytes "$url" "$connect_timeout")"
+  tmp_err="$(mktemp /tmp/sb-download-err.XXXXXX)" || return 1
+  rm -f "$output" >/dev/null 2>&1 || true
+
+  curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" 2>"$tmp_err" &
+  curl_pid=$!
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    size="$(file_size_bytes "$output")"
+    print_download_progress "$size" "$total" "$tick"
+    tick=$((tick + 1))
+    sleep 1
+  done
+
+  if wait "$curl_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  clear_download_progress
+  if [ "$rc" -ne 0 ] && [ -s "$tmp_err" ]; then
+    sed 's/^/  /' "$tmp_err" >&2
+  fi
+  rm -f "$tmp_err" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+download_file_total_bytes() {
+  local url="$1" connect_timeout="${2:-20}" total
+  [ "$connect_timeout" -gt 5 ] && connect_timeout=5
+  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 10 "$url" 2>/dev/null \
+    | awk 'tolower($1) == "content-length:" {gsub(/\r/,"",$2); n=$2} END {if (n ~ /^[0-9]+$/) print n}')" || true
+  echo "${total:-0}"
+}
+
+file_size_bytes() {
+  local file="$1" size
+  [ -f "$file" ] || { echo 0; return 0; }
+  size="$(stat -c '%s' "$file" 2>/dev/null || wc -c < "$file" 2>/dev/null || echo 0)"
+  size="${size//[[:space:]]/}"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  echo "$size"
+}
+
+format_download_bytes() {
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    if (b >= 1073741824) printf "%.1fG", b / 1073741824;
+    else if (b >= 1048576) printf "%.1fM", b / 1048576;
+    else if (b >= 1024) printf "%.1fK", b / 1024;
+    else printf "%dB", b;
+  }'
+}
+
+print_download_progress() {
+  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" width=24
+  local percent filled bar spin
+  if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -gt 0 ]; then
+    percent=$((size * 100 / total))
+    [ "$percent" -gt 100 ] && percent=100
+    filled=$((percent * width / 100))
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '=')"
+    if [ "$filled" -lt "$width" ]; then
+      bar="${bar}>$(printf '%*s' $((width - filled - 1)) '')"
+    fi
+    printf '\r下载中 [%-*s] %3d%% %s/%s' "$width" "$bar" "$percent" "$(format_download_bytes "$size")" "$(format_download_bytes "$total")"
+  else
+    case $((tick % 4)) in
+      0) spin="|" ;;
+      1) spin="/" ;;
+      2) spin="-" ;;
+      *) spin="\\" ;;
+    esac
+    printf '\r下载中 [%s] %s' "$spin" "$(format_download_bytes "$size")"
+  fi
+}
+
+clear_download_progress() {
+  local cols="${COLUMNS:-80}"
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  printf '\r%*s\r' "$cols" ''
 }
 
 now_ms() {
@@ -910,6 +992,7 @@ reload_or_restart_singbox_safe() {
 }
 
 enable_now_singbox_safe() {
+  local quiet="${_SINGBOX_ENABLE_QUIET_OK:-0}"
   if ! check_config_or_print; then
     err "已阻止启动/自启：请先修复配置。"
     return 1
@@ -932,7 +1015,7 @@ enable_now_singbox_safe() {
       return 1
       ;;
   esac
-  ok "sing-box 已启用自启并启动。"
+  [ "$quiet" = "1" ] || ok "sing-box 已启用自启并启动。"
 }
 
 with_manager_lock() {
@@ -2717,7 +2800,6 @@ relay_custom_rule_menu() {
   read -r -p "请输入规则名（回车返回）：" raw
   [ -n "${raw:-}" ] || return 0
   file="$(relay_normalize_rule_file "$raw")" || { pause; return 1; }
-  say "校验规则文件：$file"
   if ! relay_validate_rule_file "$file"; then
     err "未在 SagerNet rule-set 中找到：$file"
     pause
@@ -3019,7 +3101,6 @@ ensure_grpcurl() {
       ;;
   esac
   api="https://api.github.com/repos/fullstorydev/grpcurl/releases/latest"
-  say "获取流量统计组件信息..."
   api_json="$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "$api" 2>/dev/null || true)"
   [ -n "$api_json" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
   tag="$(echo "$api_json" | jq -r '.tag_name // empty' 2>/dev/null)" || true
@@ -6178,7 +6259,6 @@ tg_refresh_after_singbox_install() {
   [ "$enabled" = "true" ] || return 0
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 0
 
-  say "刷新 TG Bot..."
   if [ "$role" = "center" ]; then
     if ! tg_install_center_service; then
       warn "TG Bot 服务刷新失败，请稍后进入 TG Bot 管理检查。"
@@ -6874,7 +6954,6 @@ warp_custom_rule_menu() {
   read -r -p "请输入规则名（回车返回）：" raw
   [ -n "${raw:-}" ] || return 0
   file="$(warp_normalize_rule_file "$raw")" || { pause; return 1; }
-  say "校验规则文件：$file"
   if ! warp_validate_rule_file "$file"; then
     err "未在 SagerNet rule-set 中找到：$file"
     pause
@@ -7876,13 +7955,10 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "校验安装包..."
   if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
-    if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then
-      ok "文件校验通过。"
-    else
+    if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
       rm -rf "$tmp_dir"
       err "校验失败。"
       pause
@@ -7892,7 +7968,6 @@ install_or_update_singbox() {
     warn "未获取到校验文件，已跳过校验。"
   fi
 
-  say "安装 sing-box..."
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
     err "解压失败。"
@@ -7928,20 +8003,17 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "准备流量统计组件..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
-  say "初始化服务与定时任务..."
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
   local singbox_started=0
-  if enable_now_singbox_safe; then
+  if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
     singbox_started=1
   fi
   ensure_sb_shortcut || true
-  say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"

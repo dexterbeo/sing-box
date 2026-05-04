@@ -515,13 +515,10 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "校验安装包..."
   if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
-    if [ -n "$expected_sha" ] && [ "$expected_sha" = "$actual_sha" ]; then
-      ok "文件校验通过。"
-    else
+    if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
       rm -rf "$tmp_dir"
       err "校验失败。"
       pause
@@ -531,7 +528,6 @@ install_or_update_singbox() {
     warn "未获取到校验文件，已跳过校验。"
   fi
 
-  say "安装 sing-box..."
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
     err "解压失败。"
@@ -567,20 +563,17 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "准备流量统计组件..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
-  say "初始化服务与定时任务..."
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
   local singbox_started=0
-  if enable_now_singbox_safe; then
+  if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
     singbox_started=1
   fi
   ensure_sb_shortcut || true
-  say "初始化用户管理..."
   ensure_user_manager_ready || { pause; return 1; }
   install_user_watch_cron || {
     err "cron 定时任务安装失败：用户流量统计。"

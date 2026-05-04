@@ -1823,7 +1823,6 @@ tg_refresh_after_singbox_install() {
   [ "$enabled" = "true" ] || return 0
   [ "$role" = "center" ] || [ "$role" = "agent" ] || return 0
 
-  say "刷新 TG Bot..."
   if [ "$role" = "center" ]; then
     if ! tg_install_center_service; then
       warn "TG Bot 服务刷新失败，请稍后进入 TG Bot 管理检查。"

@@ -50,7 +50,8 @@ config_normalize() {
           (.route.rule_set | if type == "array" then . else [.] end)
           | map(
               if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
-                del(.download_detour)
+                .format = (.format // "binary")
+                | .download_detour = "direct"
               else .
               end
             )

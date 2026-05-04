@@ -576,7 +576,7 @@ relay_config_project_json() {
           | map((.tag // "") as $tag | select(($managed_tags | index($tag)) == null))
         )
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
           else [] end)
       )
     | .outbounds = (

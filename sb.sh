@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 11:45:56 UTC
+# 构建时间: 2026-05-04 12:34:19 UTC
 # ============================================================
 
 
@@ -818,7 +818,8 @@ config_normalize() {
           (.route.rule_set | if type == "array" then . else [.] end)
           | map(
               if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
-                del(.download_detour)
+                .format = (.format // "binary")
+                | .download_detour = "direct"
               else .
               end
             )
@@ -2711,7 +2712,7 @@ relay_config_project_json() {
           | map((.tag // "") as $tag | select(($managed_tags | index($tag)) == null))
         )
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
           else [] end)
       )
     | .outbounds = (
@@ -6871,7 +6872,7 @@ warp_config_project_json() {
             )
         )
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
           else [] end)
       )
     | .outbounds = (

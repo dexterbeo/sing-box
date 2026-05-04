@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-03 14:22:50 UTC
+# 构建时间: 2026-05-04 03:28:13 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.8.6"
+SCRIPT_VERSION="5.8.8"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -2288,6 +2288,9 @@ user_db_min_template() {
   cat <<'JSON'
 {
   "enabled": true,
+  "meta": {
+    "data_updated_at_text": ""
+  },
   "users": {
     "admin": {
       "enabled": true,
@@ -2323,6 +2326,18 @@ user_db_load() {
 
 user_db_save() {
   with_manager_lock _user_db_save_body "$@"
+}
+
+user_db_touch_data_updated_at() {
+  user_db_exists || return 0
+  local db_json now_text
+  db_json="$(user_db_load)"
+  now_text="$(date '+%Y-%m-%d %H:%M:%S')"
+  db_json="$(echo "$db_json" | jq --arg now "$now_text" '
+    .meta = (.meta // {})
+    | .meta.data_updated_at_text = $now
+  ')" || return 1
+  user_db_save "$db_json"
 }
 
 _user_db_save_body() {
@@ -2668,15 +2683,19 @@ user_watch_run() {
   user_db_exists || return 0
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
   if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    user_manager_background_sync >/dev/null 2>&1 || return 0
-    apply_automatic_user_controls >/dev/null 2>&1 || true
+    if user_manager_background_sync >/dev/null 2>&1; then
+      apply_automatic_user_controls >/dev/null 2>&1 || true
+      user_db_touch_data_updated_at >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
-  user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
-  apply_automatic_user_controls >/dev/null 2>&1 || true
+  if user_manager_background_sync >/dev/null 2>&1; then
+    apply_automatic_user_controls >/dev/null 2>&1 || true
+    user_db_touch_data_updated_at >/dev/null 2>&1 || true
+  fi
   _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
 }
@@ -3517,6 +3536,7 @@ import urllib.parse
 import urllib.request
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/sing-box-manager/telegram.json"
+REPORT_ONLINE_SECONDS = 900
 
 
 def load_config():
@@ -4028,10 +4048,14 @@ def admin_overview(chat_id, message_id=None):
             if exp is not None and 1 <= (exp - today()).days <= int(cfg.get("expire_warn_days", 3)):
                 expire_count += 1
         age = now - int(report.get("received_at") or now)
-        state_text = "在线 ✅" if age <= 900 else "离线 ❌"
-        warn_text = f"{warn_count}⚠️" if warn_count > 0 else "0"
-        expire_text = f"{expire_count}⚠️" if expire_count > 0 else "0"
-        lines.append(f"{report.get('vps_name') or vps_id}：用户{len(users)}，预警{warn_text}，到期{expire_text}，{state_text}")
+        state_text = "在线 ✅" if age <= REPORT_ONLINE_SECONDS else "离线 ❌"
+        parts = [f"{report.get('vps_name') or vps_id}：用户{len(users)}"]
+        if warn_count > 0:
+            parts.append(f"预警{warn_count}⚠️")
+        if expire_count > 0:
+            parts.append(f"到期{expire_count}⚠️")
+        parts.append(state_text)
+        lines.append("，".join(parts))
     render_page(chat_id, "\n".join(lines), admin_machine_keyboard(reports), message_id)
 
 
@@ -4655,7 +4679,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg = load_config()
                 reports = cfg.setdefault("reports", {})
                 payload["received_at"] = int(time.time())
-                payload["updated_at_text"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["received_at_text"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["updated_at_text"] = payload.get("data_updated_at_text") or ""
                 reports[payload.get("vps_id") or "unknown"] = payload
                 changed = evaluate_reminders(cfg, payload)
                 if changed:
@@ -4845,17 +4870,17 @@ install_tg_agent_cron() { _install_cron_job "$TG_AGENT_CRON_MARK" "$TG_AGENT_CRO
 remove_tg_agent_cron()  { _remove_cron_job "$TG_AGENT_CRON_MARK"; }
 
 tg_collect_report_json() {
-  local cfg="$1" db_json now_text
+  local cfg="$1" db_json
   db_json="$(user_db_load)"
-  now_text="$(date '+%Y-%m-%d %H:%M:%S')"
   echo "$db_json" | jq \
     --arg vps_id "$(echo "$cfg" | jq -r '.vps_id // ""')" \
     --arg vps_name "$(echo "$cfg" | jq -r '.vps_name // ""')" \
-    --arg updated "$now_text" '
+    '
       {
         vps_id: $vps_id,
         vps_name: $vps_name,
-        updated_at_text: $updated,
+        data_updated_at_text: (.meta.data_updated_at_text // ""),
+        updated_at_text: (.meta.data_updated_at_text // ""),
         users: [
           .users
           | to_entries[]
@@ -5339,8 +5364,23 @@ tg_notify_test() {
   pause
 }
 
+tg_prune_offline_reports() {
+  local cfg now removed pruned
+  cfg="$(tg_config_load)"
+  now="$(date +%s)"
+  removed="$(echo "$cfg" | jq -r --argjson now "$now" '
+    [(.reports // {}) | to_entries[] | select(($now - (.value.received_at // $now)) > 900)] | length
+  ')" || return 1
+  [ "${removed:-0}" -gt 0 ] || { echo 0; return 0; }
+  pruned="$(echo "$cfg" | jq --argjson now "$now" '
+    .reports = ((.reports // {}) | with_entries(select(($now - (.value.received_at // $now)) <= 900)))
+  ')" || return 1
+  tg_config_save "$pruned" || return 1
+  echo "$removed"
+}
+
 tg_reload_center_service_menu() {
-  local cfg role
+  local cfg role pruned_count
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   if [ "$role" != "center" ]; then
@@ -5355,6 +5395,10 @@ tg_reload_center_service_menu() {
   else
     ok "TG Bot 服务已更新并重启。"
     warn "本机立即上报失败，定时任务会继续自动上报。"
+  fi
+  pruned_count="$(tg_prune_offline_reports 2>/dev/null || echo 0)"
+  if [ "${pruned_count:-0}" -gt 0 ]; then
+    ok "已隐藏 ${pruned_count} 个已下线节点。"
   fi
   pause
 }
@@ -5529,7 +5573,11 @@ warp_rule_add_meta() {
 warp_rule_remove_meta_by_tags_json() {
   local tags_json="$1" warp_json
   warp_json="$(warp_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [(.rules // [])[] | select(($tags | index(.tag // "")) == null)]
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
   ')" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
@@ -5612,10 +5660,11 @@ warp_wireproxy_display() {
 warp_preset_rule() {
   case "$1" in
     1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
-    2) echo "Netflix|geosite-netflix.srs" ;;
-    3) echo "Disney+|geosite-disney.srs" ;;
-    4) echo "YouTube|geosite-youtube.srs" ;;
-    5) echo "TikTok|geosite-tiktok.srs" ;;
+    2) echo "Google|geosite-google.srs" ;;
+    3) echo "Netflix|geosite-netflix.srs" ;;
+    4) echo "Disney+|geosite-disney.srs" ;;
+    5) echo "YouTube|geosite-youtube.srs" ;;
+    6) echo "TikTok|geosite-tiktok.srs" ;;
     *) return 1 ;;
   esac
 }
@@ -5629,10 +5678,10 @@ warp_rules_print_summary() {
   rules_json="$(warp_meta_rules_json)"
   count="$(echo "$rules_json" | jq 'length')"
   if [ "$count" -eq 0 ]; then
-    echo "当前分流：无"
+    echo "当前分流至 WARP 的服务：无"
     return 0
   fi
-  echo "当前分流："
+  echo "当前分流至 WARP 的服务："
   echo "$rules_json" | jq -r '.[] | "  - \(.name)：\(.file)"'
 }
 
@@ -5703,8 +5752,8 @@ warp_add_preset_rules() {
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ "${#picks[@]}" -gt 0 ] || return 1
   for pick in "${picks[@]}"; do
-    if ! [[ "$pick" =~ ^[1-5]$ ]]; then
-      err "只能使用 1-5，并用 + 连接。"
+    if ! [[ "$pick" =~ ^[1-6]$ ]]; then
+      err "只能使用 1-6，并用 + 连接。"
       pause
       return 1
     fi
@@ -5729,7 +5778,9 @@ warp_custom_rule_menu() {
   echo "请先在以下页面查找规则名："
   echo "$WARP_RULE_LOOKUP_URL"
   echo
-  read -r -p "请输入规则名，例如：openai / geosite-openai / geosite-openai.srs: " raw
+  echo "例如：openai 或 geosite-openai 或 geosite-openai.srs"
+  read -r -p "请输入规则名（回车返回）：" raw
+  [ -n "${raw:-}" ] || return 0
   file="$(warp_normalize_rule_file "$raw")" || { pause; return 1; }
   say "校验规则文件：$file"
   if ! warp_validate_rule_file "$file"; then
@@ -5755,14 +5806,14 @@ warp_rules_delete_menu() {
   clear
   print_rect_title "删除 WARP 分流"
   warp_hr
-  echo "当前 WARP 分流："
+  echo "当前分流至 WARP 的服务："
   warp_rules_print_numbered
   warp_hr
   echo -e "  ${C}99.${NC} 删除全部分流"
   echo -e "  ${R}0.${NC} 返回上一级"
   echo
   echo "多个编号用+连接，例如：1+3"
-  read -r -p "请输入要删除的编号（回车返回）: " raw
+  read -r -p "请输入要删除的编号：" raw
   [ -n "${raw:-}" ] || return 0
   [ "$raw" = "0" ] && return 0
 
@@ -5826,10 +5877,7 @@ warp_print_install_hint() {
   echo "wget -N $WARP_SCRIPT_RAW_URL"
   echo "bash menu.sh w"
   echo
-  echo "安装完成后确认："
-  echo "ss -nltp | grep wireproxy"
-  echo
-  echo "预期看到 127.0.0.1:40000 或其它本地 SOCKS 监听。"
+  echo "安装完成后重新进入本菜单即可。"
   echo
 }
 
@@ -5844,34 +5892,35 @@ warp_manager_menu() {
     if ! warp_wireproxy_ready; then
       warp_print_install_hint
       if [ "$count" -gt 0 ]; then
-        echo -e "  ${C}7.${NC} 删除分流"
+        echo -e "  ${C}8.${NC} 删除分流"
       fi
       echo -e "  ${R}0.${NC} 返回上一级"
       read -r -p "请选择操作: " act
       case "${act:-}" in
         0|q|Q|"") return 0 ;;
-        7) [ "$count" -gt 0 ] && warp_rules_delete_menu || { warn "无效输入：$act"; sleep 1; } ;;
+        8) [ "$count" -gt 0 ] && warp_rules_delete_menu || { warn "无效输入：$act"; sleep 1; } ;;
         *) warn "无效输入：$act"; sleep 1 ;;
       esac
       continue
     fi
 
     echo -e "  ${C}1.${NC} AI 服务（海外聚合）"
-    echo -e "  ${C}2.${NC} Netflix"
-    echo -e "  ${C}3.${NC} Disney+"
-    echo -e "  ${C}4.${NC} YouTube"
-    echo -e "  ${C}5.${NC} TikTok"
-    echo -e "  ${C}6.${NC} 自定义网站规则"
-    echo -e "  ${C}7.${NC} 删除分流"
+    echo -e "  ${C}2.${NC} Google"
+    echo -e "  ${C}3.${NC} Netflix"
+    echo -e "  ${C}4.${NC} Disney+"
+    echo -e "  ${C}5.${NC} YouTube"
+    echo -e "  ${C}6.${NC} TikTok"
+    echo -e "  ${C}7.${NC} 自定义网站规则"
+    echo -e "  ${C}8.${NC} 删除分流"
     echo -e "  ${R}0.${NC} 返回上一级"
     echo
-    echo "1-5支持用+连接，例如：1+3+5"
+    echo "1-6支持用+连接，例如：1+3+6"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       0|q|Q|"") return 0 ;;
-      6) warp_custom_rule_menu || true ;;
-      7) warp_rules_delete_menu || true ;;
-      *+*|[1-5]) warp_add_preset_rules "$act" || true ;;
+      7) warp_custom_rule_menu || true ;;
+      8) warp_rules_delete_menu || true ;;
+      *+*|[1-6]) warp_add_preset_rules "$act" || true ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
   done

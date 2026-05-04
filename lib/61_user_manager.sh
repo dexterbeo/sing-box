@@ -244,15 +244,19 @@ user_watch_run() {
   user_db_exists || return 0
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
   if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    user_manager_background_sync >/dev/null 2>&1 || return 0
-    apply_automatic_user_controls >/dev/null 2>&1 || true
+    if user_manager_background_sync >/dev/null 2>&1; then
+      apply_automatic_user_controls >/dev/null 2>&1 || true
+      user_db_touch_data_updated_at >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
-  user_manager_background_sync >/dev/null 2>&1 || { _CONFIG_LOCK_HELD=0; exec {lock_fd}>&-; return 0; }
-  apply_automatic_user_controls >/dev/null 2>&1 || true
+  if user_manager_background_sync >/dev/null 2>&1; then
+    apply_automatic_user_controls >/dev/null 2>&1 || true
+    user_db_touch_data_updated_at >/dev/null 2>&1 || true
+  fi
   _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
 }

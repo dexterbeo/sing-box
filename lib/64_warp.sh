@@ -91,7 +91,11 @@ warp_rule_add_meta() {
 warp_rule_remove_meta_by_tags_json() {
   local tags_json="$1" warp_json
   warp_json="$(warp_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [(.rules // [])[] | select(($tags | index(.tag // "")) == null)]
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
   ')" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
@@ -174,10 +178,11 @@ warp_wireproxy_display() {
 warp_preset_rule() {
   case "$1" in
     1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
-    2) echo "Netflix|geosite-netflix.srs" ;;
-    3) echo "Disney+|geosite-disney.srs" ;;
-    4) echo "YouTube|geosite-youtube.srs" ;;
-    5) echo "TikTok|geosite-tiktok.srs" ;;
+    2) echo "Google|geosite-google.srs" ;;
+    3) echo "Netflix|geosite-netflix.srs" ;;
+    4) echo "Disney+|geosite-disney.srs" ;;
+    5) echo "YouTube|geosite-youtube.srs" ;;
+    6) echo "TikTok|geosite-tiktok.srs" ;;
     *) return 1 ;;
   esac
 }
@@ -191,10 +196,10 @@ warp_rules_print_summary() {
   rules_json="$(warp_meta_rules_json)"
   count="$(echo "$rules_json" | jq 'length')"
   if [ "$count" -eq 0 ]; then
-    echo "当前分流：无"
+    echo "当前分流至 WARP 的服务：无"
     return 0
   fi
-  echo "当前分流："
+  echo "当前分流至 WARP 的服务："
   echo "$rules_json" | jq -r '.[] | "  - \(.name)：\(.file)"'
 }
 
@@ -265,8 +270,8 @@ warp_add_preset_rules() {
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ "${#picks[@]}" -gt 0 ] || return 1
   for pick in "${picks[@]}"; do
-    if ! [[ "$pick" =~ ^[1-5]$ ]]; then
-      err "只能使用 1-5，并用 + 连接。"
+    if ! [[ "$pick" =~ ^[1-6]$ ]]; then
+      err "只能使用 1-6，并用 + 连接。"
       pause
       return 1
     fi
@@ -291,7 +296,9 @@ warp_custom_rule_menu() {
   echo "请先在以下页面查找规则名："
   echo "$WARP_RULE_LOOKUP_URL"
   echo
-  read -r -p "请输入规则名，例如：openai / geosite-openai / geosite-openai.srs: " raw
+  echo "例如：openai 或 geosite-openai 或 geosite-openai.srs"
+  read -r -p "请输入规则名（回车返回）：" raw
+  [ -n "${raw:-}" ] || return 0
   file="$(warp_normalize_rule_file "$raw")" || { pause; return 1; }
   say "校验规则文件：$file"
   if ! warp_validate_rule_file "$file"; then
@@ -317,14 +324,14 @@ warp_rules_delete_menu() {
   clear
   print_rect_title "删除 WARP 分流"
   warp_hr
-  echo "当前 WARP 分流："
+  echo "当前分流至 WARP 的服务："
   warp_rules_print_numbered
   warp_hr
   echo -e "  ${C}99.${NC} 删除全部分流"
   echo -e "  ${R}0.${NC} 返回上一级"
   echo
   echo "多个编号用+连接，例如：1+3"
-  read -r -p "请输入要删除的编号（回车返回）: " raw
+  read -r -p "请输入要删除的编号：" raw
   [ -n "${raw:-}" ] || return 0
   [ "$raw" = "0" ] && return 0
 
@@ -388,10 +395,7 @@ warp_print_install_hint() {
   echo "wget -N $WARP_SCRIPT_RAW_URL"
   echo "bash menu.sh w"
   echo
-  echo "安装完成后确认："
-  echo "ss -nltp | grep wireproxy"
-  echo
-  echo "预期看到 127.0.0.1:40000 或其它本地 SOCKS 监听。"
+  echo "安装完成后重新进入本菜单即可。"
   echo
 }
 
@@ -406,34 +410,35 @@ warp_manager_menu() {
     if ! warp_wireproxy_ready; then
       warp_print_install_hint
       if [ "$count" -gt 0 ]; then
-        echo -e "  ${C}7.${NC} 删除分流"
+        echo -e "  ${C}8.${NC} 删除分流"
       fi
       echo -e "  ${R}0.${NC} 返回上一级"
       read -r -p "请选择操作: " act
       case "${act:-}" in
         0|q|Q|"") return 0 ;;
-        7) [ "$count" -gt 0 ] && warp_rules_delete_menu || { warn "无效输入：$act"; sleep 1; } ;;
+        8) [ "$count" -gt 0 ] && warp_rules_delete_menu || { warn "无效输入：$act"; sleep 1; } ;;
         *) warn "无效输入：$act"; sleep 1 ;;
       esac
       continue
     fi
 
     echo -e "  ${C}1.${NC} AI 服务（海外聚合）"
-    echo -e "  ${C}2.${NC} Netflix"
-    echo -e "  ${C}3.${NC} Disney+"
-    echo -e "  ${C}4.${NC} YouTube"
-    echo -e "  ${C}5.${NC} TikTok"
-    echo -e "  ${C}6.${NC} 自定义网站规则"
-    echo -e "  ${C}7.${NC} 删除分流"
+    echo -e "  ${C}2.${NC} Google"
+    echo -e "  ${C}3.${NC} Netflix"
+    echo -e "  ${C}4.${NC} Disney+"
+    echo -e "  ${C}5.${NC} YouTube"
+    echo -e "  ${C}6.${NC} TikTok"
+    echo -e "  ${C}7.${NC} 自定义网站规则"
+    echo -e "  ${C}8.${NC} 删除分流"
     echo -e "  ${R}0.${NC} 返回上一级"
     echo
-    echo "1-5支持用+连接，例如：1+3+5"
+    echo "1-6支持用+连接，例如：1+3+6"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       0|q|Q|"") return 0 ;;
-      6) warp_custom_rule_menu || true ;;
-      7) warp_rules_delete_menu || true ;;
-      *+*|[1-5]) warp_add_preset_rules "$act" || true ;;
+      7) warp_custom_rule_menu || true ;;
+      8) warp_rules_delete_menu || true ;;
+      *+*|[1-6]) warp_add_preset_rules "$act" || true ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
   done

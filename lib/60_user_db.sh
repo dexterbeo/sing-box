@@ -9,6 +9,9 @@ user_db_min_template() {
   cat <<'JSON'
 {
   "enabled": true,
+  "meta": {
+    "data_updated_at_text": ""
+  },
   "users": {
     "admin": {
       "enabled": true,
@@ -44,6 +47,18 @@ user_db_load() {
 
 user_db_save() {
   with_manager_lock _user_db_save_body "$@"
+}
+
+user_db_touch_data_updated_at() {
+  user_db_exists || return 0
+  local db_json now_text
+  db_json="$(user_db_load)"
+  now_text="$(date '+%Y-%m-%d %H:%M:%S')"
+  db_json="$(echo "$db_json" | jq --arg now "$now_text" '
+    .meta = (.meta // {})
+    | .meta.data_updated_at_text = $now
+  ')" || return 1
+  user_db_save "$db_json"
 }
 
 _user_db_save_body() {

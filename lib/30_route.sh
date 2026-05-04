@@ -100,7 +100,7 @@ list_all_node_keys() {
     echo "$json" | jq -r '
       .inbounds[]?
       | (.users // [])[]?
-      | .name // empty
+      | (.name // .username // empty)
     ' | while IFS= read -r n; do
       [ -n "$n" ] || continue
       np="$(user_node_part "$n")"
@@ -117,9 +117,11 @@ list_all_node_keys() {
 
 route_rebuild(){
   local json="$1"
-  local normalized core_users_json relay_pairs_json preserved_rules_json
+  local normalized core_auth_users_json relay_pairs_json preserved_rules_json
   local warp_mode="off" warp_tags_json='[]'
   local warp_available_tags_json='[]'
+  local relay_rule_groups_json='[]'
+  local relay_available_groups_json='[]'
 
   normalized="$(config_normalize "$json")" || return 1
 
@@ -145,13 +147,60 @@ route_rebuild(){
     warp_available_tags_json='[]'
   fi
 
-  core_users_json="$({
-    while IFS=$'\x01' read -r entry user_name; do
+  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
+    relay_rule_groups_json="$(jq -c '
+      (.relay // {}) as $relay
+      | ($relay.landing // null) as $legacy_landing
+      | (
+          if (($relay.landings // null) | type) == "object" then
+            ($relay.landings // {})
+          elif (($legacy_landing // null) | type) == "object" then
+            {($legacy_landing.id // "default"): $legacy_landing}
+          else
+            {}
+          end
+        ) as $landings
+      | [
+          ($relay.rules // [])[]?
+          | (.landing_id // ($legacy_landing.id // "default")) as $landing_id
+          | select(($landing_id != "") and (($landings[$landing_id] // null) != null))
+          | (.tag // empty) as $tag
+          | select($tag != "")
+          | {tag:$tag, out:("relay-" + $landing_id)}
+        ]
+    ' "$META_FILE" 2>/dev/null || echo '[]')"
+  fi
+  relay_available_groups_json="$(
+    echo "$normalized" | jq -c --argjson wanted "$relay_rule_groups_json" '
+      def uniq:
+        reduce .[] as $x ([]; if index($x) then . else . + [$x] end);
+      ([.route.rule_set[]?.tag // empty] | uniq) as $available_rules
+      | ([.outbounds[]?.tag // empty] | uniq) as $available_outbounds
+      | [
+          ($wanted // [])[]
+          | . as $wanted_rule
+          | select(($available_rules | index($wanted_rule.tag)) != null)
+          | select(($available_outbounds | index($wanted_rule.out)) != null)
+        ]
+      | group_by(.out)
+      | map({o:.[0].out, tags:([.[].tag] | uniq | sort)})
+    '
+  )" || relay_available_groups_json='[]'
+
+  core_auth_users_json="$({
+    while IFS=$'\x01' read -r entry proto user_name; do
       [ -n "$user_name" ] || continue
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("\u0001")')
+    done < <(echo "$normalized" | jq -r "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
+      .inbounds[]?
+      | .tag as $entry
+      | (detect_protocol) as $proto
+      | (.users // [])[]?
+      | (.name // .username // "") as $user
+      | [$entry, $proto, $user] | join("\u0001")
+    ')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({
@@ -166,14 +215,15 @@ route_rebuild(){
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null) ]
+      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null) ]
     '
   )" || return 1
 
   echo "$normalized" | jq \
-    --argjson core "$core_users_json" \
+    --argjson core_auth "$core_auth_users_json" \
     --argjson relay "$relay_pairs_json" \
     --argjson kept "$preserved_rules_json" \
+    --argjson relay_rule_groups "$relay_available_groups_json" \
     --argjson warp_tags "$warp_available_tags_json" '
     def auth_key:
       (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
@@ -181,9 +231,10 @@ route_rebuild(){
       (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
-      + (if (($core | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
-      + (if ($core | length) > 0 then [{auth_user:($core | unique | sort),outbound:"direct"}] else [] end)
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
+      + (if ($core_auth | length) > 0 then (($relay_rule_groups // []) | map(select((.tags // []) | length > 0) | {auth_user:($core_auth | unique | sort),rule_set:(.tags | unique | sort),outbound:.o})) else [] end)
+      + (if (($core_auth | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core_auth | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
+      + (if ($core_auth | length) > 0 then [{auth_user:($core_auth | unique | sort),outbound:"direct"}] else [] end)
     )
     | .route.rules |= (
         (reduce .[] as $r ({seen:{}, out:[]};
@@ -199,7 +250,7 @@ route_rebuild(){
         | select(
             (
               ($tag != "direct")
-              and (($tag | startswith("out-")) or ($tag | startswith("to-")))
+              and (($tag | startswith("out-")) or ($tag | startswith("to-")) or ($tag | startswith("relay-")))
               and (([$root.route.rules[]? | .outbound // empty] | index($tag)) == null)
             ) | not
           )
@@ -220,7 +271,7 @@ remove_relays_by_user_names(){
     echo "$json" | jq "${JQ_AUTH_USERS}"'
       .inbounds |= map(
         if .users? then
-          .users |= map(select(((.name // "") as $n | ($users | index($n))) == null))
+          .users |= map(select(((.name // .username // "") as $n | ($users | index($n))) == null))
         else . end
       )
       | .route.rules |= map(
@@ -249,7 +300,7 @@ remove_inbound_by_entry_key(){
         .inbounds[]?
         | select(.tag == $ek)
         | (.users // [])[]?
-        | .name // empty
+        | (.name // .username // empty)
         | select(. != "")
       ]
     '
@@ -319,8 +370,8 @@ remove_relays_for_entry_key() {
         .inbounds[]?
         | select(.tag == $ek)
         | (.users // [])[]?
-        | .name // empty
-        | select(. != "" and (node_part(.) != $ek))
+        | (.name // .username // empty)
+        | select(. != "" and (node_part(.) | contains("-to-")))
       ]
     ' --arg ek "$entry_key"
   )"

@@ -178,8 +178,8 @@ ss2022_normalize_password_pair() {
   local raw="$1"
   local sp up
   if [ -z "$raw" ]; then
-    sp="$(openssl rand -base64 16)"
-    up="$(openssl rand -base64 16)"
+    sp="$(random_b64_password 16)"
+    up="$(random_b64_password 16)"
     echo "${sp}:${up}"
     return 0
   fi
@@ -189,6 +189,35 @@ ss2022_normalize_password_pair() {
   if ! echo "$sp" | base64 -d >/dev/null 2>&1; then sp="$(openssl rand -base64 16)"; fi
   if [ -n "$up" ] && ! echo "$up" | base64 -d >/dev/null 2>&1; then up="$(openssl rand -base64 16)"; fi
   if [ -n "$up" ]; then echo "${sp}:${up}"; else echo "$sp"; fi
+}
+
+ss2022_password_part_valid() {
+  local part="$1"
+  local bytes
+  [ -n "$part" ] || return 1
+  bytes="$(printf '%s' "$part" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" || return 1
+  [ "$bytes" = "16" ]
+}
+
+ss2022_prepare_password_pair() {
+  local raw="${1:-}" sp up
+  if [ -z "$raw" ]; then
+    sp="$(random_b64_password 16)"
+    up="$(random_b64_password 16)"
+    [ -n "$sp" ] && [ -n "$up" ] || return 1
+    echo "${sp}:${up}"
+    return 0
+  fi
+
+  sp="${raw%%:*}"
+  if [[ "$raw" == *:* ]]; then
+    up="${raw#*:}"
+  else
+    up="$sp"
+  fi
+  ss2022_password_part_valid "$sp" || return 1
+  ss2022_password_part_valid "$up" || return 1
+  echo "${sp}:${up}"
 }
 
 # ====================================================
@@ -228,10 +257,10 @@ build_vless_reality_inbound() {
 }
 
 build_anytls_inbound() {
-  local port="$1" sni="$2"
-  local entry_key pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
   entry_key="$(entry_key_from_parts anytls "$port")"
-  pass="$(openssl rand -base64 16)"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
   crt="/etc/sing-box/anytls-${port}.crt"
   key="/etc/sing-box/anytls-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -255,11 +284,12 @@ build_anytls_inbound() {
 }
 
 build_ss_inbound() {
-  local port="$1"
-  local entry_key server_p user_p
+  local port="$1" raw_password="${2:-}"
+  local entry_key server_p user_p normalized_pw
   entry_key="$(entry_key_from_parts shadowsocks "$port")"
-  server_p="$(openssl rand -base64 16)"
-  user_p="$(openssl rand -base64 16)"
+  normalized_pw="$(ss2022_prepare_password_pair "$raw_password")" || return 1
+  server_p="${normalized_pw%%:*}"
+  user_p="${normalized_pw#*:}"
   jq -n --arg tag "$entry_key" --arg sp "$server_p" --arg up "$user_p" --argjson port "$port" '
     {
       "type":"shadowsocks",
@@ -274,10 +304,10 @@ build_ss_inbound() {
 }
 
 build_trojan_inbound() {
-  local port="$1" sni="$2"
-  local entry_key pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
   entry_key="$(entry_key_from_parts trojan "$port")"
-  pass="$(openssl rand -base64 16)"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
   crt="/etc/sing-box/trojan-${port}.crt"
   key="/etc/sing-box/trojan-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -333,11 +363,11 @@ build_vless_ws_inbound() {
 }
 
 build_tuic_inbound() {
-  local port="$1" sni="$2"
-  local entry_key uuid pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key uuid crt key
   entry_key="$(entry_key_from_parts tuic "$port")"
   uuid="$(sing-box generate uuid)"
-  pass="$(openssl rand -base64 12)"
+  [ -n "$pass" ] || pass="$(random_b64_password 12)"
   crt="/etc/sing-box/tuic-${port}.crt"
   key="/etc/sing-box/tuic-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -350,6 +380,22 @@ build_tuic_inbound() {
       "users":[{"name":$tag,"uuid":$uuid,"password":$pass}],
       "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key},
       "congestion_control":"bbr"
+    }
+  '
+}
+
+build_socks_inbound() {
+  local port="$1" password="${2:-}"
+  local entry_key
+  entry_key="$(entry_key_from_parts socks "$port")"
+  [ -n "$password" ] || password="$(random_b64_password 12)"
+  jq -n --arg tag "$entry_key" --arg password "$password" --argjson port "$port" '
+    {
+      "type":"socks",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"username":$tag,"password":$password}]
     }
   '
 }
@@ -387,10 +433,13 @@ build_user_object_from_inbound() {
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
     shadowsocks|anytls|trojan)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
-      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" --arg pass "$(openssl rand -base64 12)" '{name:$name,uuid:$uuid,password:$pass}'
+      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" --arg pass "$(random_b64_password 12)" '{name:$name,uuid:$uuid,password:$pass}'
+      ;;
+    socks)
+      jq -n --arg username "$full_name" --arg pass "$(random_b64_password 12)" '{username:$username,password:$pass}'
       ;;
     *)
       return 1
@@ -400,5 +449,5 @@ build_user_object_from_inbound() {
 
 find_user_obj_in_inbound() {
   local inbound="$1" full_name="$2"
-  echo "$inbound" | jq -c --arg n "$full_name" '(.users // [])[]? | select((.name // "") == $n)' | head -n1
+  echo "$inbound" | jq -c --arg n "$full_name" '(.users // [])[]? | select(((.name // .username // "") == $n))' | head -n1
 }

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 05:26:55 UTC
+# 构建时间: 2026-05-04 07:38:11 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.0"
+SCRIPT_VERSION="5.9.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -156,7 +156,7 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks socks trojan vmess-ws vless-ws tuic)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
@@ -166,6 +166,7 @@ declare -A PROTO_PREFIX=(
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
   [tuic]=tuic
+  [socks]=socks
 )
 
 declare -A PREFIX_TO_PROTO=(
@@ -176,6 +177,7 @@ declare -A PREFIX_TO_PROTO=(
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
   [tuic]=tuic
+  [socks]=socks
 )
 
 declare -A PROTO_TRANSPORT=(
@@ -186,6 +188,7 @@ declare -A PROTO_TRANSPORT=(
   [vmess-ws]=tcp
   [vless-ws]=tcp
   [tuic]=udp
+  [socks]=tcp
 )
 
 # ====================================================
@@ -222,6 +225,7 @@ def detect_protocol:
   elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
   elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
   elif .type == "tuic" then "tuic"
+  elif .type == "socks" then "socks"
   else ""
   end;
 '
@@ -247,10 +251,11 @@ def protocol_sort_index($tag):
   if ($tag | startswith("reality-")) then 0
   elif ($tag | startswith("anytls-")) then 1
   elif ($tag | startswith("ss-")) then 2
-  elif ($tag | startswith("trojan-")) then 3
-  elif ($tag | startswith("vmess-ws-")) then 4
-  elif ($tag | startswith("vless-ws-")) then 5
-  elif ($tag | startswith("tuic-")) then 6
+  elif ($tag | startswith("socks-")) then 3
+  elif ($tag | startswith("trojan-")) then 4
+  elif ($tag | startswith("vmess-ws-")) then 5
+  elif ($tag | startswith("vless-ws-")) then 6
+  elif ($tag | startswith("tuic-")) then 7
   else 99
   end;
 '
@@ -314,6 +319,22 @@ require_root() {
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+make_disk_tmp_dir() {
+  local prefix="${1:-sb-install}" base="/var/tmp" tmp_dir
+  mkdir -p "$base" 2>/dev/null || base="/tmp"
+  tmp_dir="$(mktemp -d "${base}/${prefix}.XXXXXX")" || return 1
+  echo "$tmp_dir"
+}
+
+random_b64_password() {
+  local bytes="${1:-16}" value
+  value="$(openssl rand -base64 "$bytes" 2>/dev/null || true)"
+  if [ -z "$value" ]; then
+    value="$(head -c "$bytes" /dev/urandom 2>/dev/null | openssl base64 -A 2>/dev/null || true)"
+  fi
+  [ -n "$value" ] && echo "$value"
+}
 
 run_with_timeout() {
   local seconds="$1"
@@ -1218,8 +1239,8 @@ ss2022_normalize_password_pair() {
   local raw="$1"
   local sp up
   if [ -z "$raw" ]; then
-    sp="$(openssl rand -base64 16)"
-    up="$(openssl rand -base64 16)"
+    sp="$(random_b64_password 16)"
+    up="$(random_b64_password 16)"
     echo "${sp}:${up}"
     return 0
   fi
@@ -1229,6 +1250,35 @@ ss2022_normalize_password_pair() {
   if ! echo "$sp" | base64 -d >/dev/null 2>&1; then sp="$(openssl rand -base64 16)"; fi
   if [ -n "$up" ] && ! echo "$up" | base64 -d >/dev/null 2>&1; then up="$(openssl rand -base64 16)"; fi
   if [ -n "$up" ]; then echo "${sp}:${up}"; else echo "$sp"; fi
+}
+
+ss2022_password_part_valid() {
+  local part="$1"
+  local bytes
+  [ -n "$part" ] || return 1
+  bytes="$(printf '%s' "$part" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" || return 1
+  [ "$bytes" = "16" ]
+}
+
+ss2022_prepare_password_pair() {
+  local raw="${1:-}" sp up
+  if [ -z "$raw" ]; then
+    sp="$(random_b64_password 16)"
+    up="$(random_b64_password 16)"
+    [ -n "$sp" ] && [ -n "$up" ] || return 1
+    echo "${sp}:${up}"
+    return 0
+  fi
+
+  sp="${raw%%:*}"
+  if [[ "$raw" == *:* ]]; then
+    up="${raw#*:}"
+  else
+    up="$sp"
+  fi
+  ss2022_password_part_valid "$sp" || return 1
+  ss2022_password_part_valid "$up" || return 1
+  echo "${sp}:${up}"
 }
 
 # ====================================================
@@ -1268,10 +1318,10 @@ build_vless_reality_inbound() {
 }
 
 build_anytls_inbound() {
-  local port="$1" sni="$2"
-  local entry_key pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
   entry_key="$(entry_key_from_parts anytls "$port")"
-  pass="$(openssl rand -base64 16)"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
   crt="/etc/sing-box/anytls-${port}.crt"
   key="/etc/sing-box/anytls-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -1295,11 +1345,12 @@ build_anytls_inbound() {
 }
 
 build_ss_inbound() {
-  local port="$1"
-  local entry_key server_p user_p
+  local port="$1" raw_password="${2:-}"
+  local entry_key server_p user_p normalized_pw
   entry_key="$(entry_key_from_parts shadowsocks "$port")"
-  server_p="$(openssl rand -base64 16)"
-  user_p="$(openssl rand -base64 16)"
+  normalized_pw="$(ss2022_prepare_password_pair "$raw_password")" || return 1
+  server_p="${normalized_pw%%:*}"
+  user_p="${normalized_pw#*:}"
   jq -n --arg tag "$entry_key" --arg sp "$server_p" --arg up "$user_p" --argjson port "$port" '
     {
       "type":"shadowsocks",
@@ -1314,10 +1365,10 @@ build_ss_inbound() {
 }
 
 build_trojan_inbound() {
-  local port="$1" sni="$2"
-  local entry_key pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
   entry_key="$(entry_key_from_parts trojan "$port")"
-  pass="$(openssl rand -base64 16)"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
   crt="/etc/sing-box/trojan-${port}.crt"
   key="/etc/sing-box/trojan-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -1373,11 +1424,11 @@ build_vless_ws_inbound() {
 }
 
 build_tuic_inbound() {
-  local port="$1" sni="$2"
-  local entry_key uuid pass crt key
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key uuid crt key
   entry_key="$(entry_key_from_parts tuic "$port")"
   uuid="$(sing-box generate uuid)"
-  pass="$(openssl rand -base64 12)"
+  [ -n "$pass" ] || pass="$(random_b64_password 12)"
   crt="/etc/sing-box/tuic-${port}.crt"
   key="/etc/sing-box/tuic-${port}.key"
   ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
@@ -1390,6 +1441,22 @@ build_tuic_inbound() {
       "users":[{"name":$tag,"uuid":$uuid,"password":$pass}],
       "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key},
       "congestion_control":"bbr"
+    }
+  '
+}
+
+build_socks_inbound() {
+  local port="$1" password="${2:-}"
+  local entry_key
+  entry_key="$(entry_key_from_parts socks "$port")"
+  [ -n "$password" ] || password="$(random_b64_password 12)"
+  jq -n --arg tag "$entry_key" --arg password "$password" --argjson port "$port" '
+    {
+      "type":"socks",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"username":$tag,"password":$password}]
     }
   '
 }
@@ -1427,10 +1494,13 @@ build_user_object_from_inbound() {
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
     shadowsocks|anytls|trojan)
-      jq -n --arg name "$full_name" --arg pass "$(openssl rand -base64 16)" '{name:$name,password:$pass}'
+      jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
-      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" --arg pass "$(openssl rand -base64 12)" '{name:$name,uuid:$uuid,password:$pass}'
+      jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" --arg pass "$(random_b64_password 12)" '{name:$name,uuid:$uuid,password:$pass}'
+      ;;
+    socks)
+      jq -n --arg username "$full_name" --arg pass "$(random_b64_password 12)" '{username:$username,password:$pass}'
       ;;
     *)
       return 1
@@ -1440,7 +1510,7 @@ build_user_object_from_inbound() {
 
 find_user_obj_in_inbound() {
   local inbound="$1" full_name="$2"
-  echo "$inbound" | jq -c --arg n "$full_name" '(.users // [])[]? | select((.name // "") == $n)' | head -n1
+  echo "$inbound" | jq -c --arg n "$full_name" '(.users // [])[]? | select(((.name // .username // "") == $n))' | head -n1
 }
 
 # >>>>>>>>> END MODULE: 20_protocol.sh <<<<<<<<<<<
@@ -1547,7 +1617,7 @@ list_all_node_keys() {
     echo "$json" | jq -r '
       .inbounds[]?
       | (.users // [])[]?
-      | .name // empty
+      | (.name // .username // empty)
     ' | while IFS= read -r n; do
       [ -n "$n" ] || continue
       np="$(user_node_part "$n")"
@@ -1564,9 +1634,11 @@ list_all_node_keys() {
 
 route_rebuild(){
   local json="$1"
-  local normalized core_users_json relay_pairs_json preserved_rules_json
+  local normalized core_auth_users_json relay_pairs_json preserved_rules_json
   local warp_mode="off" warp_tags_json='[]'
   local warp_available_tags_json='[]'
+  local relay_rule_groups_json='[]'
+  local relay_available_groups_json='[]'
 
   normalized="$(config_normalize "$json")" || return 1
 
@@ -1592,13 +1664,60 @@ route_rebuild(){
     warp_available_tags_json='[]'
   fi
 
-  core_users_json="$({
-    while IFS=$'\x01' read -r entry user_name; do
+  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
+    relay_rule_groups_json="$(jq -c '
+      (.relay // {}) as $relay
+      | ($relay.landing // null) as $legacy_landing
+      | (
+          if (($relay.landings // null) | type) == "object" then
+            ($relay.landings // {})
+          elif (($legacy_landing // null) | type) == "object" then
+            {($legacy_landing.id // "default"): $legacy_landing}
+          else
+            {}
+          end
+        ) as $landings
+      | [
+          ($relay.rules // [])[]?
+          | (.landing_id // ($legacy_landing.id // "default")) as $landing_id
+          | select(($landing_id != "") and (($landings[$landing_id] // null) != null))
+          | (.tag // empty) as $tag
+          | select($tag != "")
+          | {tag:$tag, out:("relay-" + $landing_id)}
+        ]
+    ' "$META_FILE" 2>/dev/null || echo '[]')"
+  fi
+  relay_available_groups_json="$(
+    echo "$normalized" | jq -c --argjson wanted "$relay_rule_groups_json" '
+      def uniq:
+        reduce .[] as $x ([]; if index($x) then . else . + [$x] end);
+      ([.route.rule_set[]?.tag // empty] | uniq) as $available_rules
+      | ([.outbounds[]?.tag // empty] | uniq) as $available_outbounds
+      | [
+          ($wanted // [])[]
+          | . as $wanted_rule
+          | select(($available_rules | index($wanted_rule.tag)) != null)
+          | select(($available_outbounds | index($wanted_rule.out)) != null)
+        ]
+      | group_by(.out)
+      | map({o:.[0].out, tags:([.[].tag] | uniq | sort)})
+    '
+  )" || relay_available_groups_json='[]'
+
+  core_auth_users_json="$({
+    while IFS=$'\x01' read -r entry proto user_name; do
       [ -n "$user_name" ] || continue
       if [ "$(user_node_part "$user_name")" = "$entry" ]; then
         echo "$user_name"
       fi
-    done < <(echo "$normalized" | jq -r '.inbounds[]? | .tag as $entry | (.users // [])[]? | [$entry, (.name // "")] | join("\u0001")')
+    done < <(echo "$normalized" | jq -r "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
+      .inbounds[]?
+      | .tag as $entry
+      | (detect_protocol) as $proto
+      | (.users // [])[]?
+      | (.name // .username // "") as $user
+      | [$entry, $proto, $user] | join("\u0001")
+    ')
   } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
 
   relay_pairs_json="$({
@@ -1613,14 +1732,15 @@ route_rebuild(){
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null) ]
+      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null) ]
     '
   )" || return 1
 
   echo "$normalized" | jq \
-    --argjson core "$core_users_json" \
+    --argjson core_auth "$core_auth_users_json" \
     --argjson relay "$relay_pairs_json" \
     --argjson kept "$preserved_rules_json" \
+    --argjson relay_rule_groups "$relay_available_groups_json" \
     --argjson warp_tags "$warp_available_tags_json" '
     def auth_key:
       (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
@@ -1628,9 +1748,10 @@ route_rebuild(){
       (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
-      + (if (($core | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
-      + (if ($core | length) > 0 then [{auth_user:($core | unique | sort),outbound:"direct"}] else [] end)
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
+      + (if ($core_auth | length) > 0 then (($relay_rule_groups // []) | map(select((.tags // []) | length > 0) | {auth_user:($core_auth | unique | sort),rule_set:(.tags | unique | sort),outbound:.o})) else [] end)
+      + (if (($core_auth | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core_auth | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
+      + (if ($core_auth | length) > 0 then [{auth_user:($core_auth | unique | sort),outbound:"direct"}] else [] end)
     )
     | .route.rules |= (
         (reduce .[] as $r ({seen:{}, out:[]};
@@ -1646,7 +1767,7 @@ route_rebuild(){
         | select(
             (
               ($tag != "direct")
-              and (($tag | startswith("out-")) or ($tag | startswith("to-")))
+              and (($tag | startswith("out-")) or ($tag | startswith("to-")) or ($tag | startswith("relay-")))
               and (([$root.route.rules[]? | .outbound // empty] | index($tag)) == null)
             ) | not
           )
@@ -1667,7 +1788,7 @@ remove_relays_by_user_names(){
     echo "$json" | jq "${JQ_AUTH_USERS}"'
       .inbounds |= map(
         if .users? then
-          .users |= map(select(((.name // "") as $n | ($users | index($n))) == null))
+          .users |= map(select(((.name // .username // "") as $n | ($users | index($n))) == null))
         else . end
       )
       | .route.rules |= map(
@@ -1696,7 +1817,7 @@ remove_inbound_by_entry_key(){
         .inbounds[]?
         | select(.tag == $ek)
         | (.users // [])[]?
-        | .name // empty
+        | (.name // .username // empty)
         | select(. != "")
       ]
     '
@@ -1766,8 +1887,8 @@ remove_relays_for_entry_key() {
         .inbounds[]?
         | select(.tag == $ek)
         | (.users // [])[]?
-        | .name // empty
-        | select(. != "" and (node_part(.) != $ek))
+        | (.name // .username // empty)
+        | select(. != "" and (node_part(.) | contains("-to-")))
       ]
     ' --arg ek "$entry_key"
   )"
@@ -1780,9 +1901,21 @@ remove_relays_for_entry_key() {
 # >>>>>>>>> BEGIN MODULE: 40_relay.sh <<<<<<<<<<<
 # ============================================================
 # 模块: 40_relay.sh
-# 职责: 中转节点列表、添加、删除、菜单
+# 职责: 中转节点列表、全量中转、部分流量中转、删除、菜单
 # 依赖: 00_base.sh, 10_config.sh, 20_protocol.sh, 30_route.sh
 # ============================================================
+
+RELAY_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
+RELAY_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
+
+relay_hr() {
+  echo -e "${B}--------------------------------------------------------${NC}"
+}
+
+relay_partial_outbound_tag() {
+  local land="$1"
+  echo "relay-${land}"
+}
 
 # ---------- 中转节点列表（纯数据查询） ----------
 
@@ -1795,7 +1928,7 @@ relay_list_table() {
         | select((detect_protocol) != "")
         | .tag as $entry
         | (.users // [])[]?
-        | (.name // empty) as $name
+        | (.name // .username // empty) as $name
         | (node_part($name)) as $node
         | select($name != "" and $node != $entry and ($node | contains("-to-")))
         | [
@@ -1818,7 +1951,7 @@ relay_list_table() {
   ' || return 1
 }
 
-# ---------- UI: 显示中转节点行 ----------
+# ---------- UI: 显示全量中转节点 ----------
 
 show_managed_relay_lines() {
   local json="$1"
@@ -1839,33 +1972,216 @@ show_managed_relay_lines() {
   [ $found -eq 1 ]
 }
 
-# ---------- 中转节点菜单 ----------
+relay_full_summary_lines() {
+  local json="$1" summary
+  summary="$(
+    relay_list_table "$json" | awk -F '\x01' '
+      function node_part(s) { sub(/@.*/, "", s); return s }
+      function land_part(s) { sub(/^.*-to-/, "", s); return s }
+      NF >= 2 {
+        node = node_part($2)
+        if (node !~ /-to-/) next
+        entry = node
+        sub(/-to-.*/, "", entry)
+        land = land_part(node)
+        key = entry SUBSEP land
+        if (!(key in seen)) {
+          seen[key] = 1
+          if (!(entry in entry_seen)) {
+            entry_seen[entry] = 1
+            entries[++entry_count] = entry
+          }
+          lands[entry] = lands[entry] (lands[entry] == "" ? "" : "、") land
+        }
+      }
+      END {
+        if (entry_count == 0) {
+          print "全部流量转发：未启用"
+        } else {
+          print "全部流量转发："
+          for (i = 1; i <= entry_count; i++) {
+            entry = entries[i]
+            print "  - " entry "：" lands[entry]
+          }
+        }
+      }
+    '
+  )"
+  printf '%s\n' "$summary"
+}
+
+# ---------- SOCKS 落地 ----------
+
+relay_socks_outbound_json() {
+  local tag="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
+  jq -n --arg tag "$tag" --arg ip "$ip" --arg username "$username" --arg password "$password" --argjson p "$port" '
+    {type:"socks", tag:$tag, server:$ip, server_port:$p, version:"5"}
+    | if $username != "" then . + {username:$username, password:$password} else . end
+  '
+}
+
+relay_prompt_socks_landing() {
+  local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
+  local _land _ip _relay_port _username _password
+
+  read -r -p "落地标识 (如 sg01): " _land
+  [ -z "${_land:-}" ] && { warn "已取消，返回上一级。"; return 1; }
+  if ! [[ "$_land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    warn "落地标识仅允许字母、数字、点、下划线、短横线。"
+    return 1
+  fi
+
+  read -r -p "落地 IP 地址: " _ip
+  [ -z "${_ip:-}" ] && { warn "已取消，返回上一级。"; return 1; }
+
+  read -r -p "落地 SOCKS 端口（默认: 1080）: " _relay_port
+  _relay_port="${_relay_port:-1080}"
+  if ! is_valid_port "$_relay_port"; then
+    warn "落地 SOCKS 端口无效，已返回上一级。"
+    return 1
+  fi
+
+  read -r -p "落地 SOCKS Username（无认证可留空）: " _username
+  if [ -n "${_username:-}" ]; then
+    read -r -p "落地 SOCKS Password: " _password
+  else
+    _password=""
+  fi
+
+  printf -v "$land_var" '%s' "$_land"
+  printf -v "$ip_var" '%s' "$_ip"
+  printf -v "$port_var" '%s' "$_relay_port"
+  printf -v "$username_var" '%s' "${_username:-}"
+  printf -v "$password_var" '%s' "${_password:-}"
+  return 0
+}
+
+relay_landing_to_meta_json() {
+  local land="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
+  jq -n --arg id "$land" --arg server "$ip" --arg username "$username" --arg password "$password" --argjson port "$port" '
+    {id:$id, server:$server, port:$port, username:$username, password:$password}
+  '
+}
+
+relay_landing_from_outbound_json() {
+  local json="$1" land="$2" tag="$3"
+  echo "$json" | jq -c --arg id "$land" --arg tag "$tag" '
+    .outbounds[]?
+    | select((.tag // "") == $tag and (.type // "") == "socks")
+    | {
+        id:$id,
+        server:(.server // ""),
+        port:(.server_port // 0),
+        username:(.username // ""),
+        password:(.password // "")
+      }
+  ' | head -n1
+}
+
+relay_known_landing_json() {
+  local json="$1" land="$2" existing=""
+  existing="$(relay_meta_json | jq -c --arg id "$land" '.landings[$id] // empty' 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    echo "$existing"
+    return 0
+  fi
+  existing="$(relay_landing_from_outbound_json "$json" "$land" "$(relay_outbound_tag "" "$land")" 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    echo "$existing"
+    return 0
+  fi
+  existing="$(relay_landing_from_outbound_json "$json" "$land" "$(relay_partial_outbound_tag "$land")" 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    echo "$existing"
+    return 0
+  fi
+  echo "null"
+}
+
+relay_landing_equal() {
+  local left="$1" right="$2"
+  jq -e --argjson a "$left" --argjson b "$right" -n '
+    def norm($x): {
+      id:($x.id // ""),
+      server:($x.server // ""),
+      port:(($x.port // 0) | tonumber),
+      username:($x.username // ""),
+      password:($x.password // "")
+    };
+    norm($a) == norm($b)
+  ' >/dev/null 2>&1
+}
+
+relay_landing_display() {
+  local landing_json="$1"
+  echo "$landing_json" | jq -r '
+    "\(.id // "default")（\(.server // ""):\(.port // 0)" +
+    (if (.username // "") != "" then "，认证：" + (.username // "") else "，无认证" end) +
+    "）"
+  '
+}
+
+relay_choose_landing_or_return() {
+  local json="$1" outvar="$2"
+  local selected_land selected_ip selected_port selected_username selected_password candidate existing choice
+
+  relay_prompt_socks_landing selected_land selected_ip selected_port selected_username selected_password || return 1
+  candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
+  existing="$(relay_known_landing_json "$json" "$selected_land")"
+
+  if echo "$existing" | jq -e 'type == "object" and (.server // "") != ""' >/dev/null 2>&1; then
+    if relay_landing_equal "$existing" "$candidate"; then
+      printf -v "$outvar" '%s' "$existing"
+      return 0
+    fi
+
+    echo
+    warn "落地标识 ${selected_land} 已存在，但信息不一致。"
+    echo "当前：$(relay_landing_display "$existing")"
+    echo "新输入：$(relay_landing_display "$candidate")"
+    echo
+    echo -e "  ${C}1.${NC} 使用已有落地机"
+    echo -e "  ${C}2.${NC} 更新落地机信息"
+    echo -e "  ${R}0.${NC} 返回上一级"
+    read -r -p "请选择操作: " choice
+    case "${choice:-}" in
+      1) printf -v "$outvar" '%s' "$existing"; return 0 ;;
+      2) printf -v "$outvar" '%s' "$candidate"; return 0 ;;
+      *) warn "已取消，返回上一级。"; return 1 ;;
+    esac
+  fi
+
+  printf -v "$outvar" '%s' "$candidate"
+  return 0
+}
+
+# ---------- 全部流量中转 ----------
 
 relay_add() {
   init_manager_env || { pause; return 0; }
-  local json lines=() entry_key choice land ip relay_port pw normalized_pw relay_user out_tag inbound
+  local json lines=() entry_key choice land ip relay_port username password relay_user out_tag inbound landing_json
   json="$(config_load)"
 
   mapfile -t lines < <(protocol_entry_inventory "$json" | sort_tsv_by_protocol 1 | head -100)
   if [ ${#lines[@]} -eq 0 ]; then
-    err "当前没有任何主入站，请先在协议管理里安装协议。"
+    err "当前没有任何入站协议，请先在协议管理里安装协议。"
     pause
     return 1
   fi
 
   clear
-  echo -e "${C}--- 添加/覆盖中转节点 ---${NC}"
-  echo -e "${C}请选择主入站：${NC}"
-  local i=1 tag port
+  echo -e "${C}--- 添加/覆盖全部流量中转 ---${NC}"
+  echo -e "${C}请选择入站协议：${NC}"
+  local i=1 tag proto port
   for line in "${lines[@]}"; do
     IFS=$'\x01' read -r tag proto port <<< "$line"
     echo -e "  [$i] ${G}${tag}${NC}"
     i=$((i+1))
   done
   echo ""
-  echo -e "${C}当前已配置中转节点：${NC}"
+  echo -e "${C}当前已配置全部流量中转：${NC}"
   if ! show_managed_relay_lines "$json"; then
-    echo -e "  ${Y}当前没有中转节点。${NC}"
+    echo -e "  ${Y}当前没有全部流量中转。${NC}"
   fi
   read -r -p "请选择编号（回车返回上一级）: " choice
   if [ -z "${choice:-}" ]; then
@@ -1879,44 +2195,28 @@ relay_add() {
   IFS=$'\x01' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
   inbound="$(find_inbound_by_entry_key "$json" "$entry_key")"
 
-  read -r -p "落地标识 (如 sg01): " land
-  [ -z "${land:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
-  if ! [[ "$land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-    warn "落地标识仅允许字母、数字、点、下划线、短横线。"
-    pause
-    return 0
-  fi
-  read -r -p "落地 IP 地址: " ip
-  [ -z "${ip:-}" ] && { warn "已取消，返回上一级。"; pause; return 0; }
-  read -r -p "落地端口（默认: 8080）: " relay_port
-  relay_port="${relay_port:-8080}"
-  if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || [ "$relay_port" -lt 1 ] || [ "$relay_port" -gt 65535 ]; then
-    warn "落地端口无效，已返回上一级。"
-    pause
-    return 0
-  fi
-  read -r -p "落地 SS2022 Password（格式：server_password:user_password，回车随机生成）: " pw
-  normalized_pw="$(ss2022_normalize_password_pair "$pw")"
-  param_echo "Password" "$normalized_pw"
+  relay_choose_landing_or_return "$json" landing_json || { pause; return 0; }
+  IFS=$'\x01' read -r land ip relay_port username password < <(
+    echo "$landing_json" | jq -r '[.id, .server, ((.port // 0) | tostring), (.username // ""), (.password // "")] | join("\u0001")'
+  )
 
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
 
   local new_user new_out updated_json
   new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
-    err "不支持的主入站类型，无法生成中转用户。"
+    err "不支持的入站协议，无法生成中转用户。"
     pause
     return 1
   }
-
-  new_out="$(jq -n --arg tag "$out_tag" --arg ip "$ip" --arg pw "$normalized_pw" --argjson p "$relay_port" '{type:"shadowsocks",tag:$tag,server:$ip,server_port:$p,method:"2022-blake3-aes-128-gcm",password:$pw}')"
+  new_out="$(relay_socks_outbound_json "$out_tag" "$ip" "$relay_port" "$username" "$password")"
 
   updated_json="$(echo "$json" | jq "${JQ_AUTH_USERS}"'
     .inbounds |= map(
       if .tag == $ek then
-        .users = (((.users // []) | map(select((.name // "") != $ru))) + [$nu])
+        .users = (((.users // []) | map(select((.name // .username // "") != $ru))) + [$nu])
       else
-        if .users? then .users |= map(select((.name // "") != $ru)) else . end
+        if .users? then .users |= map(select((.name // .username // "") != $ru)) else . end
       end
     )
     | .outbounds = (
@@ -1932,7 +2232,12 @@ relay_add() {
         + [{auth_user:[$ru], outbound:$ot}]
       )
   ' --arg ek "$entry_key" --arg ru "$relay_user" --arg ot "$out_tag" --argjson nu "$new_user" --argjson no "$new_out")"
-  updated_json="$(route_rebuild "$updated_json")" || {
+  relay_meta_upsert_landing "$landing_json" || {
+    err "保存落地机信息失败，已中止，未写入配置。"
+    pause
+    return 1
+  }
+  updated_json="$(relay_project_partial_state "$updated_json")" || {
     err "重建路由失败，已中止，未写入配置。"
     pause
     return 1
@@ -1948,30 +2253,314 @@ relay_add() {
     _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json" && _relay_ok=1
   fi
   if [ "$_relay_ok" -eq 1 ]; then
-    ok "中转节点已添加：${relay_user}（落地: ${ip}:${relay_port}）"
+    ok "全部流量中转已添加：${relay_user}（落地 SOCKS: ${ip}:${relay_port}）"
   else
-    warn "中转节点添加失败，已返回上一级。"
+    warn "全部流量中转添加失败，已返回上一级。"
   fi
   pause
   return 0
 }
 
-relay_delete() {
-  init_manager_env || { pause; return 0; }
-  local json lines=() node_lines=() choice picks=() updated_json line entry relay_user out_tag part idx
-  local node_key users_json
-  json="$(config_load)"
-  mapfile -t lines < <(relay_list_table "$json")
-  if [ ${#lines[@]} -eq 0 ]; then
-    warn "当前没有中转节点。"
-    pause
+# ---------- 部分流量中转元数据 ----------
+
+relay_meta_json() {
+  meta_load | jq -c '
+    (.relay // {}) as $relay
+    | ($relay.landing // null) as $legacy_landing
+    | (
+        if (($relay.landings // null) | type) == "object" then
+          ($relay.landings // {})
+        elif (($legacy_landing // null) | type) == "object" then
+          {($legacy_landing.id // "default"): $legacy_landing}
+        else
+          {}
+        end
+      ) as $landings
+    | ($legacy_landing.id // "default") as $legacy_id
+    | {
+        landings: $landings,
+        rules: [
+          ($relay.rules // [])[]?
+          | (.landing_id = (.landing_id // $legacy_id))
+          | select((.tag // "") != "" and (.file // "") != "" and (.landing_id // "") != "")
+        ]
+      }
+  '
+}
+
+relay_meta_rules_json() {
+  relay_meta_json | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "" and (.landing_id // "") != "")] | unique_by(.tag)'
+}
+
+relay_meta_landings_json() {
+  relay_meta_json | jq -c '.landings // {}'
+}
+
+relay_meta_save_obj() {
+  local relay_json="$1" meta_json
+  meta_json="$(meta_load)"
+  meta_json="$(echo "$meta_json" | jq --argjson r "$relay_json" '.relay = $r')" || return 1
+  meta_save "$meta_json"
+}
+
+relay_meta_save_rules_obj() {
+  local relay_json="$1"
+  relay_json="$(echo "$relay_json" | jq '
+    .landings = (.landings // {})
+    | .rules = (.rules // [])
+  ')" || return 1
+  relay_meta_save_obj "$relay_json"
+}
+
+relay_meta_upsert_landing() {
+  local landing_json="$1" relay_json
+  relay_json="$(relay_meta_json | jq --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+  ')" || return 1
+  relay_meta_save_rules_obj "$relay_json"
+}
+
+relay_rule_tag_for_file() {
+  local file="$1" base tag
+  base="${file%.srs}"
+  tag="${base//[^A-Za-z0-9_-]/-}"
+  echo "relay-${tag}"
+}
+
+relay_rule_url_for_file() {
+  echo "${RELAY_RULE_BASE_URL}/$1"
+}
+
+relay_normalize_rule_file() {
+  local raw="${1:-}" value
+  value="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  [ -n "$value" ] || return 1
+  if [[ "$value" == *"://"* ]]; then
+    err "请输入 rule-set 文件名，不要输入完整 URL。"
+    return 1
+  fi
+  [[ "$value" == geosite-* ]] || value="geosite-${value}"
+  [[ "$value" == *.srs ]] || value="${value}.srs"
+  [[ "$value" =~ ^geosite-[A-Za-z0-9._@!+-]+\.srs$ ]] || {
+    err "规则名格式无效：$value"
+    return 1
+  }
+  echo "$value"
+}
+
+relay_validate_rule_file() {
+  local file="$1" url
+  url="$(relay_rule_url_for_file "$file")"
+  curl -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+}
+
+relay_preset_rule() {
+  case "$1" in
+    1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
+    2) echo "Google|geosite-google.srs" ;;
+    3) echo "Netflix|geosite-netflix.srs" ;;
+    4) echo "Disney+|geosite-disney.srs" ;;
+    5) echo "YouTube|geosite-youtube.srs" ;;
+    6) echo "TikTok|geosite-tiktok.srs" ;;
+    *) return 1 ;;
+  esac
+}
+
+relay_rule_add_meta() {
+  local name="$1" file="$2" landing_json="$3" tag url relay_json
+  tag="$(relay_rule_tag_for_file "$file")"
+  url="$(relay_rule_url_for_file "$file")"
+  relay_json="$(relay_meta_json | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+    | .rules = (
+        ((.rules // []) | map(select((.tag // "") != $tag)))
+        + [{name:$name,file:$file,tag:$tag,url:$url,landing_id:$landing.id}]
+      )
+  ')" || return 1
+  relay_meta_save_rules_obj "$relay_json"
+}
+
+relay_rule_remove_meta_by_tags_json() {
+  local tags_json="$1" relay_json
+  relay_json="$(relay_meta_json | jq --argjson tags "$tags_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
+  ')" || return 1
+  relay_meta_save_rules_obj "$relay_json"
+}
+
+relay_rule_clear_meta() {
+  relay_meta_save_obj '{"landings":{},"rules":[]}'
+}
+
+relay_rules_count() {
+  relay_meta_rules_json | jq 'length'
+}
+
+relay_rules_print_summary() {
+  local relay_json rules_json count
+  relay_json="$(relay_meta_json)"
+  rules_json="$(echo "$relay_json" | jq -c '.rules // []')"
+  count="$(echo "$rules_json" | jq 'length')"
+  if [ "$count" -eq 0 ]; then
+    echo "部分流量转发：无"
     return 0
   fi
+  echo "部分流量转发："
+  echo "$relay_json" | jq -r '
+    (.landings // {}) as $landings
+    | (.rules // [])
+    | sort_by(.landing_id // "", .name // "")
+    | group_by(.landing_id // "")
+    | .[]
+    | (.[0].landing_id // "未设置") as $landing_id
+    | "  - \($landing_id)：\([.[].name] | join("、"))"
+  '
+}
 
+relay_rules_print_numbered() {
+  relay_meta_rules_json | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name) -> \(.value.landing_id)：\(.value.file)"'
+}
+
+relay_select_or_prompt_partial_landing() {
+  local json="$1" outvar="$2"
+  relay_choose_landing_or_return "$json" "$outvar"
+}
+
+relay_config_project_json() {
+  local json="$1" rules_json="$2" landings_json="$3"
+  echo "$json" | jq \
+    --argjson rules "$rules_json" \
+    --argjson landings "$landings_json" '
+    def socks_out($tag; $landing):
+      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber), version:"5"}
+      | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end);
+    def rule_set_array:
+      ((.rule_set // []) | if type == "array" then . else [.] end);
+    ($rules | map(.landing_id // "") | unique | map(select(. != "" and (($landings[.] // null) != null)))) as $used_landings
+    |
+    .route = (.route // {"rules":[],"final":"reject"})
+    | .route.rules = (.route.rules // [])
+    | .route.rules = (
+        .route.rules
+        | map(select(
+            (((.outbound // "") == "relay-partial") | not)
+            and (((.outbound // "") | startswith("relay-")) | not)
+            and ((rule_set_array | any(startswith("relay-geosite-"))) | not)
+          ))
+      )
+    | .route.rule_set = (
+        ((.route.rule_set // []) | map(select(((.tag // "") | startswith("relay-geosite-")) | not)))
+        + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
+          else [] end)
+      )
+    | .outbounds = (
+        ((.outbounds // [])
+          | map(
+              (.tag // "") as $tag
+              | if ($tag | startswith("to-")) and (($landings[($tag | sub("^to-"; ""))] // null) != null) then
+                  socks_out($tag; $landings[($tag | sub("^to-"; ""))])
+                else .
+                end
+            )
+          | map(select(((.tag // "") != "relay-partial") and (((.tag // "") | startswith("relay-")) | not)))
+        )
+        + (if ($used_landings | length) > 0 then
+            ($used_landings | map(. as $landing_id | socks_out(("relay-" + $landing_id); $landings[$landing_id])))
+          else [] end)
+      )
+  '
+}
+
+relay_project_partial_state() {
+  local json="$1" rules_json landings_json projected
+  rules_json="$(relay_meta_rules_json)"
+  landings_json="$(relay_meta_landings_json)"
+  projected="$(relay_config_project_json "$json" "$rules_json" "$landings_json")" || return 1
+  route_rebuild "$projected"
+}
+
+relay_apply_partial_state() {
+  local json projected
+  json="$(config_load)"
+  projected="$(relay_project_partial_state "$json")" || return 1
+  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected"
+}
+
+relay_add_preset_rules() {
+  local raw="$1" picks=() pick preset item name file landing_json json
+  init_manager_env || return 1
+  json="$(config_load)"
+  mapfile -t picks < <(parse_plus_selections "$raw")
+  [ "${#picks[@]}" -gt 0 ] || return 1
+  for pick in "${picks[@]}"; do
+    if ! [[ "$pick" =~ ^[2-7]$ ]]; then
+      err "只能使用 2-7，并用 + 连接。"
+      pause
+      return 1
+    fi
+  done
+  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  for pick in "${picks[@]}"; do
+    preset=$((pick - 1))
+    item="$(relay_preset_rule "$preset")" || return 1
+    name="${item%%|*}"
+    file="${item#*|}"
+    relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
+  done
+  relay_apply_partial_state || return 1
+  ok "部分流量中转规则已应用。"
+  pause
+}
+
+relay_custom_rule_menu() {
+  local raw file name landing_json json
+  init_manager_env || return 1
+  json="$(config_load)"
+  clear
+  print_rect_title "自定义网站规则"
+  echo "请先在以下页面查找规则名："
+  echo "$RELAY_RULE_LOOKUP_URL"
+  echo
+  echo "例如：openai 或 geosite-openai 或 geosite-openai.srs"
+  read -r -p "请输入规则名（回车返回）：" raw
+  [ -n "${raw:-}" ] || return 0
+  file="$(relay_normalize_rule_file "$raw")" || { pause; return 1; }
+  say "校验规则文件：$file"
+  if ! relay_validate_rule_file "$file"; then
+    err "未在 SagerNet rule-set 中找到：$file"
+    pause
+    return 1
+  fi
+  relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
+  name="自定义：${file%.srs}"
+  relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
+  relay_apply_partial_state || return 1
+  ok "自定义部分流量中转已添加：$file"
+  pause
+}
+
+# ---------- 删除中转规则 ----------
+
+relay_delete() {
+  init_manager_env || { pause; return 0; }
+  local json lines=() node_lines=() partial_json partial_count item_lines=() choice picks=()
+  local updated_json line entry relay_user out_tag node_key users_json type payload display idx part
+  local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json
+  local -a selected_tags=()
+
+  json="$(config_load)"
+  mapfile -t lines < <(relay_list_table "$json")
   mapfile -t node_lines < <(
     printf '%s\n' "${lines[@]}" | awk -F '\x01' '
       function node_part(s) { sub(/@.*/, "", s); return s }
-      {
+      NF>=2 {
         node=node_part($2)
         if (!(node in seen)) {
           seen[node]=1
@@ -1979,87 +2568,187 @@ relay_delete() {
         }
       }' | sort_tsv_by_protocol 2
   )
+  partial_json="$(relay_meta_rules_json)"
+  partial_count="$(echo "$partial_json" | jq 'length')"
+  if [ ${#node_lines[@]} -eq 0 ] && [ "$partial_count" -eq 0 ]; then
+    warn "当前没有中转规则。"
+    pause
+    return 0
+  fi
 
   clear
-  echo -e "${R}--- 删除中转节点 ---${NC}"
+  print_rect_title "删除中转规则"
+  relay_hr
   local i=1
-  for line in "${node_lines[@]}"; do
-    IFS=$'\x01' read -r entry relay_user out_tag <<< "$line"
-    echo -e " [$i] ${relay_user}"
-    i=$((i+1))
-  done
-  read -r -p "请输入要删除的编号（支持 1+2+3，回车返回上一级）: " choice
-  [ -z "${choice:-}" ] && return 0
-  mapfile -t picks < <(parse_plus_selections "$choice")
-  [ ${#picks[@]} -eq 0 ] && { warn "未选择任何条目。"; pause; return 1; }
+  if [ ${#node_lines[@]} -gt 0 ]; then
+    echo "全部流量转发至落地机："
+    for line in "${node_lines[@]}"; do
+      IFS=$'\x01' read -r entry relay_user out_tag <<< "$line"
+      display="全部流量：${relay_user}"
+      item_lines+=("full"$'\x01'"$relay_user"$'\x01'"$display")
+      echo -e "  ${C}${i}.${NC} ${display}"
+      i=$((i+1))
+    done
+  fi
+  if [ "$partial_count" -gt 0 ]; then
+    echo "部分流量转发至落地机："
+    while IFS=$'\x01' read -r tag display; do
+      item_lines+=("partial"$'\x01'"$tag"$'\x01'"部分流量：${display}")
+      echo -e "  ${C}${i}.${NC} 部分流量：${display}"
+      i=$((i+1))
+    done < <(echo "$partial_json" | jq -r '.[] | [(.tag // ""), ((.landing_id // "未设置") + "：" + (.name // "") + "：" + (.file // ""))] | join("\u0001")')
+  fi
+  relay_hr
+  echo -e "  ${C}99.${NC} 删除全部中转规则"
+  echo -e "  ${R}0.${NC} 返回上一级"
+  echo
+  echo "多个编号用+连接，例如：1+3"
+  read -r -p "请输入要删除的编号：" choice
+  [ -n "${choice:-}" ] || return 0
+  [ "$choice" = "0" ] && return 0
 
-  updated_json="$json"
+  mapfile -t picks < <(parse_plus_selections "$choice")
+  [ "${#picks[@]}" -gt 0 ] || { warn "未选择任何中转规则。"; pause; return 0; }
   for part in "${picks[@]}"; do
-    if ! [[ "$part" =~ ^[0-9]+$ ]] || [ "$part" -lt 1 ] || [ "$part" -gt "${#node_lines[@]}" ]; then
-      err "编号超出范围：$part"
+    [ "$part" = "99" ] && has_delete_all=1
+  done
+  if [ "$has_delete_all" = "1" ]; then
+    if [ "${#picks[@]}" -ne 1 ]; then
+      err "删除全部中转规则不能和其它编号一起使用。"
       pause
       return 1
     fi
-    idx=$((part-1))
-    IFS=$'\x01' read -r entry node_key out_tag <<< "${node_lines[$idx]}"
-    users_json="$({
-      printf '%s\n' "${lines[@]}" | awk -F '\x01' -v n="$node_key" '
-        function node_part(s) { sub(/@.*/, "", s); return s }
-        node_part($2)==n { print $2 }'
-    } | awk 'NF' | sort -u | jq -R . | jq -s '.')"
-    updated_json="$(remove_relays_by_user_names "$updated_json" "$users_json")" || {
-      err "删除中转失败，已中止，未写入配置。"
-      pause
-      return 1
-    }
-  done
+    ask_confirm_yn "确认删除全部中转规则？(y/N): " || return 0
+  fi
+
+  updated_json="$json"
+  if [ "$has_delete_all" = "1" ]; then
+    for line in "${node_lines[@]}"; do
+      IFS=$'\x01' read -r entry node_key out_tag <<< "$line"
+      users_json="$({
+        printf '%s\n' "${lines[@]}" | awk -F '\x01' -v n="$node_key" '
+          function node_part(s) { sub(/@.*/, "", s); return s }
+          node_part($2)==n { print $2 }'
+      } | awk 'NF' | sort -u | jq -R . | jq -s '.')"
+      updated_json="$(remove_relays_by_user_names "$updated_json" "$users_json")" || {
+        err "删除全部流量中转失败，已中止，未写入配置。"
+        pause
+        return 1
+      }
+      full_changed=1
+    done
+    relay_rule_clear_meta || return 1
+    [ "$partial_count" -gt 0 ] && partial_changed=1
+  else
+    for part in "${picks[@]}"; do
+      if ! [[ "$part" =~ ^[0-9]+$ ]] || [ "$part" -lt 1 ] || [ "$part" -gt "${#item_lines[@]}" ]; then
+        err "编号超出范围：$part"
+        pause
+        return 1
+      fi
+      idx=$((part-1))
+      IFS=$'\x01' read -r type payload display <<< "${item_lines[$idx]}"
+      case "$type" in
+        full)
+          node_key="$payload"
+          users_json="$({
+            printf '%s\n' "${lines[@]}" | awk -F '\x01' -v n="$node_key" '
+              function node_part(s) { sub(/@.*/, "", s); return s }
+              node_part($2)==n { print $2 }'
+          } | awk 'NF' | sort -u | jq -R . | jq -s '.')"
+          updated_json="$(remove_relays_by_user_names "$updated_json" "$users_json")" || {
+            err "删除全部流量中转失败，已中止，未写入配置。"
+            pause
+            return 1
+          }
+          full_changed=1
+          ;;
+        partial)
+          selected_tags+=("$payload")
+          partial_changed=1
+          ;;
+      esac
+    done
+    if [ ${#selected_tags[@]} -gt 0 ]; then
+      tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
+      relay_rule_remove_meta_by_tags_json "$tags_json" || return 1
+    fi
+  fi
+
+  final_json="$(relay_project_partial_state "$updated_json")" || {
+    err "重建中转规则失败，已中止，未写入配置。"
+    pause
+    return 1
+  }
 
   local _delete_ok=0
   if user_db_exists; then
     local db_json
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
-    db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
-      _delete_ok=1
+    db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
+    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" && _delete_ok=1
+  else
+    _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json" && _delete_ok=1
+  fi
+
+  if [ "$_delete_ok" -eq 1 ]; then
+    if [ "$full_changed" -eq 1 ] && [ "$partial_changed" -eq 1 ]; then
+      ok "中转规则已删除。"
+    elif [ "$full_changed" -eq 1 ]; then
+      ok "全部流量中转已删除。"
     else
-      warn "删除中转失败，已返回上一级。"
+      ok "部分流量中转已删除。"
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
-      _delete_ok=1
-    else
-      warn "删除中转失败，已返回上一级。"
-    fi
+    warn "中转规则删除失败，已返回上一级。"
   fi
-  [ "$_delete_ok" -eq 1 ] && ok "中转节点已删除。"
   pause
   return 0
 }
+
+# ---------- 中转管理主菜单 ----------
 
 manage_relay_nodes() {
   init_manager_env || { pause; return 0; }
   while true; do
     clear
-    local json
+    local json act count
     json="$(config_load)"
     print_rect_title "中转管理"
-    local _has_relay=0
-    while IFS= read -r relay_node; do
-      [ -n "$relay_node" ] || continue
-      _has_relay=1
-      echo -e "  - ${G}${relay_node}${NC}"
-    done < <(relay_list_table "$json" | awk -F '\x01' 'NF>=2 {split($2,a,"@"); print a[1]}' | sort -u | sort_node_keys_by_protocol)
-    [ "$_has_relay" -eq 0 ] && echo -e "  ${Y}当前没有中转节点。${NC}"
-    echo -e "${B}----------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 添加/覆盖中转节点"
-    echo -e "  ${C}2.${NC} 删除中转节点"
+    echo "当前中转规则："
+    while IFS= read -r line; do
+      echo "  $line"
+    done < <(relay_full_summary_lines "$json")
+    while IFS= read -r line; do
+      echo "  $line"
+    done < <(relay_rules_print_summary)
+    relay_hr
+    echo "----- 全部流量转发至落地机 -----"
+    echo -e "  ${C}1.${NC} 本机作为中转机"
+    echo
+    echo "----- 部分流量转发至落地机 -----"
+    echo -e "  ${C}2.${NC} AI 服务（海外聚合）"
+    echo -e "  ${C}3.${NC} Google"
+    echo -e "  ${C}4.${NC} Netflix"
+    echo -e "  ${C}5.${NC} Disney+"
+    echo -e "  ${C}6.${NC} YouTube"
+    echo -e "  ${C}7.${NC} TikTok"
+    echo -e "  ${C}8.${NC} 自定义网站规则"
+    count="$(relay_rules_count)"
+    if [ "$count" -gt 0 ] || relay_list_table "$json" | awk 'NF {found=1} END {exit !found}'; then
+      echo -e "  ${C}9.${NC} 删除中转规则"
+    fi
     echo -e "  ${R}0.${NC} 返回主菜单"
+    echo
+    echo "2-7支持用+连接，例如：2+4+7"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1) relay_add || true ;;
-      2) relay_delete || true ;;
+      8) relay_custom_rule_menu || true ;;
+      9) relay_delete || true ;;
       0|q|Q|"") return 0 ;;
+      *+*|[2-7]) relay_add_preset_rules "$act" || true ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
   done
@@ -2139,7 +2828,7 @@ ensure_grpcurl() {
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
   download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
-  tmp_dir="$(mktemp -d)"
+  tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
   if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
@@ -2156,9 +2845,7 @@ ensure_grpcurl_logged() {
   if [ -x "$GRPCURL_BIN" ]; then
     return 0
   fi
-  say "安装 grpcurl..."
   if ensure_grpcurl; then
-    ok "grpcurl 已安装。"
     return 0
   fi
   warn "grpcurl 安装失败，用户流量读数可能不可用。"
@@ -2471,6 +3158,25 @@ user_db_cleanup_current_and_save() {
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
+migrate_socks_user_object_for_desired() {
+  local inbound="$1" desired="$2" entry_key="$3"
+  [ "$(user_node_part "$desired")" = "$entry_key" ] || return 1
+  local business_user
+  business_user="$(user_business_name "$desired")"
+  echo "$inbound" | jq -c --arg desired "$desired" --arg biz "$business_user" '
+    def node_part($u): if ($u | contains("@")) then ($u | split("@")[0]) else $u end;
+    def business($u): if ($u | contains("@")) then ($u | split("@")[1]) else "admin" end;
+    [
+      (.users // [])[]?
+      | (.username // "") as $u
+      | select($u != "")
+      | select(((node_part($u) | contains("-to-")) | not))
+      | select(business($u) == $biz)
+      | .username = $desired
+    ][0] // empty
+  '
+}
+
 user_manager_apply_to_json() {
   local json="$1" db_json="$2"
   local work_json="$json"
@@ -2483,7 +3189,7 @@ user_manager_apply_to_json() {
     [ -n "$inbound" ] || continue
 
     local relay_nodes=() relay_node
-    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]?.name // empty' | while IFS= read -r n; do
+    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]? | (.name // .username // empty)' | while IFS= read -r n; do
       [ -n "$n" ] || continue
       np="$(user_node_part "$n")"
       if [[ "$np" == *"-to-"* && "$np" != "$entry_key" ]]; then
@@ -2491,13 +3197,21 @@ user_manager_apply_to_json() {
       fi
     done | sort -u)
 
-    local desired_names=("$entry_key")
+    local credential_base_name="$entry_key"
+
+    local desired_names=()
+    if [ "$proto" != "socks" ] || user_db_user_is_enabled "$db_json" "admin"; then
+      desired_names+=("$credential_base_name")
+    fi
     local username
     while IFS= read -r username; do
       [ -n "$username" ] || continue
       [ "$username" = "admin" ] && continue
+      if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
+        continue
+      fi
       if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
-        desired_names+=("$(node_user_name "$entry_key" "$username")")
+        desired_names+=("$(node_user_name "$credential_base_name" "$username")")
       fi
     done < <(user_db_all_users "$db_json")
 
@@ -2506,6 +3220,9 @@ user_manager_apply_to_json() {
       while IFS= read -r username; do
         [ -n "$username" ] || continue
         [ "$username" = "admin" ] && continue
+        if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
+          continue
+        fi
         if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
           desired_names+=("$(node_user_name "$relay_node" "$username")")
         fi
@@ -2517,6 +3234,9 @@ user_manager_apply_to_json() {
     local desired full_name existing_obj new_obj
     for desired in "${desired_names[@]}"; do
       existing_obj="$(find_user_obj_in_inbound "$inbound" "$desired")"
+      if [ -z "$existing_obj" ] && [ "$proto" = "socks" ]; then
+        existing_obj="$(migrate_socks_user_object_for_desired "$inbound" "$desired" "$entry_key" || true)"
+      fi
       if [ -n "$existing_obj" ]; then
         echo "$existing_obj" >> "$users_tmp"
       else
@@ -6168,6 +6888,13 @@ build_v2rayn_tuic_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_socks_link() {
+  local server="$1" port="$2" username="$3" password="$4" name="$5"
+  printf 'socks://%s:%s@%s:%s#%s' \
+    "$(url_encode "$username")" "$(url_encode "$password")" \
+    "$server" "$port" "$(url_encode "$name")"
+}
+
 # ---------- 导出上下文收集 ----------
 
 export_collect_context() {
@@ -6229,7 +6956,7 @@ export_configs() {
 
     while read -r user; do
       IFS=$'\x01' read -r name uuid pass flow < <(
-        echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
+        echo "$user" | jq -r '[(.name // .username // ""), (.uuid // ""), (.password // ""),
           (.flow // "xtls-rprx-vision")] | join("\u0001")'
       )
       [ -z "$name" ] && continue
@@ -6340,6 +7067,21 @@ export_configs() {
             echo -e " 通用链接: ${v2rayn_link}"
             echo ""
             echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
+          } >> "$target_file"
+          ;;
+        socks)
+          [ -z "$name" ] && continue
+          [ -z "$pass" ] && continue
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            echo -e " Clash: - {name: \"${out_name}\", type: socks5, server: $ip, port: ${port}, username: \"${name}\", password: \"${pass}\", udp: true}"
+            echo ""
+            echo -e " Quantumult X: socks5=${ip}:${port}, username=${name}, password=${pass}, udp-relay=true, tag=${out_name}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_socks_link "$ip" "$port" "$name" "$pass" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = socks5, ${ip}, ${port}, username=${name}, password=${pass}, udp-relay=true"
           } >> "$target_file"
           ;;
       esac
@@ -6670,7 +7412,6 @@ remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 # ---------- 服务管理（systemd / OpenRC） ----------
 
 remove_all_singbox_service_units() {
-  say "清理 sing-box service（包含官方残留）..."
   case "$INIT_SYSTEM" in
     systemd)
       systemctl stop sing-box >/dev/null 2>&1 || true
@@ -6689,7 +7430,6 @@ remove_all_singbox_service_units() {
       rm -f /etc/init.d/sing-box >/dev/null 2>&1 || true
       ;;
   esac
-  ok "sing-box service 已清理。"
 }
 
 write_managed_singbox_service() {
@@ -6864,7 +7604,11 @@ install_or_update_singbox() {
     sync_user_usage_counters || true
   fi
 
-  tmp_dir="$(mktemp -d)"
+  tmp_dir="$(make_disk_tmp_dir sb-install)" || {
+    err "创建临时目录失败。"
+    pause
+    return 1
+  }
   base_url="https://github.com/${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}/releases/download/${tag}"
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
@@ -6929,7 +7673,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "准备流量统计依赖..."
+  say "准备流量统计组件..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
@@ -7193,6 +7937,7 @@ uninstall_singbox_keep_config() {
     groupdel sing-box >/dev/null 2>&1 || true
   fi
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  rm -rf /var/tmp/sb-install.* >/dev/null 2>&1 || true
   refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
@@ -7307,7 +8052,7 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("\u0001")')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // .value.username // "")] | join("\u0001")')
     mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
@@ -7319,7 +8064,7 @@ normalize_takeover(){
           break
         fi
       done
-      if [ $is_relay -eq 0 ] && [[ "$uname" != *"@"* ]]; then
+      if [ "$proto" != "socks" ] && [ $is_relay -eq 0 ] && [[ "$uname" != *"@"* ]]; then
         direct_candidates+=("$uidx:$uname")
       fi
     done
@@ -7329,7 +8074,11 @@ normalize_takeover(){
       uidx="${direct_candidates[0]%%:*}"
       if [ "$direct_old" != "$target" ]; then
         work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson uidx "$uidx" --arg old "$direct_old" --arg new "$target" '
-          .inbounds[$idx].users[$uidx].name = $new
+          if (.inbounds[$idx].users[$uidx].name? // "") == $old then
+            .inbounds[$idx].users[$uidx].name = $new
+          elif (.inbounds[$idx].users[$uidx].username? // "") == $old then
+            .inbounds[$idx].users[$uidx].username = $new
+          else . end
           | .route.rules |= map(
               if (.auth_user? != null) then
                 .auth_user |= (
@@ -7377,7 +8126,11 @@ normalize_takeover(){
 
       if [ "$relay_user" != "$new_user" ]; then
         work_json="$(echo "$work_json" | jq --argjson idx "$idx" --arg old "$relay_user" --arg new "$new_user" '
-          (.inbounds[$idx].users // []) |= map(if (.name // "") == $old then .name = $new else . end)
+          (.inbounds[$idx].users // []) |= map(
+            if (.name // "") == $old then .name = $new
+            elif (.username // "") == $old then .username = $new
+            else . end
+          )
           | .route.rules |= map(
               if (.auth_user? != null) then
                 .auth_user |= (
@@ -7467,6 +8220,24 @@ normalize_takeover(){
 
 # ---------- 协议安装菜单 ----------
 
+prompt_password_or_return() {
+  local prompt="${1:-Password（回车随机生成）: }" outvar="$2" val
+  read -r -p "$prompt" val
+  printf -v "$outvar" '%s' "${val:-}"
+  return 0
+}
+
+prompt_ss2022_password_or_return() {
+  local outvar="$1" val
+  read -r -p "Password（回车随机生成）: " val
+  if [ -n "${val:-}" ] && ! ss2022_prepare_password_pair "$val" >/dev/null 2>&1; then
+    warn "Shadowsocks 2022 Password 必须是解码后 16 字节的 base64；如需分别设置服务端/用户密码，请使用 base64:base64。"
+    return 1
+  fi
+  printf -v "$outvar" '%s' "${val:-}"
+  return 0
+}
+
 protocol_install_menu() {
   local json="$1"
   local updated_json="$json"
@@ -7478,17 +8249,18 @@ protocol_install_menu() {
   echo -e "  [1] vless-reality"
   echo -e "  [2] anytls"
   echo -e "  [3] shadowsocks"
-  echo -e "  [4] trojan"
-  echo -e "  [5] vmess-ws"
-  echo -e "  [6] vless-ws"
-  echo -e "  [7] tuic"
+  echo -e "  [4] socks"
+  echo -e "  [5] trojan"
+  echo -e "  [6] vmess-ws"
+  echo -e "  [7] vless-ws"
+  echo -e "  [8] tuic"
   read -r -p "请输入要安装的协议编号: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
-  local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass
+  local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass username
   for c in "${choice_arr[@]}"; do
-    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 7 ]; then
+    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 8 ]; then
       warn "无效协议编号：$c，已返回上一级。"
       pause
       return 0
@@ -7552,7 +8324,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts anytls "$port")"
         done
         sni="$(choose_tls_domain "AnyTLS")" || return 0
-        if ! inbound="$(build_anytls_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_anytls_inbound "$port" "$sni" "$pass")"; then
           err "生成 AnyTLS 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0
@@ -7570,7 +8343,12 @@ protocol_install_menu() {
           ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
           entry_key="$(entry_key_from_parts shadowsocks "$port")"
         done
-        inbound="$(build_ss_inbound "$port")"
+        prompt_ss2022_password_or_return pass || { pause; return 0; }
+        if ! inbound="$(build_ss_inbound "$port" "$pass")"; then
+          err "生成 Shadowsocks 配置失败，已返回上一级。"
+          pause
+          return 0
+        fi
         method="$(echo "$inbound" | jq -r '.method // empty')"
         server_pass="$(echo "$inbound" | jq -r '.password // empty')"
         user_pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
@@ -7585,6 +8363,28 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       4)
+        ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
+        entry_key="$(entry_key_from_parts socks "$port")"
+        while port_conflict_for_protocol "$updated_json" socks "$port" "$entry_key"; do
+          warn "端口 ${port} 已被同层协议占用，请更换。"
+          ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
+          entry_key="$(entry_key_from_parts socks "$port")"
+        done
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        [ -n "$pass" ] || pass="$(random_b64_password 12)"
+        if ! inbound="$(build_socks_inbound "$port" "$pass")"; then
+          err "生成 SOCKS 配置失败，已返回上一级。"
+          pause
+          return 0
+        fi
+        username="$(echo "$inbound" | jq -r '.users[0].username // empty')"
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
+        param_echo "Username" "$username"
+        param_echo "Password" "$pass"
+        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        added_node_keys+=("$entry_key")
+        ;;
+      5)
         ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts trojan "$port")"
         while port_conflict_for_protocol "$updated_json" trojan "$port" "$entry_key"; do
@@ -7593,7 +8393,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts trojan "$port")"
         done
         sni="$(choose_tls_domain "Trojan")" || return 0
-        if ! inbound="$(build_trojan_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_trojan_inbound "$port" "$sni" "$pass")"; then
           err "生成 Trojan 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0
@@ -7603,7 +8404,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      5)
+      6)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vmess-ws "$port")"
@@ -7620,7 +8421,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      6)
+      7)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vless-ws "$port")"
@@ -7637,7 +8438,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      7)
+      8)
         ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts tuic "$port")"
         while port_conflict_for_protocol "$updated_json" tuic "$port" "$entry_key"; do
@@ -7646,7 +8447,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts tuic "$port")"
         done
         sni="$(choose_tls_domain "TUIC")" || return 0
-        if ! inbound="$(build_tuic_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_tuic_inbound "$port" "$sni" "$pass")"; then
           err "生成 TUIC 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0
@@ -7991,7 +8793,7 @@ main_menu() {
     echo -e "  ${C}5.${NC} 中转管理"
     echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} WARP 分流"
+    echo -e "  ${C}8.${NC} warp分流"
     echo -e "  ${C}9.${NC} 系统工具"
     echo -e "  ${C}10.${NC} 卸载 sing-box"
     echo -e "  ${R}0.${NC} 退出系统"

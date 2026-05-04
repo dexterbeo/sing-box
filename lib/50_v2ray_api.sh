@@ -70,7 +70,7 @@ ensure_grpcurl() {
   [ -n "$tag" ] || { warn "未获取到 grpcurl 最新版本。"; return 1; }
   download_url="$(curl -fsSL "$api" 2>/dev/null | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
-  tmp_dir="$(mktemp -d)"
+  tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
   if ! curl -fsSL --connect-timeout 20 --retry 3 "$download_url" -o "$tmp_dir/grpcurl.tar.gz"; then
     rm -rf "$tmp_dir"
     warn "下载 grpcurl 失败。"
@@ -87,9 +87,7 @@ ensure_grpcurl_logged() {
   if [ -x "$GRPCURL_BIN" ]; then
     return 0
   fi
-  say "安装 grpcurl..."
   if ensure_grpcurl; then
-    ok "grpcurl 已安装。"
     return 0
   fi
   warn "grpcurl 安装失败，用户流量读数可能不可用。"

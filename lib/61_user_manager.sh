@@ -6,6 +6,25 @@
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
+migrate_socks_user_object_for_desired() {
+  local inbound="$1" desired="$2" entry_key="$3"
+  [ "$(user_node_part "$desired")" = "$entry_key" ] || return 1
+  local business_user
+  business_user="$(user_business_name "$desired")"
+  echo "$inbound" | jq -c --arg desired "$desired" --arg biz "$business_user" '
+    def node_part($u): if ($u | contains("@")) then ($u | split("@")[0]) else $u end;
+    def business($u): if ($u | contains("@")) then ($u | split("@")[1]) else "admin" end;
+    [
+      (.users // [])[]?
+      | (.username // "") as $u
+      | select($u != "")
+      | select(((node_part($u) | contains("-to-")) | not))
+      | select(business($u) == $biz)
+      | .username = $desired
+    ][0] // empty
+  '
+}
+
 user_manager_apply_to_json() {
   local json="$1" db_json="$2"
   local work_json="$json"
@@ -18,7 +37,7 @@ user_manager_apply_to_json() {
     [ -n "$inbound" ] || continue
 
     local relay_nodes=() relay_node
-    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]?.name // empty' | while IFS= read -r n; do
+    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]? | (.name // .username // empty)' | while IFS= read -r n; do
       [ -n "$n" ] || continue
       np="$(user_node_part "$n")"
       if [[ "$np" == *"-to-"* && "$np" != "$entry_key" ]]; then
@@ -26,13 +45,21 @@ user_manager_apply_to_json() {
       fi
     done | sort -u)
 
-    local desired_names=("$entry_key")
+    local credential_base_name="$entry_key"
+
+    local desired_names=()
+    if [ "$proto" != "socks" ] || user_db_user_is_enabled "$db_json" "admin"; then
+      desired_names+=("$credential_base_name")
+    fi
     local username
     while IFS= read -r username; do
       [ -n "$username" ] || continue
       [ "$username" = "admin" ] && continue
+      if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
+        continue
+      fi
       if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
-        desired_names+=("$(node_user_name "$entry_key" "$username")")
+        desired_names+=("$(node_user_name "$credential_base_name" "$username")")
       fi
     done < <(user_db_all_users "$db_json")
 
@@ -41,6 +68,9 @@ user_manager_apply_to_json() {
       while IFS= read -r username; do
         [ -n "$username" ] || continue
         [ "$username" = "admin" ] && continue
+        if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
+          continue
+        fi
         if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
           desired_names+=("$(node_user_name "$relay_node" "$username")")
         fi
@@ -52,6 +82,9 @@ user_manager_apply_to_json() {
     local desired full_name existing_obj new_obj
     for desired in "${desired_names[@]}"; do
       existing_obj="$(find_user_obj_in_inbound "$inbound" "$desired")"
+      if [ -z "$existing_obj" ] && [ "$proto" = "socks" ]; then
+        existing_obj="$(migrate_socks_user_object_for_desired "$inbound" "$desired" "$entry_key" || true)"
+      fi
       if [ -n "$existing_obj" ]; then
         echo "$existing_obj" >> "$users_tmp"
       else

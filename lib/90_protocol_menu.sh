@@ -88,7 +88,7 @@ normalize_takeover(){
     local -a user_lines=() relay_names=() direct_candidates=()
     local user_line uidx uname relay_user out_tag land new_user new_out direct_old
 
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // "")] | join("\u0001")')
+    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // .value.username // "")] | join("\u0001")')
     mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
 
     for user_line in "${user_lines[@]}"; do
@@ -100,7 +100,7 @@ normalize_takeover(){
           break
         fi
       done
-      if [ $is_relay -eq 0 ] && [[ "$uname" != *"@"* ]]; then
+      if [ "$proto" != "socks" ] && [ $is_relay -eq 0 ] && [[ "$uname" != *"@"* ]]; then
         direct_candidates+=("$uidx:$uname")
       fi
     done
@@ -110,7 +110,11 @@ normalize_takeover(){
       uidx="${direct_candidates[0]%%:*}"
       if [ "$direct_old" != "$target" ]; then
         work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson uidx "$uidx" --arg old "$direct_old" --arg new "$target" '
-          .inbounds[$idx].users[$uidx].name = $new
+          if (.inbounds[$idx].users[$uidx].name? // "") == $old then
+            .inbounds[$idx].users[$uidx].name = $new
+          elif (.inbounds[$idx].users[$uidx].username? // "") == $old then
+            .inbounds[$idx].users[$uidx].username = $new
+          else . end
           | .route.rules |= map(
               if (.auth_user? != null) then
                 .auth_user |= (
@@ -158,7 +162,11 @@ normalize_takeover(){
 
       if [ "$relay_user" != "$new_user" ]; then
         work_json="$(echo "$work_json" | jq --argjson idx "$idx" --arg old "$relay_user" --arg new "$new_user" '
-          (.inbounds[$idx].users // []) |= map(if (.name // "") == $old then .name = $new else . end)
+          (.inbounds[$idx].users // []) |= map(
+            if (.name // "") == $old then .name = $new
+            elif (.username // "") == $old then .username = $new
+            else . end
+          )
           | .route.rules |= map(
               if (.auth_user? != null) then
                 .auth_user |= (
@@ -248,6 +256,24 @@ normalize_takeover(){
 
 # ---------- 协议安装菜单 ----------
 
+prompt_password_or_return() {
+  local prompt="${1:-Password（回车随机生成）: }" outvar="$2" val
+  read -r -p "$prompt" val
+  printf -v "$outvar" '%s' "${val:-}"
+  return 0
+}
+
+prompt_ss2022_password_or_return() {
+  local outvar="$1" val
+  read -r -p "Password（回车随机生成）: " val
+  if [ -n "${val:-}" ] && ! ss2022_prepare_password_pair "$val" >/dev/null 2>&1; then
+    warn "Shadowsocks 2022 Password 必须是解码后 16 字节的 base64；如需分别设置服务端/用户密码，请使用 base64:base64。"
+    return 1
+  fi
+  printf -v "$outvar" '%s' "${val:-}"
+  return 0
+}
+
 protocol_install_menu() {
   local json="$1"
   local updated_json="$json"
@@ -259,17 +285,18 @@ protocol_install_menu() {
   echo -e "  [1] vless-reality"
   echo -e "  [2] anytls"
   echo -e "  [3] shadowsocks"
-  echo -e "  [4] trojan"
-  echo -e "  [5] vmess-ws"
-  echo -e "  [6] vless-ws"
-  echo -e "  [7] tuic"
+  echo -e "  [4] socks"
+  echo -e "  [5] trojan"
+  echo -e "  [6] vmess-ws"
+  echo -e "  [7] vless-ws"
+  echo -e "  [8] tuic"
   read -r -p "请输入要安装的协议编号: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
-  local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass
+  local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass username
   for c in "${choice_arr[@]}"; do
-    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 7 ]; then
+    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 8 ]; then
       warn "无效协议编号：$c，已返回上一级。"
       pause
       return 0
@@ -333,7 +360,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts anytls "$port")"
         done
         sni="$(choose_tls_domain "AnyTLS")" || return 0
-        if ! inbound="$(build_anytls_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_anytls_inbound "$port" "$sni" "$pass")"; then
           err "生成 AnyTLS 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0
@@ -351,7 +379,12 @@ protocol_install_menu() {
           ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
           entry_key="$(entry_key_from_parts shadowsocks "$port")"
         done
-        inbound="$(build_ss_inbound "$port")"
+        prompt_ss2022_password_or_return pass || { pause; return 0; }
+        if ! inbound="$(build_ss_inbound "$port" "$pass")"; then
+          err "生成 Shadowsocks 配置失败，已返回上一级。"
+          pause
+          return 0
+        fi
         method="$(echo "$inbound" | jq -r '.method // empty')"
         server_pass="$(echo "$inbound" | jq -r '.password // empty')"
         user_pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
@@ -366,6 +399,28 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       4)
+        ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
+        entry_key="$(entry_key_from_parts socks "$port")"
+        while port_conflict_for_protocol "$updated_json" socks "$port" "$entry_key"; do
+          warn "端口 ${port} 已被同层协议占用，请更换。"
+          ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
+          entry_key="$(entry_key_from_parts socks "$port")"
+        done
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        [ -n "$pass" ] || pass="$(random_b64_password 12)"
+        if ! inbound="$(build_socks_inbound "$port" "$pass")"; then
+          err "生成 SOCKS 配置失败，已返回上一级。"
+          pause
+          return 0
+        fi
+        username="$(echo "$inbound" | jq -r '.users[0].username // empty')"
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
+        param_echo "Username" "$username"
+        param_echo "Password" "$pass"
+        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        added_node_keys+=("$entry_key")
+        ;;
+      5)
         ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts trojan "$port")"
         while port_conflict_for_protocol "$updated_json" trojan "$port" "$entry_key"; do
@@ -374,7 +429,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts trojan "$port")"
         done
         sni="$(choose_tls_domain "Trojan")" || return 0
-        if ! inbound="$(build_trojan_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_trojan_inbound "$port" "$sni" "$pass")"; then
           err "生成 Trojan 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0
@@ -384,7 +440,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      5)
+      6)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vmess-ws "$port")"
@@ -401,7 +457,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      6)
+      7)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
         ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts vless-ws "$port")"
@@ -418,7 +474,7 @@ protocol_install_menu() {
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
         ;;
-      7)
+      8)
         ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
         entry_key="$(entry_key_from_parts tuic "$port")"
         while port_conflict_for_protocol "$updated_json" tuic "$port" "$entry_key"; do
@@ -427,7 +483,8 @@ protocol_install_menu() {
           entry_key="$(entry_key_from_parts tuic "$port")"
         done
         sni="$(choose_tls_domain "TUIC")" || return 0
-        if ! inbound="$(build_tuic_inbound "$port" "$sni")"; then
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        if ! inbound="$(build_tuic_inbound "$port" "$sni" "$pass")"; then
           err "生成 TUIC 配置失败：证书文件未能生成，已返回上一级。"
           pause
           return 0

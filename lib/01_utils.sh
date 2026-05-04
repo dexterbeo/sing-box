@@ -13,6 +13,22 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+make_disk_tmp_dir() {
+  local prefix="${1:-sb-install}" base="/var/tmp" tmp_dir
+  mkdir -p "$base" 2>/dev/null || base="/tmp"
+  tmp_dir="$(mktemp -d "${base}/${prefix}.XXXXXX")" || return 1
+  echo "$tmp_dir"
+}
+
+random_b64_password() {
+  local bytes="${1:-16}" value
+  value="$(openssl rand -base64 "$bytes" 2>/dev/null || true)"
+  if [ -z "$value" ]; then
+    value="$(head -c "$bytes" /dev/urandom 2>/dev/null | openssl base64 -A 2>/dev/null || true)"
+  fi
+  [ -n "$value" ] && echo "$value"
+}
+
 run_with_timeout() {
   local seconds="$1"
   shift

@@ -289,7 +289,6 @@ remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 # ---------- 服务管理（systemd / OpenRC） ----------
 
 remove_all_singbox_service_units() {
-  say "清理 sing-box service（包含官方残留）..."
   case "$INIT_SYSTEM" in
     systemd)
       systemctl stop sing-box >/dev/null 2>&1 || true
@@ -308,7 +307,6 @@ remove_all_singbox_service_units() {
       rm -f /etc/init.d/sing-box >/dev/null 2>&1 || true
       ;;
   esac
-  ok "sing-box service 已清理。"
 }
 
 write_managed_singbox_service() {
@@ -483,7 +481,11 @@ install_or_update_singbox() {
     sync_user_usage_counters || true
   fi
 
-  tmp_dir="$(mktemp -d)"
+  tmp_dir="$(make_disk_tmp_dir sb-install)" || {
+    err "创建临时目录失败。"
+    pause
+    return 1
+  }
   base_url="https://github.com/${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}/releases/download/${tag}"
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
@@ -548,7 +550,7 @@ install_or_update_singbox() {
     return 1
   fi
 
-  say "准备流量统计依赖..."
+  say "准备流量统计组件..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
@@ -812,6 +814,7 @@ uninstall_singbox_keep_config() {
     groupdel sing-box >/dev/null 2>&1 || true
   fi
   rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  rm -rf /var/tmp/sb-install.* >/dev/null 2>&1 || true
   refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in

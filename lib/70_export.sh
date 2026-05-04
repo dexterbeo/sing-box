@@ -98,6 +98,13 @@ build_v2rayn_tuic_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_socks_link() {
+  local server="$1" port="$2" username="$3" password="$4" name="$5"
+  printf 'socks://%s:%s@%s:%s#%s' \
+    "$(url_encode "$username")" "$(url_encode "$password")" \
+    "$server" "$port" "$(url_encode "$name")"
+}
+
 # ---------- 导出上下文收集 ----------
 
 export_collect_context() {
@@ -159,7 +166,7 @@ export_configs() {
 
     while read -r user; do
       IFS=$'\x01' read -r name uuid pass flow < <(
-        echo "$user" | jq -r '[(.name // ""), (.uuid // ""), (.password // ""),
+        echo "$user" | jq -r '[(.name // .username // ""), (.uuid // ""), (.password // ""),
           (.flow // "xtls-rprx-vision")] | join("\u0001")'
       )
       [ -z "$name" ] && continue
@@ -270,6 +277,21 @@ export_configs() {
             echo -e " 通用链接: ${v2rayn_link}"
             echo ""
             echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
+          } >> "$target_file"
+          ;;
+        socks)
+          [ -z "$name" ] && continue
+          [ -z "$pass" ] && continue
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            echo -e " Clash: - {name: \"${out_name}\", type: socks5, server: $ip, port: ${port}, username: \"${name}\", password: \"${pass}\", udp: true}"
+            echo ""
+            echo -e " Quantumult X: socks5=${ip}:${port}, username=${name}, password=${pass}, udp-relay=true, tag=${out_name}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_socks_link "$ip" "$port" "$name" "$pass" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = socks5, ${ip}, ${port}, username=${name}, password=${pass}, udp-relay=true"
           } >> "$target_file"
           ;;
       esac

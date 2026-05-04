@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.0"
+SCRIPT_VERSION="5.9.6"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -146,7 +146,7 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks socks trojan vmess-ws vless-ws tuic)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
@@ -156,6 +156,7 @@ declare -A PROTO_PREFIX=(
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
   [tuic]=tuic
+  [socks]=socks
 )
 
 declare -A PREFIX_TO_PROTO=(
@@ -166,6 +167,7 @@ declare -A PREFIX_TO_PROTO=(
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
   [tuic]=tuic
+  [socks]=socks
 )
 
 declare -A PROTO_TRANSPORT=(
@@ -176,6 +178,7 @@ declare -A PROTO_TRANSPORT=(
   [vmess-ws]=tcp
   [vless-ws]=tcp
   [tuic]=udp
+  [socks]=tcp
 )
 
 # ====================================================
@@ -212,6 +215,7 @@ def detect_protocol:
   elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
   elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
   elif .type == "tuic" then "tuic"
+  elif .type == "socks" then "socks"
   else ""
   end;
 '
@@ -237,10 +241,11 @@ def protocol_sort_index($tag):
   if ($tag | startswith("reality-")) then 0
   elif ($tag | startswith("anytls-")) then 1
   elif ($tag | startswith("ss-")) then 2
-  elif ($tag | startswith("trojan-")) then 3
-  elif ($tag | startswith("vmess-ws-")) then 4
-  elif ($tag | startswith("vless-ws-")) then 5
-  elif ($tag | startswith("tuic-")) then 6
+  elif ($tag | startswith("socks-")) then 3
+  elif ($tag | startswith("trojan-")) then 4
+  elif ($tag | startswith("vmess-ws-")) then 5
+  elif ($tag | startswith("vless-ws-")) then 6
+  elif ($tag | startswith("tuic-")) then 7
   else 99
   end;
 '

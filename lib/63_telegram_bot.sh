@@ -1859,14 +1859,14 @@ tg_start_existing_config() {
 tg_setup_center() {
   local cfg token admin_id port public_url secret vps_id vps_name username
   cfg="$(tg_config_load)"
-  read -r -p "Bot Token: " token
+  read -r -p "Bot Token（回车返回）: " token
   [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
-  read -r -p "管理员 TG ID: " admin_id
+  read -r -p "管理员 TG ID（回车返回）: " admin_id
   [[ "$admin_id" =~ ^[0-9]+$ ]] || { warn "管理员 TG ID 必须是数字。"; pause; return 1; }
   read -r -p "主控监听端口 (默认: 25888): " port
   port="${port:-25888}"
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
-  read -r -p "本机名称（支持中文）: " vps_name
+  read -r -p "本机名称（支持中文，回车返回）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   public_url="$(tg_normalize_url "http://$(get_public_ip):${port}")"
   username="$(tg_bot_username_from_token "$token")" || username=""
@@ -1914,12 +1914,12 @@ tg_setup_center() {
 tg_setup_agent() {
   local cfg center_url secret vps_id vps_name
   cfg="$(tg_config_load)"
-  read -r -p "主控地址: " center_url
+  read -r -p "主控地址（回车返回）: " center_url
   center_url="$(tg_normalize_url "$center_url")"
   [ -n "$center_url" ] || { warn "主控地址不能为空。"; pause; return 1; }
-  read -r -p "接入密钥: " secret
+  read -r -p "接入密钥（回车返回）: " secret
   [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
-  read -r -p "本机名称（支持中文）: " vps_name
+  read -r -p "本机名称（支持中文，回车返回）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"

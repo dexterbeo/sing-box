@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 07:38:11 UTC
+# 构建时间: 2026-05-04 08:30:21 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.6"
+SCRIPT_VERSION="5.9.7"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -1208,7 +1208,7 @@ choose_tls_domain() {
   read -r -p "请选择域名填写方式（回车默认2. 自动测速选择推荐域名）: " choice
   case "${choice:-2}" in
     1)
-      read -r -p "请输入${proto_label}域名: " manual
+      read -r -p "请输入${proto_label}域名（回车返回）: " manual
       if [ -z "${manual:-}" ]; then
         warn "输入无效，已返回上一级。"
         pause >&2
@@ -2024,14 +2024,14 @@ relay_prompt_socks_landing() {
   local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
   local _land _ip _relay_port _username _password
 
-  read -r -p "落地标识 (如 sg01): " _land
+  read -r -p "落地标识（回车返回，如 sg01）: " _land
   [ -z "${_land:-}" ] && { warn "已取消，返回上一级。"; return 1; }
   if ! [[ "$_land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     warn "落地标识仅允许字母、数字、点、下划线、短横线。"
     return 1
   fi
 
-  read -r -p "落地 IP 地址: " _ip
+  read -r -p "落地 IP 地址（回车返回）: " _ip
   [ -z "${_ip:-}" ] && { warn "已取消，返回上一级。"; return 1; }
 
   read -r -p "落地 SOCKS 端口（默认: 1080）: " _relay_port
@@ -3563,7 +3563,7 @@ prompt_reset_day() {
 
 prompt_expire_date() {
   local outvar="$1" val
-  read -r -p "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久）: " val
+  read -r -p "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久，回车返回）: " val
   if [ "$val" = "0" ]; then
     printf -v "$outvar" '%s' '0'
     return 0
@@ -3641,7 +3641,7 @@ user_add_menu() {
   clear
   print_rect_title "新增用户"
   show_user_status_table "$db_json"
-  read -r -p "请输入用户名: " username
+  read -r -p "请输入用户名（回车返回）: " username
   if ! is_valid_user_name "$username"; then
     warn "用户名仅允许字母、数字、点、下划线、短横线。"
     pause
@@ -3654,7 +3654,7 @@ user_add_menu() {
     return 1
   fi
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
-  read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
+  read -r -p "请输入流量限制（GB，输入 0 表示不限，回车返回）: " quota
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
@@ -3840,7 +3840,7 @@ user_add_usage_menu() {
   show_user_status_table "$db_json" >&2
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
   ui_echo "支持负值输入（如 -100MB）减少补正流量。"
-  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB）: " raw
+  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB，回车返回）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
     warn "输入无效，未作修改，已返回上一级。"
     pause >&2
@@ -3937,7 +3937,7 @@ user_renew_menu() {
     1) months=1 ;;
     2) months=3 ;;
     3)
-      read -r -p "填写需要续期的月数: " custom_months
+      read -r -p "填写需要续期的月数（回车返回）: " custom_months
       if ! [[ "$custom_months" =~ ^[0-9]+$ ]] || [ "$custom_months" -lt 1 ]; then
         user_package_invalid_return
         pause >&2
@@ -6015,14 +6015,14 @@ tg_start_existing_config() {
 tg_setup_center() {
   local cfg token admin_id port public_url secret vps_id vps_name username
   cfg="$(tg_config_load)"
-  read -r -p "Bot Token: " token
+  read -r -p "Bot Token（回车返回）: " token
   [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
-  read -r -p "管理员 TG ID: " admin_id
+  read -r -p "管理员 TG ID（回车返回）: " admin_id
   [[ "$admin_id" =~ ^[0-9]+$ ]] || { warn "管理员 TG ID 必须是数字。"; pause; return 1; }
   read -r -p "主控监听端口 (默认: 25888): " port
   port="${port:-25888}"
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
-  read -r -p "本机名称（支持中文）: " vps_name
+  read -r -p "本机名称（支持中文，回车返回）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   public_url="$(tg_normalize_url "http://$(get_public_ip):${port}")"
   username="$(tg_bot_username_from_token "$token")" || username=""
@@ -6070,12 +6070,12 @@ tg_setup_center() {
 tg_setup_agent() {
   local cfg center_url secret vps_id vps_name
   cfg="$(tg_config_load)"
-  read -r -p "主控地址: " center_url
+  read -r -p "主控地址（回车返回）: " center_url
   center_url="$(tg_normalize_url "$center_url")"
   [ -n "$center_url" ] || { warn "主控地址不能为空。"; pause; return 1; }
-  read -r -p "接入密钥: " secret
+  read -r -p "接入密钥（回车返回）: " secret
   [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
-  read -r -p "本机名称（支持中文）: " vps_name
+  read -r -p "本机名称（支持中文，回车返回）: " vps_name
   [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
@@ -7916,7 +7916,7 @@ uninstall_singbox_keep_config() {
   echo "  - 日志文件：/var/log/sing-box"
   echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
   echo
-  ask_confirm_yes "输入 YES 确认卸载: " || { warn "已取消卸载。"; pause; return 0; }
+  ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
   remove_user_watch_cron || true
@@ -8254,7 +8254,7 @@ protocol_install_menu() {
   echo -e "  [6] vmess-ws"
   echo -e "  [7] vless-ws"
   echo -e "  [8] tuic"
-  read -r -p "请输入要安装的协议编号: " sel
+  read -r -p "请输入要安装的协议编号（回车返回）: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
@@ -8291,7 +8291,7 @@ protocol_install_menu() {
           param_echo "Private Key" "$priv"
           param_echo "Public Key" "$pub"
         else
-          read -r -p "Public Key（必填，与 Private Key 配对）: " pub
+          read -r -p "Public Key（必填，与 Private Key 配对，回车返回）: " pub
           if [ -z "$pub" ]; then
             warn "手动输入 Private Key 时必须同时提供 Public Key，已返回上一级。"
             pause
@@ -8513,7 +8513,7 @@ protocol_remove_menu() {
     echo -e " [$i] ${entry_key}"
     i=$((i+1))
   done
-  read -r -p "请输入要卸载的协议编号: " sel
+  read -r -p "请输入要卸载的协议编号（回车返回）: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议。"; pause; return 0; }
 

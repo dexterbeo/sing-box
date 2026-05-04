@@ -93,7 +93,7 @@ prompt_reset_day() {
 
 prompt_expire_date() {
   local outvar="$1" val
-  read -r -p "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久）: " val
+  read -r -p "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久，回车返回）: " val
   if [ "$val" = "0" ]; then
     printf -v "$outvar" '%s' '0'
     return 0
@@ -171,7 +171,7 @@ user_add_menu() {
   clear
   print_rect_title "新增用户"
   show_user_status_table "$db_json"
-  read -r -p "请输入用户名: " username
+  read -r -p "请输入用户名（回车返回）: " username
   if ! is_valid_user_name "$username"; then
     warn "用户名仅允许字母、数字、点、下划线、短横线。"
     pause
@@ -184,7 +184,7 @@ user_add_menu() {
     return 1
   fi
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
-  read -r -p "请输入流量限制（GB，输入 0 表示不限）: " quota
+  read -r -p "请输入流量限制（GB，输入 0 表示不限，回车返回）: " quota
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
@@ -370,7 +370,7 @@ user_add_usage_menu() {
   show_user_status_table "$db_json" >&2
   ui_echo "此操作会增加该用户的手动补正流量，用于对齐总量。"
   ui_echo "支持负值输入（如 -100MB）减少补正流量。"
-  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB）: " raw
+  read -r -p "请输入要增添的流量（精确到小数点后一位，需带单位 MB、GB、TB，回车返回）: " raw
   bytes="$(parse_traffic_to_bytes "$raw")" || {
     warn "输入无效，未作修改，已返回上一级。"
     pause >&2
@@ -467,7 +467,7 @@ user_renew_menu() {
     1) months=1 ;;
     2) months=3 ;;
     3)
-      read -r -p "填写需要续期的月数: " custom_months
+      read -r -p "填写需要续期的月数（回车返回）: " custom_months
       if ! [[ "$custom_months" =~ ^[0-9]+$ ]] || [ "$custom_months" -lt 1 ]; then
         user_package_invalid_return
         pause >&2

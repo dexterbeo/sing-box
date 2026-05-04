@@ -793,7 +793,7 @@ uninstall_singbox_keep_config() {
   echo "  - 日志文件：/var/log/sing-box"
   echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
   echo
-  ask_confirm_yes "输入 YES 确认卸载: " || { warn "已取消卸载。"; pause; return 0; }
+  ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
   remove_user_watch_cron || true

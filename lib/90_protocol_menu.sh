@@ -290,7 +290,7 @@ protocol_install_menu() {
   echo -e "  [6] vmess-ws"
   echo -e "  [7] vless-ws"
   echo -e "  [8] tuic"
-  read -r -p "请输入要安装的协议编号: " sel
+  read -r -p "请输入要安装的协议编号（回车返回）: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
@@ -327,7 +327,7 @@ protocol_install_menu() {
           param_echo "Private Key" "$priv"
           param_echo "Public Key" "$pub"
         else
-          read -r -p "Public Key（必填，与 Private Key 配对）: " pub
+          read -r -p "Public Key（必填，与 Private Key 配对，回车返回）: " pub
           if [ -z "$pub" ]; then
             warn "手动输入 Private Key 时必须同时提供 Public Key，已返回上一级。"
             pause
@@ -549,7 +549,7 @@ protocol_remove_menu() {
     echo -e " [$i] ${entry_key}"
     i=$((i+1))
   done
-  read -r -p "请输入要卸载的协议编号: " sel
+  read -r -p "请输入要卸载的协议编号（回车返回）: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议。"; pause; return 0; }
 

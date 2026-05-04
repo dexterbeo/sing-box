@@ -147,7 +147,7 @@ choose_tls_domain() {
   read -r -p "请选择域名填写方式（回车默认2. 自动测速选择推荐域名）: " choice
   case "${choice:-2}" in
     1)
-      read -r -p "请输入${proto_label}域名: " manual
+      read -r -p "请输入${proto_label}域名（回车返回）: " manual
       if [ -z "${manual:-}" ]; then
         warn "输入无效，已返回上一级。"
         pause >&2

@@ -124,14 +124,14 @@ relay_prompt_socks_landing() {
   local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
   local _land _ip _relay_port _username _password
 
-  read -r -p "落地标识 (如 sg01): " _land
+  read -r -p "落地标识（回车返回，如 sg01）: " _land
   [ -z "${_land:-}" ] && { warn "已取消，返回上一级。"; return 1; }
   if ! [[ "$_land" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     warn "落地标识仅允许字母、数字、点、下划线、短横线。"
     return 1
   fi
 
-  read -r -p "落地 IP 地址: " _ip
+  read -r -p "落地 IP 地址（回车返回）: " _ip
   [ -z "${_ip:-}" ] && { warn "已取消，返回上一级。"; return 1; }
 
   read -r -p "落地 SOCKS 端口（默认: 1080）: " _relay_port

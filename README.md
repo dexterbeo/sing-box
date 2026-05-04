@@ -2,7 +2,7 @@
 
 这是一个基于原版 Sing-box 逻辑的一键管理脚本，专为多用户管理场景设计，自编译版本支持 v2ray_api 流量统计。
 
-**交流与反馈**：https://t.me/sb_Carpooling
+**交流与反馈**：https://t.me/sb_gogogo
 
 ## 快速开始
 

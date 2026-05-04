@@ -227,12 +227,12 @@ warp_config_project_json() {
     | .route.rule_set = (
         ((.route.rule_set // []) | map(select(((.tag // "") | startswith("warp-geosite-")) | not)))
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url}))
           else [] end)
       )
     | .outbounds = (
         ((.outbounds // []) | map(select((.tag // "") != "warp")))
-        + (if $ready then [{type:"socks", tag:"warp", server:"127.0.0.1", server_port:$port, version:"5"}] else [] end)
+        + (if $ready then [{type:"socks", tag:"warp", server:"127.0.0.1", server_port:$port}] else [] end)
       )
   '
 }

@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 08:48:58 UTC
+# 构建时间: 2026-05-04 09:09:48 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.8"
+SCRIPT_VERSION="5.9.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -2019,7 +2019,7 @@ relay_full_summary_lines() {
 relay_socks_outbound_json() {
   local tag="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
   jq -n --arg tag "$tag" --arg ip "$ip" --arg username "$username" --arg password "$password" --argjson p "$port" '
-    {type:"socks", tag:$tag, server:$ip, server_port:$p, version:"5"}
+    {type:"socks", tag:$tag, server:$ip, server_port:$p}
     | if $username != "" then . + {username:$username, password:$password} else . end
   '
 }
@@ -2442,7 +2442,7 @@ relay_config_project_json() {
     --argjson rules "$rules_json" \
     --argjson landings "$landings_json" '
     def socks_out($tag; $landing):
-      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber), version:"5"}
+      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber)}
       | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end);
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
@@ -2461,7 +2461,7 @@ relay_config_project_json() {
     | .route.rule_set = (
         ((.route.rule_set // []) | map(select(((.tag // "") | startswith("relay-geosite-")) | not)))
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url}))
           else [] end)
       )
     | .outbounds = (
@@ -6573,12 +6573,12 @@ warp_config_project_json() {
     | .route.rule_set = (
         ((.route.rule_set // []) | map(select(((.tag // "") | startswith("warp-geosite-")) | not)))
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url}))
           else [] end)
       )
     | .outbounds = (
         ((.outbounds // []) | map(select((.tag // "") != "warp")))
-        + (if $ready then [{type:"socks", tag:"warp", server:"127.0.0.1", server_port:$port, version:"5"}] else [] end)
+        + (if $ready then [{type:"socks", tag:"warp", server:"127.0.0.1", server_port:$port}] else [] end)
       )
   '
 }

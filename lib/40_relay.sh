@@ -115,7 +115,7 @@ relay_full_summary_lines() {
 relay_socks_outbound_json() {
   local tag="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
   jq -n --arg tag "$tag" --arg ip "$ip" --arg username "$username" --arg password "$password" --argjson p "$port" '
-    {type:"socks", tag:$tag, server:$ip, server_port:$p, version:"5"}
+    {type:"socks", tag:$tag, server:$ip, server_port:$p}
     | if $username != "" then . + {username:$username, password:$password} else . end
   '
 }
@@ -538,7 +538,7 @@ relay_config_project_json() {
     --argjson rules "$rules_json" \
     --argjson landings "$landings_json" '
     def socks_out($tag; $landing):
-      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber), version:"5"}
+      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber)}
       | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end);
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
@@ -557,7 +557,7 @@ relay_config_project_json() {
     | .route.rule_set = (
         ((.route.rule_set // []) | map(select(((.tag // "") | startswith("relay-geosite-")) | not)))
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url}))
           else [] end)
       )
     | .outbounds = (

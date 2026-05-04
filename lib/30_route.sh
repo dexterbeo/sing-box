@@ -256,6 +256,22 @@ route_rebuild(){
             ) | not
           )
       )
+    | if (.route.rule_set? == null) then .
+      else
+        (($warp_tags // []) + (($relay_rule_groups // []) | map(.tags[]?))) as $active_split_rule_tags
+        | .route.rule_set = (
+            ((.route.rule_set // []) | if type == "array" then . else [.] end)
+            | map(
+                (.tag // "") as $tag
+                | select(
+                    (
+                      ((($tag | startswith("warp-geosite-")) or ($tag | startswith("relay-geosite-")))
+                        and (($active_split_rule_tags | index($tag)) == null))
+                    ) | not
+                  )
+              )
+          )
+      end
     | .route.final = "reject"
   ' || return 1
 }

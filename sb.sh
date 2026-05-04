@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 09:19:09 UTC
+# 构建时间: 2026-05-04 09:38:25 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="5.9.10"
+SCRIPT_VERSION="6.0.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -1801,6 +1801,22 @@ route_rebuild(){
             ) | not
           )
       )
+    | if (.route.rule_set? == null) then .
+      else
+        (($warp_tags // []) + (($relay_rule_groups // []) | map(.tags[]?))) as $active_split_rule_tags
+        | .route.rule_set = (
+            ((.route.rule_set // []) | if type == "array" then . else [.] end)
+            | map(
+                (.tag // "") as $tag
+                | select(
+                    (
+                      ((($tag | startswith("warp-geosite-")) or ($tag | startswith("relay-geosite-")))
+                        and (($active_split_rule_tags | index($tag)) == null))
+                    ) | not
+                  )
+              )
+          )
+      end
     | .route.final = "reject"
   ' || return 1
 }
@@ -1926,6 +1942,76 @@ remove_relays_for_entry_key() {
 }
 
 # >>>>>>>>> END MODULE: 30_route.sh <<<<<<<<<<<
+
+# >>>>>>>>> BEGIN MODULE: 35_split_rule_conflict.sh <<<<<<<<<<<
+# ============================================================
+# 模块: 35_split_rule_conflict.sh
+# 职责: WARP 分流与部分流量中转之间的规则归属互斥
+# 依赖: 00_base.sh, 01_utils.sh, 40_relay.sh, 64_warp.sh
+# ============================================================
+
+split_rule_files_json_from_args() {
+  if [ "$#" -eq 0 ]; then
+    echo '[]'
+    return 0
+  fi
+  printf '%s\n' "$@" | awk 'NF' | jq -R . | jq -s 'unique'
+}
+
+split_rule_relay_conflicts_json() {
+  local files_json="$1"
+  relay_meta_rules_json | jq -c --argjson files "$files_json" '
+    [
+      .[]?
+      | (.file // "") as $file
+      | select($file != "" and (($files | index($file)) != null))
+    ] | unique_by(.file)
+  '
+}
+
+split_rule_warp_conflicts_json() {
+  local files_json="$1"
+  warp_meta_rules_json | jq -c --argjson files "$files_json" '
+    [
+      .[]?
+      | (.file // "") as $file
+      | select($file != "" and (($files | index($file)) != null))
+    ] | unique_by(.file)
+  '
+}
+
+split_rule_take_over_relay_to_warp() {
+  local files_json="$1" conflicts count
+  conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
+  count="$(echo "$conflicts" | jq 'length')" || return 1
+  [ "$count" -gt 0 ] || return 0
+
+  warn "以下规则已在部分流量中转中使用："
+  echo "$conflicts" | jq -r '
+    .[]?
+    | "  - \(.name // .file) -> 落地\(.landing_id // "未设置")：\(.file // "")"
+  '
+  ask_confirm_yn "是否改为 WARP 分流？(y/N): " || return 1
+  relay_rule_remove_meta_by_files_json "$files_json"
+}
+
+split_rule_take_over_warp_to_relay() {
+  local files_json="$1" landing_json="$2" conflicts count landing_id
+  conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
+  count="$(echo "$conflicts" | jq 'length')" || return 1
+  [ "$count" -gt 0 ] || return 0
+  landing_id="$(echo "$landing_json" | jq -r '.id // "未设置"')" || landing_id="未设置"
+
+  warn "以下规则已在 WARP 分流中使用："
+  echo "$conflicts" | jq -r '
+    .[]?
+    | "  - \(.name // .file)：\(.file // "")"
+  '
+  ask_confirm_yn "是否改为中转至落地${landing_id}？(y/N): " || return 1
+  warp_rule_remove_meta_by_files_json "$files_json"
+}
+
+# >>>>>>>>> END MODULE: 35_split_rule_conflict.sh <<<<<<<<<<<
 
 # >>>>>>>>> BEGIN MODULE: 40_relay.sh <<<<<<<<<<<
 # ============================================================
@@ -2423,6 +2509,18 @@ relay_rule_remove_meta_by_tags_json() {
   relay_meta_save_rules_obj "$relay_json"
 }
 
+relay_rule_remove_meta_by_files_json() {
+  local files_json="$1" relay_json
+  relay_json="$(relay_meta_json | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  ')" || return 1
+  relay_meta_save_rules_obj "$relay_json"
+}
+
 relay_rule_clear_meta() {
   relay_meta_save_obj '{"landings":{},"rules":[]}'
 }
@@ -2523,7 +2621,7 @@ relay_apply_partial_state() {
 }
 
 relay_add_preset_rules() {
-  local raw="$1" picks=() pick preset item name file landing_json json
+  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -2541,7 +2639,17 @@ relay_add_preset_rules() {
     item="$(relay_preset_rule "$preset")" || return 1
     name="${item%%|*}"
     file="${item#*|}"
-    relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
+    names+=("$name")
+    files+=("$file")
+  done
+  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
+  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
+    warn "已取消，未修改部分流量中转规则。"
+    pause
+    return 0
+  }
+  for pick in "${!files[@]}"; do
+    relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
   done
   relay_apply_partial_state || return 1
   ok "部分流量中转规则已应用。"
@@ -2549,7 +2657,7 @@ relay_add_preset_rules() {
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json
+  local raw file name landing_json json files_json
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -2569,6 +2677,12 @@ relay_custom_rule_menu() {
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   name="自定义：${file%.srs}"
+  files_json="$(split_rule_files_json_from_args "$file")" || return 1
+  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
+    warn "已取消，未修改部分流量中转规则。"
+    pause
+    return 0
+  }
   relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
   relay_apply_partial_state || return 1
   ok "自定义部分流量中转已添加：$file"
@@ -6471,6 +6585,18 @@ warp_rule_remove_meta_by_tags_json() {
   warp_meta_save_rules_obj "$warp_json"
 }
 
+warp_rule_remove_meta_by_files_json() {
+  local files_json="$1" warp_json
+  warp_json="$(warp_meta_json | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  ')" || return 1
+  warp_meta_save_rules_obj "$warp_json"
+}
+
 warp_rule_clear_meta() {
   warp_meta_save_obj '{"mode":"off","rules":[]}'
 }
@@ -6635,7 +6761,7 @@ warp_require_wireproxy_ready() {
 }
 
 warp_add_preset_rules() {
-  local raw="$1" picks=() pick item name file
+  local raw="$1" picks=() names=() files=() pick item name file files_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -6651,7 +6777,17 @@ warp_add_preset_rules() {
     item="$(warp_preset_rule "$pick")" || return 1
     name="${item%%|*}"
     file="${item#*|}"
-    warp_rule_add_meta "$name" "$file" || return 1
+    names+=("$name")
+    files+=("$file")
+  done
+  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
+  split_rule_take_over_relay_to_warp "$files_json" || {
+    warn "已取消，未修改 WARP 分流规则。"
+    pause
+    return 0
+  }
+  for pick in "${!files[@]}"; do
+    warp_rule_add_meta "${names[$pick]}" "${files[$pick]}" || return 1
   done
   warp_apply_current_state || return 1
   ok "WARP 分流规则已应用。"
@@ -6659,7 +6795,7 @@ warp_add_preset_rules() {
 }
 
 warp_custom_rule_menu() {
-  local raw file name
+  local raw file name files_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   clear
@@ -6678,6 +6814,12 @@ warp_custom_rule_menu() {
     return 1
   fi
   name="自定义：${file%.srs}"
+  files_json="$(split_rule_files_json_from_args "$file")" || return 1
+  split_rule_take_over_relay_to_warp "$files_json" || {
+    warn "已取消，未修改 WARP 分流规则。"
+    pause
+    return 0
+  }
   warp_rule_add_meta "$name" "$file" || return 1
   warp_apply_current_state || return 1
   ok "自定义 WARP 分流已添加：$file"

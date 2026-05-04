@@ -494,6 +494,18 @@ relay_rule_remove_meta_by_tags_json() {
   relay_meta_save_rules_obj "$relay_json"
 }
 
+relay_rule_remove_meta_by_files_json() {
+  local files_json="$1" relay_json
+  relay_json="$(relay_meta_json | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  ')" || return 1
+  relay_meta_save_rules_obj "$relay_json"
+}
+
 relay_rule_clear_meta() {
   relay_meta_save_obj '{"landings":{},"rules":[]}'
 }
@@ -594,7 +606,7 @@ relay_apply_partial_state() {
 }
 
 relay_add_preset_rules() {
-  local raw="$1" picks=() pick preset item name file landing_json json
+  local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -612,7 +624,17 @@ relay_add_preset_rules() {
     item="$(relay_preset_rule "$preset")" || return 1
     name="${item%%|*}"
     file="${item#*|}"
-    relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
+    names+=("$name")
+    files+=("$file")
+  done
+  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
+  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
+    warn "已取消，未修改部分流量中转规则。"
+    pause
+    return 0
+  }
+  for pick in "${!files[@]}"; do
+    relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
   done
   relay_apply_partial_state || return 1
   ok "部分流量中转规则已应用。"
@@ -620,7 +642,7 @@ relay_add_preset_rules() {
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json
+  local raw file name landing_json json files_json
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -640,6 +662,12 @@ relay_custom_rule_menu() {
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
   name="自定义：${file%.srs}"
+  files_json="$(split_rule_files_json_from_args "$file")" || return 1
+  split_rule_take_over_warp_to_relay "$files_json" "$landing_json" || {
+    warn "已取消，未修改部分流量中转规则。"
+    pause
+    return 0
+  }
   relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
   relay_apply_partial_state || return 1
   ok "自定义部分流量中转已添加：$file"

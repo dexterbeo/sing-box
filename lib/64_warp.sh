@@ -100,6 +100,18 @@ warp_rule_remove_meta_by_tags_json() {
   warp_meta_save_rules_obj "$warp_json"
 }
 
+warp_rule_remove_meta_by_files_json() {
+  local files_json="$1" warp_json
+  warp_json="$(warp_meta_json | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  ')" || return 1
+  warp_meta_save_rules_obj "$warp_json"
+}
+
 warp_rule_clear_meta() {
   warp_meta_save_obj '{"mode":"off","rules":[]}'
 }
@@ -264,7 +276,7 @@ warp_require_wireproxy_ready() {
 }
 
 warp_add_preset_rules() {
-  local raw="$1" picks=() pick item name file
+  local raw="$1" picks=() names=() files=() pick item name file files_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -280,7 +292,17 @@ warp_add_preset_rules() {
     item="$(warp_preset_rule "$pick")" || return 1
     name="${item%%|*}"
     file="${item#*|}"
-    warp_rule_add_meta "$name" "$file" || return 1
+    names+=("$name")
+    files+=("$file")
+  done
+  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
+  split_rule_take_over_relay_to_warp "$files_json" || {
+    warn "已取消，未修改 WARP 分流规则。"
+    pause
+    return 0
+  }
+  for pick in "${!files[@]}"; do
+    warp_rule_add_meta "${names[$pick]}" "${files[$pick]}" || return 1
   done
   warp_apply_current_state || return 1
   ok "WARP 分流规则已应用。"
@@ -288,7 +310,7 @@ warp_add_preset_rules() {
 }
 
 warp_custom_rule_menu() {
-  local raw file name
+  local raw file name files_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   clear
@@ -307,6 +329,12 @@ warp_custom_rule_menu() {
     return 1
   fi
   name="自定义：${file%.srs}"
+  files_json="$(split_rule_files_json_from_args "$file")" || return 1
+  split_rule_take_over_relay_to_warp "$files_json" || {
+    warn "已取消，未修改 WARP 分流规则。"
+    pause
+    return 0
+  }
   warp_rule_add_meta "$name" "$file" || return 1
   warp_apply_current_state || return 1
   ok "自定义 WARP 分流已添加：$file"

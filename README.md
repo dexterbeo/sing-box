@@ -2,6 +2,8 @@
 
 这是一个基于原版 Sing-box 逻辑的一键管理脚本，专为多用户管理场景设计，自编译版本支持 v2ray_api 流量统计。
 
+**交流与反馈**：https://t.me/sb_Carpooling
+
 ## 快速开始
 
 ```bash
@@ -13,7 +15,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。
-* **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“9. 卸载 sing-box”（保留配置），再执行“1. 安装/更新 sing-box”进行环境接管。
+* **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“9. 卸载 sing-box”（保留数据），再执行“1. 安装/更新 sing-box”进行环境接管。
 
 ---
 
@@ -30,13 +32,16 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 ### 2. 协议安装
 提供主流协议的一键部署：
-* **支持的协议**：Reality、AnyTLS、Shadowsocks2022、Trojan、VMess-WS、VLESS-WS、TUIC。
-* **稳定性优化**：为增强在复杂网络环境下的容错率，所有部署的协议均默认关闭了 `tcp_fast_open` 和 `多路复用 (multiplexing)`。
+* **支持的协议**：Reality、AnyTLS、Shadowsocks2022、SOCKS、Trojan、VMess-WS、VLESS-WS、TUIC。
+* **使用入口**：`4. 协议管理` → `安装协议`。
 
-### 3. 中转节点搭建
-提供简单的跨节点流量中转方案：
-* 中转机到落地机之间的通信默认使用强加密的 `Shadowsocks2022` 协议。
-* **搭建步骤**：需先在“落地机”上安装 Shadowsocks2022 协议，随后在“中转机”的管理菜单中选择安装中转节点，填入落地机信息即可完成对接。
+### 3. 中转管理
+支持本机作为中转机，将流量转发到落地机：
+* **全部流量转发至落地机**：选择一个本机入站协议，将该入站的全部流量转发到指定落地机。
+* **部分流量转发至落地机**：可按规则只转发 AI 服务、Google、Netflix、Disney+、YouTube、TikTok 或自定义 geosite 网站规则。
+* **落地连接方式**：中转机到落地机统一使用 SOCKS 连接；落地机需要提前准备可连接的 SOCKS 服务。
+* **多落地机**：部分流量规则可以分别转发到不同落地机，脚本会按落地标识管理。
+* **使用入口**：`5. 中转管理`。
 
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
@@ -60,6 +65,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
   * 默认流量达到 90% 时提醒。
   * 默认到期前 3 天提醒。
   * 无需打开 Bot，后台上报时会自动触发提醒。
+* **维护操作**：菜单中提供 `设置/启动TG Bot`、`更新/重启TG Bot`、`卸载/停止TG Bot`。
 * **使用入口**：`7. 用户管理` → `4. Telegram Bot 管理`。
 
 #### 准备 Bot Token 和管理员 TG ID
@@ -79,6 +85,13 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 设置完成后，管理员需要先向自己的 Bot 发送一次 `/start`，否则 Bot 可能无法主动发送测试通知。Bot Token 是敏感信息，请勿公开。
 
+### 6. warp分流
+支持将指定网站或服务分流到本机 WARP WireProxy SOCKS：
+* 依赖 fscarmen WARP 脚本提供的 WireProxy SOCKS。
+* 脚本只管理 sing-box 分流规则，不负责安装、启动、停止或卸载 WARP/WireProxy。
+* 支持 AI 服务、Google、Netflix、Disney+、YouTube、TikTok 和自定义 geosite 规则。
+* **使用入口**：`8. warp分流`。
+
 ---
 
 ## 其他特色
@@ -93,12 +106,15 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 ---
 
-## 彻底卸载删除
+## 卸载说明
 
-为确保彻底卸载并清理所有残留环境，请按以下步骤操作：
+菜单中的 **`9. 卸载 sing-box`** 是保留数据的运行环境卸载：
 
-1. **第一步**：先运行脚本，选择菜单中的 **`9. 卸载 sing-box`**。
-2. **第二步**：在终端直接复制并执行以下命令：
+* 会停止并移除 sing-box 服务。
+* 会标记 TG Bot 为停用。
+* 默认保留 `/etc/sing-box`、`/etc/sing-box-manager`、日志、脚本和快捷命令，方便后续重新安装或恢复。
+
+如需彻底清理脚本与相关配置，再手动执行：
 
 ```bash
 rm -f /root/sb.sh

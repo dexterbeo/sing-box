@@ -26,7 +26,7 @@ migrate_socks_user_object_for_desired() {
 }
 
 user_manager_apply_to_json() {
-  local json="$1" db_json="$2"
+  local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
   local inv_lines=() line idx entry_key proto port inbound
   work_json="$(config_normalize "$work_json")" || return 1
@@ -103,7 +103,11 @@ user_manager_apply_to_json() {
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 
-  work_json="$(route_rebuild "$work_json")" || return 1
+  if [ -n "$meta_json" ]; then
+    work_json="$(route_rebuild "$work_json" "$meta_json")" || return 1
+  else
+    work_json="$(route_rebuild "$work_json")" || return 1
+  fi
   work_json="$(filter_disabled_auth_users "$work_json" "$db_json")" || return 1
   ensure_v2ray_api_on_json "$work_json" || return 1
 }
@@ -136,13 +140,13 @@ user_manager_apply_changes() {
 }
 
 _user_manager_apply_changes_body() {
-  local db_json="$1" base_json="${2:-}"
+  local db_json="$1" base_json="${2:-}" meta_json="${3:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
 
   local applied_json
-  applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
+  applied_json="$(user_manager_apply_to_json "$base_json" "$db_json" "$meta_json")" || {
     err "生成用户节点关系失败。"
     return 1
   }

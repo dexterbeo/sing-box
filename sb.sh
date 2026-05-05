@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-04 12:34:19 UTC
+# 构建时间: 2026-05-05 03:08:01 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.4"
+SCRIPT_VERSION="6.0.5"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -44,6 +44,7 @@ LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
 META_FILE="/etc/sing-box-manager/meta.json"
 TG_CONFIG_FILE="/etc/sing-box-manager/telegram.json"
+TG_TASK_RECEIPTS_FILE="/etc/sing-box-manager/tg-task-receipts.json"
 TG_CENTER_APP="/etc/sing-box-manager/tg-center-bot.py"
 TG_CENTER_SERVICE="sb-tg-bot"
 SB_LOCK_FILE="/var/lock/singbox-manager.lock"
@@ -1760,6 +1761,7 @@ list_all_node_keys() {
 
 route_rebuild(){
   local json="$1"
+  local meta_json="${2:-}"
   local normalized core_auth_users_json relay_pairs_json preserved_rules_json
   local warp_mode="off" warp_tags_json='[]'
   local warp_available_tags_json='[]'
@@ -1768,16 +1770,18 @@ route_rebuild(){
 
   normalized="$(config_normalize "$json")" || return 1
 
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    warp_mode="$(jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' "$META_FILE" 2>/dev/null || echo "off")"
-    warp_tags_json="$(jq -c '
+  [ -n "$meta_json" ] || meta_json="$(meta_load)"
+
+  if echo "$meta_json" | jq -e . >/dev/null 2>&1; then
+    warp_mode="$(echo "$meta_json" | jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' 2>/dev/null || echo "off")"
+    warp_tags_json="$(echo "$meta_json" | jq -c '
       [
         .warp.rules[]?
         | (.file // "") as $file
         | select($file != "")
         | "relay-" + (($file | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-"))
       ] | unique
-    ' "$META_FILE" 2>/dev/null || echo '[]')"
+    ' 2>/dev/null || echo '[]')"
   fi
   if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
     warp_mode="off"
@@ -1798,8 +1802,8 @@ route_rebuild(){
     warp_available_tags_json='[]'
   fi
 
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    relay_rule_groups_json="$(jq -c '
+  if echo "$meta_json" | jq -e . >/dev/null 2>&1; then
+    relay_rule_groups_json="$(echo "$meta_json" | jq -c '
       (.relay // {}) as $relay
       | ($relay.landing // null) as $legacy_landing
       | (
@@ -1819,7 +1823,7 @@ route_rebuild(){
           | select($tag != "")
           | {tag:$tag, out:("relay-" + $landing_id)}
         ]
-    ' "$META_FILE" 2>/dev/null || echo '[]')"
+    ' 2>/dev/null || echo '[]')"
   fi
   relay_available_groups_json="$(
     echo "$normalized" | jq -c --argjson wanted "$relay_rule_groups_json" '
@@ -2098,7 +2102,7 @@ split_rule_clear_all_meta() {
   meta_save "$meta_json"
 }
 
-split_rule_take_over_relay_to_warp() {
+split_rule_confirm_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
   count="$(echo "$conflicts" | jq 'length')" || return 1
@@ -2110,6 +2114,11 @@ split_rule_take_over_relay_to_warp() {
     | "  - \(.name // .file) -> 落地\(.landing_id // "未设置")：\(.file // "")"
   '
   ask_confirm_yn "是否改为 WARP 分流？(y/N): " || return 1
+}
+
+split_rule_take_over_relay_to_warp() {
+  local files_json="$1"
+  split_rule_confirm_relay_to_warp "$files_json" || return 1
   relay_rule_remove_meta_by_files_json "$files_json"
 }
 
@@ -2442,7 +2451,7 @@ relay_add() {
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
 
-  local new_user new_out updated_json
+  local new_user new_out updated_json meta_json relay_json
   new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
     err "不支持的入站协议，无法生成中转用户。"
     pause
@@ -2471,12 +2480,9 @@ relay_add() {
         + [{auth_user:[$ru], outbound:$ot}]
       )
   ' --arg ek "$entry_key" --arg ru "$relay_user" --arg ot "$out_tag" --argjson nu "$new_user" --argjson no "$new_out")"
-  relay_meta_upsert_landing "$landing_json" || {
-    err "保存落地机信息失败，已中止，未写入配置。"
-    pause
-    return 1
-  }
-  updated_json="$(relay_project_partial_state "$updated_json")" || {
+  relay_json="$(relay_meta_upsert_landing_to_json "$(relay_meta_json)" "$landing_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$(meta_load)" "$relay_json")" || return 1
+  updated_json="$(relay_project_partial_state_with_meta "$updated_json" "$meta_json")" || {
     err "重建路由失败，已中止，未写入配置。"
     pause
     return 1
@@ -2487,9 +2493,13 @@ relay_add() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
+      meta_save "$meta_json" && _relay_ok=1
+    fi
   else
-    _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json" && _relay_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      meta_save "$meta_json" && _relay_ok=1
+    fi
   fi
   if [ "$_relay_ok" -eq 1 ]; then
     ok "全部流量中转已添加：${relay_user}（落地 SOCKS: ${ip}:${relay_port}）"
@@ -2502,8 +2512,9 @@ relay_add() {
 
 # ---------- 部分流量中转元数据 ----------
 
-relay_meta_json() {
-  meta_load | jq -c '
+relay_meta_json_from_meta() {
+  local meta_json="$1"
+  echo "$meta_json" | jq -c '
     (.relay // {}) as $relay
     | ($relay.landing // null) as $legacy_landing
     | (
@@ -2525,6 +2536,10 @@ relay_meta_json() {
         ]
       }
   '
+}
+
+relay_meta_json() {
+  relay_meta_json_from_meta "$(meta_load)"
 }
 
 relay_meta_rules_json() {
@@ -2551,6 +2566,20 @@ relay_meta_save_rules_obj() {
   relay_meta_save_obj "$relay_json"
 }
 
+relay_meta_normalize_obj() {
+  local relay_json="$1"
+  echo "$relay_json" | jq -c '
+    .landings = (.landings // {})
+    | .rules = (.rules // [])
+  '
+}
+
+relay_meta_replace_in_meta_json() {
+  local meta_json="$1" relay_json="$2" normalized
+  normalized="$(relay_meta_normalize_obj "$relay_json")" || return 1
+  echo "$meta_json" | jq --argjson r "$normalized" '.relay = $r'
+}
+
 relay_meta_upsert_landing() {
   local landing_json="$1" relay_json
   relay_json="$(relay_meta_json | jq --argjson landing "$landing_json" '
@@ -2569,6 +2598,50 @@ relay_rule_tag_for_file() {
 
 relay_rule_url_for_file() {
   echo "${RELAY_RULE_BASE_URL}/$1"
+}
+
+relay_meta_upsert_landing_to_json() {
+  local relay_json="$1" landing_json="$2"
+  echo "$relay_json" | jq --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+  '
+}
+
+relay_rule_add_meta_to_json() {
+  local relay_json="$1" name="$2" file="$3" landing_json="$4" tag url
+  tag="$(relay_rule_tag_for_file "$file")"
+  url="$(relay_rule_url_for_file "$file")"
+  echo "$relay_json" | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+    | .rules = (
+        ((.rules // []) | map(select((.tag // "") != $tag)))
+        + [{name:$name,file:$file,tag:$tag,url:$url,landing_id:$landing.id}]
+      )
+  '
+}
+
+relay_rule_remove_meta_by_tags_json_from() {
+  local relay_json="$1" tags_json="$2"
+  echo "$relay_json" | jq --argjson tags "$tags_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
+  '
+}
+
+relay_rule_remove_meta_by_files_json_from() {
+  local relay_json="$1" files_json="$2"
+  echo "$relay_json" | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  '
 }
 
 relay_normalize_rule_file() {
@@ -2607,41 +2680,20 @@ relay_preset_rule() {
 }
 
 relay_rule_add_meta() {
-  local name="$1" file="$2" landing_json="$3" tag url relay_json
-  tag="$(relay_rule_tag_for_file "$file")"
-  url="$(relay_rule_url_for_file "$file")"
-  relay_json="$(relay_meta_json | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" --argjson landing "$landing_json" '
-    .landings = (.landings // {})
-    | .landings[$landing.id] = $landing
-    | .rules = (
-        ((.rules // []) | map(select((.tag // "") != $tag)))
-        + [{name:$name,file:$file,tag:$tag,url:$url,landing_id:$landing.id}]
-      )
-  ')" || return 1
+  local name="$1" file="$2" landing_json="$3" relay_json
+  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json)" "$name" "$file" "$landing_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
 relay_rule_remove_meta_by_tags_json() {
   local tags_json="$1" relay_json
-  relay_json="$(relay_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.tag // "") as $tag
-      | select(($tags | index($tag)) == null)
-    ]
-  ')" || return 1
+  relay_json="$(relay_rule_remove_meta_by_tags_json_from "$(relay_meta_json)" "$tags_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
 relay_rule_remove_meta_by_files_json() {
   local files_json="$1" relay_json
-  relay_json="$(relay_meta_json | jq --argjson files "$files_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.file // "") as $file
-      | select(($files | index($file)) == null)
-    ]
-  ')" || return 1
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
@@ -2733,23 +2785,37 @@ relay_config_project_json() {
   '
 }
 
-relay_project_partial_state() {
-  local json="$1" rules_json landings_json projected
-  rules_json="$(relay_meta_rules_json)"
-  landings_json="$(relay_meta_landings_json)"
+relay_project_partial_state_with_meta() {
+  local json="$1" meta_json="$2" relay_json rules_json landings_json projected
+  relay_json="$(relay_meta_json_from_meta "$meta_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  rules_json="$(echo "$relay_json" | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "" and (.landing_id // "") != "")] | unique_by(.tag)')" || return 1
+  landings_json="$(echo "$relay_json" | jq -c '.landings // {}')" || return 1
   projected="$(relay_config_project_json "$json" "$rules_json" "$landings_json")" || return 1
-  route_rebuild "$projected"
+  route_rebuild "$projected" "$meta_json"
+}
+
+relay_project_partial_state() {
+  relay_project_partial_state_with_meta "$1" "$(meta_load)"
+}
+
+relay_apply_meta_json_state() {
+  local meta_json="$1" json projected normalized_relay
+  normalized_relay="$(relay_meta_json_from_meta "$meta_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$normalized_relay")" || return 1
+  json="$(config_load)"
+  projected="$(relay_project_partial_state_with_meta "$json" "$meta_json")" || return 1
+  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected" || return 1
+  meta_save "$meta_json"
 }
 
 relay_apply_partial_state() {
-  local json projected
-  json="$(config_load)"
-  projected="$(relay_project_partial_state "$json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected"
+  relay_apply_meta_json_state "$(meta_load)"
 }
 
 relay_add_preset_rules() {
   local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json has_warp_conflict=0
+  local meta_json relay_json warp_json
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -2779,17 +2845,21 @@ relay_add_preset_rules() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
+  meta_json="$(meta_load)"
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
+  relay_json="$(relay_meta_json)"
   for pick in "${!files[@]}"; do
-    relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
+    relay_json="$(relay_rule_add_meta_to_json "$relay_json" "${names[$pick]}" "${files[$pick]}" "$landing_json")" || return 1
   done
-  relay_apply_partial_state || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  relay_apply_meta_json_state "$meta_json" || return 1
   ok "部分流量中转规则已应用。"
   pause
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json files_json has_warp_conflict=0
+  local raw file name landing_json json files_json has_warp_conflict=0 meta_json relay_json warp_json
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -2817,9 +2887,12 @@ relay_custom_rule_menu() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
-  relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
-  relay_apply_partial_state || return 1
+  meta_json="$(meta_load)"
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
+  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json)" "$name" "$file" "$landing_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  relay_apply_meta_json_state "$meta_json" || return 1
   ok "自定义部分流量中转已添加：$file"
   pause
 }
@@ -2830,7 +2903,7 @@ relay_delete() {
   init_manager_env || { pause; return 0; }
   local json lines=() node_lines=() partial_json partial_count item_lines=() choice picks=()
   local updated_json line entry relay_user out_tag node_key users_json type payload display idx part
-  local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json
+  local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json meta_json relay_json
   local -a selected_tags=()
 
   json="$(config_load)"
@@ -2900,6 +2973,8 @@ relay_delete() {
   fi
 
   updated_json="$json"
+  meta_json="$(meta_load)"
+  relay_json="$(relay_meta_json)"
   if [ "$has_delete_all" = "1" ]; then
     for line in "${node_lines[@]}"; do
       IFS=$'\x01' read -r entry node_key out_tag <<< "$line"
@@ -2915,7 +2990,7 @@ relay_delete() {
       }
       full_changed=1
     done
-    relay_rule_clear_meta || return 1
+    relay_json='{"landings":{},"rules":[]}'
     [ "$partial_count" -gt 0 ] && partial_changed=1
   else
     for part in "${picks[@]}"; do
@@ -2949,11 +3024,12 @@ relay_delete() {
     done
     if [ ${#selected_tags[@]} -gt 0 ]; then
       tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
-      relay_rule_remove_meta_by_tags_json "$tags_json" || return 1
+      relay_json="$(relay_rule_remove_meta_by_tags_json_from "$relay_json" "$tags_json")" || return 1
     fi
   fi
 
-  final_json="$(relay_project_partial_state "$updated_json")" || {
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  final_json="$(relay_project_partial_state_with_meta "$updated_json" "$meta_json")" || {
     err "重建中转规则失败，已中止，未写入配置。"
     pause
     return 1
@@ -2965,9 +3041,13 @@ relay_delete() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
-    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" && _delete_ok=1
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
+      meta_save "$meta_json" && _delete_ok=1
+    fi
   else
-    _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json" && _delete_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json"; then
+      meta_save "$meta_json" && _delete_ok=1
+    fi
   fi
 
   if [ "$_delete_ok" -eq 1 ]; then
@@ -3459,7 +3539,7 @@ migrate_socks_user_object_for_desired() {
 }
 
 user_manager_apply_to_json() {
-  local json="$1" db_json="$2"
+  local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
   local inv_lines=() line idx entry_key proto port inbound
   work_json="$(config_normalize "$work_json")" || return 1
@@ -3536,7 +3616,11 @@ user_manager_apply_to_json() {
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 
-  work_json="$(route_rebuild "$work_json")" || return 1
+  if [ -n "$meta_json" ]; then
+    work_json="$(route_rebuild "$work_json" "$meta_json")" || return 1
+  else
+    work_json="$(route_rebuild "$work_json")" || return 1
+  fi
   work_json="$(filter_disabled_auth_users "$work_json" "$db_json")" || return 1
   ensure_v2ray_api_on_json "$work_json" || return 1
 }
@@ -3569,13 +3653,13 @@ user_manager_apply_changes() {
 }
 
 _user_manager_apply_changes_body() {
-  local db_json="$1" base_json="${2:-}"
+  local db_json="$1" base_json="${2:-}" meta_json="${3:-}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
 
   local applied_json
-  applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
+  applied_json="$(user_manager_apply_to_json "$base_json" "$db_json" "$meta_json")" || {
     err "生成用户节点关系失败。"
     return 1
   }
@@ -4491,6 +4575,47 @@ tg_config_save() {
     rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
   fi
+}
+
+tg_task_receipts_load() {
+  if [ -s "$TG_TASK_RECEIPTS_FILE" ] && jq -e . "$TG_TASK_RECEIPTS_FILE" >/dev/null 2>&1; then
+    cat "$TG_TASK_RECEIPTS_FILE"
+  else
+    echo '{"tasks":{}}'
+  fi
+}
+
+tg_task_receipts_save() {
+  local json="$1"
+  mkdir -p "$(dirname "$TG_TASK_RECEIPTS_FILE")"
+  chmod 700 "$(dirname "$TG_TASK_RECEIPTS_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${TG_TASK_RECEIPTS_FILE}.tmp.XXXXXX")" || return 1
+  if echo "$json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"
+    chmod 600 "$TG_TASK_RECEIPTS_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+tg_task_receipt_get() {
+  local task_id="$1"
+  [ -n "$task_id" ] || return 1
+  tg_task_receipts_load | jq -c --arg id "$task_id" '.tasks[$id] // empty'
+}
+
+tg_task_receipt_save_success() {
+  local task_id="$1" message="$2" now receipts
+  [ -n "$task_id" ] || return 1
+  now="$(date +%s)"
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson now "$now" '
+    .tasks = (.tasks // {})
+    | .tasks[$id] = {ok:true, message:$message, completed_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // $now)) <= 604800))
+  ')" || return 1
+  tg_task_receipts_save "$receipts"
 }
 
 tg_config_enabled_value() {
@@ -5760,6 +5885,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             now = int(time.time())
             available = []
+            expired_notifications = []
             with CFG_LOCK:
                 cfg = load_config()
                 tasks = cfg.setdefault("tasks", {})
@@ -5773,6 +5899,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status = task.get("status")
                     picked_at = int(task.get("picked_at") or 0)
                     attempts = int(task.get("attempts") or 0)
+                    if status == "running" and picked_at and now - picked_at > 120 and attempts >= 3:
+                        message = "节点超过重试次数仍未回传结果，任务已停止重试。"
+                        task["status"] = "failed"
+                        task["message"] = message
+                        task["completed_at"] = now
+                        expired_notifications.append((
+                            task.get("created_chat_id"),
+                            f"{vps_id} / {task.get('username') or ''}".strip(" /"),
+                            message,
+                        ))
+                        continue
                     runnable = status == "pending" or (status == "running" and now - picked_at > 120 and attempts < 3)
                     if not runnable:
                         continue
@@ -5786,6 +5923,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "params": task.get("params") or {},
                     })
                 save_config(cfg)
+            for chat_id, title, message in expired_notifications:
+                if chat_id:
+                    send_message(chat_id, f"执行失败：{title}\n{message}")
             write_json(self, 200, {"ok": True, "tasks": available})
             return
 
@@ -6145,7 +6285,7 @@ tg_execute_task() {
 }
 
 tg_process_tasks() {
-  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value
+  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt
   TG_TASKS_REPORTED_STATE=0
   tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
   echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
@@ -6153,8 +6293,13 @@ tg_process_tasks() {
     [ -n "$task" ] || continue
     task_id="$(echo "$task" | jq -r '.id // empty')"
     [ -n "$task_id" ] || continue
-    if msg="$(tg_execute_task "$task" 2>&1)"; then
+    receipt="$(tg_task_receipt_get "$task_id" 2>/dev/null || true)"
+    if [ -n "$receipt" ]; then
+      ok_value="$(echo "$receipt" | jq -r 'if (.ok // false) then "true" else "false" end')"
+      msg="$(echo "$receipt" | jq -r '.message // "执行成功。"')"
+    elif msg="$(tg_execute_task "$task" 2>&1)"; then
       ok_value=true
+      tg_task_receipt_save_success "$task_id" "$msg" >/dev/null 2>&1 || true
       tg_prepare_report_state
       if tg_post_report "$cfg" "$center_url" "$secret"; then
         TG_TASKS_REPORTED_STATE=1
@@ -6669,6 +6814,20 @@ warp_meta_save_rules_obj() {
   warp_meta_save_obj "$warp_json"
 }
 
+warp_meta_normalize_obj() {
+  local warp_json="$1"
+  echo "$warp_json" | jq -c '
+    .mode = (if ((.rules // []) | length) > 0 then "rules" else "off" end)
+    | .rules = (.rules // [])
+  '
+}
+
+warp_meta_replace_in_meta_json() {
+  local meta_json="$1" warp_json="$2" normalized
+  normalized="$(warp_meta_normalize_obj "$warp_json")" || return 1
+  echo "$meta_json" | jq --argjson w "$normalized" '.warp = $w'
+}
+
 warp_rule_tag_for_file() {
   local file="$1" base tag
   base="${file%.srs}"
@@ -6678,6 +6837,38 @@ warp_rule_tag_for_file() {
 
 warp_rule_url_for_file() {
   echo "${WARP_RULE_BASE_URL}/$1"
+}
+
+warp_rule_add_meta_to_json() {
+  local warp_json="$1" name="$2" file="$3" tag url
+  tag="$(warp_rule_tag_for_file "$file")"
+  url="$(warp_rule_url_for_file "$file")"
+  echo "$warp_json" | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" '
+    .rules = ((.rules // []) + [{name:$name,file:$file,tag:$tag,url:$url}])
+    | .rules |= unique_by(.tag)
+  '
+}
+
+warp_rule_remove_meta_by_tags_json_from() {
+  local warp_json="$1" tags_json="$2"
+  echo "$warp_json" | jq --argjson tags "$tags_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
+  '
+}
+
+warp_rule_remove_meta_by_files_json_from() {
+  local warp_json="$1" files_json="$2"
+  echo "$warp_json" | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  '
 }
 
 warp_normalize_rule_file() {
@@ -6704,37 +6895,20 @@ warp_validate_rule_file() {
 }
 
 warp_rule_add_meta() {
-  local name="$1" file="$2" tag url warp_json
-  tag="$(warp_rule_tag_for_file "$file")"
-  url="$(warp_rule_url_for_file "$file")"
-  warp_json="$(warp_meta_json | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" '
-    .rules = ((.rules // []) + [{name:$name,file:$file,tag:$tag,url:$url}])
-    | .rules |= unique_by(.tag)
-  ')" || return 1
+  local name="$1" file="$2" warp_json
+  warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
 warp_rule_remove_meta_by_tags_json() {
   local tags_json="$1" warp_json
-  warp_json="$(warp_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.tag // "") as $tag
-      | select(($tags | index($tag)) == null)
-    ]
-  ')" || return 1
+  warp_json="$(warp_rule_remove_meta_by_tags_json_from "$(warp_meta_json)" "$tags_json")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
 warp_rule_remove_meta_by_files_json() {
   local files_json="$1" warp_json
-  warp_json="$(warp_meta_json | jq --argjson files "$files_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.file // "") as $file
-      | select(($files | index($file)) == null)
-    ]
-  ')" || return 1
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
@@ -6882,11 +7056,21 @@ warp_config_project_json() {
   '
 }
 
-warp_apply_current_state() {
-  local json rules_json ready port projected rebuilt
+warp_apply_meta_json_state() {
+  local meta_json="$1" json warp_json rules_json ready port projected rebuilt
   warp_require_singbox || return 1
+  warp_json="$(echo "$meta_json" | jq -c '
+    (.warp // {mode:"off", rules:[]})
+    | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
+    | .rules = [
+        (.rules // [])[]?
+        | select((.file // "") != "")
+        | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
+      ]
+  ')" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
   json="$(config_load)"
-  rules_json="$(warp_meta_rules_json)"
+  rules_json="$(echo "$warp_json" | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "")] | unique_by(.tag)')" || return 1
   ready=false
   port=0
   if warp_wireproxy_ready; then
@@ -6894,8 +7078,13 @@ warp_apply_current_state() {
     port="$(warp_wireproxy_port)" || return 1
   fi
   projected="$(warp_config_project_json "$json" "$rules_json" "$ready" "$port")" || return 1
-  rebuilt="$(route_rebuild "$projected")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt"
+  rebuilt="$(route_rebuild "$projected" "$meta_json")" || return 1
+  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt" || return 1
+  meta_save "$meta_json"
+}
+
+warp_apply_current_state() {
+  warp_apply_meta_json_state "$(meta_load)"
 }
 
 warp_require_wireproxy_ready() {
@@ -6909,7 +7098,7 @@ warp_require_wireproxy_ready() {
 }
 
 warp_add_preset_rules() {
-  local raw="$1" picks=() names=() files=() pick item name file files_json
+  local raw="$1" picks=() names=() files=() pick item name file files_json meta_json relay_json warp_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -6929,21 +7118,26 @@ warp_add_preset_rules() {
     files+=("$file")
   done
   files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
-  split_rule_take_over_relay_to_warp "$files_json" || {
+  split_rule_confirm_relay_to_warp "$files_json" || {
     warn "已取消，未修改 WARP 分流规则。"
     pause
     return 0
   }
+  meta_json="$(meta_load)"
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
+  warp_json="$(warp_meta_json)"
   for pick in "${!files[@]}"; do
-    warp_rule_add_meta "${names[$pick]}" "${files[$pick]}" || return 1
+    warp_json="$(warp_rule_add_meta_to_json "$warp_json" "${names[$pick]}" "${files[$pick]}")" || return 1
   done
-  warp_apply_current_state || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "WARP 分流规则已应用。"
   pause
 }
 
 warp_custom_rule_menu() {
-  local raw file name files_json
+  local raw file name files_json meta_json relay_json warp_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   clear
@@ -6962,19 +7156,23 @@ warp_custom_rule_menu() {
   fi
   name="自定义：${file%.srs}"
   files_json="$(split_rule_files_json_from_args "$file")" || return 1
-  split_rule_take_over_relay_to_warp "$files_json" || {
+  split_rule_confirm_relay_to_warp "$files_json" || {
     warn "已取消，未修改 WARP 分流规则。"
     pause
     return 0
   }
-  warp_rule_add_meta "$name" "$file" || return 1
-  warp_apply_current_state || return 1
+  meta_json="$(meta_load)"
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
+  warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "自定义 WARP 分流已添加：$file"
   pause
 }
 
 warp_rules_delete_menu() {
-  local rules_json count raw n tag tags_json has_delete_all=0
+  local rules_json count raw n tag tags_json has_delete_all=0 meta_json warp_json
   local -a idx=()
   local -a selected_tags=()
   rules_json="$(warp_meta_rules_json)"
@@ -7007,8 +7205,8 @@ warp_rules_delete_menu() {
       return 1
     fi
     ask_confirm_yn "确认删除全部 WARP 分流？(y/N): " || return 0
-    warp_rule_clear_meta || return 1
-    warp_apply_current_state || return 1
+    meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" '{"mode":"off","rules":[]}')" || return 1
+    warp_apply_meta_json_state "$meta_json" || return 1
     ok "已删除全部 WARP 分流。"
     pause
     return 0
@@ -7024,8 +7222,9 @@ warp_rules_delete_menu() {
     [ -n "$tag" ] && [ "$tag" != "null" ] && selected_tags+=("$tag")
   done
   tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
-  warp_rule_remove_meta_by_tags_json "$tags_json" || return 1
-  warp_apply_current_state || return 1
+  warp_json="$(warp_rule_remove_meta_by_tags_json_from "$(warp_meta_json)" "$tags_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "已删除指定 WARP 分流。"
   pause
 }
@@ -7537,6 +7736,7 @@ is_install_complete() {
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
   _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
   _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  singbox_service_active || return 1
   return 0
 }
 
@@ -8037,13 +8237,17 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  # 安装流程完成后写入版本 stamp；服务运行状态单独提示。
-  echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
   if [ "$singbox_started" = "1" ]; then
+    echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
+      err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
+      pause
+      return 1
+    }
     ok "安装完成。"
   else
-    warn "安装完成，但 sing-box 未能正常运行，请进入系统工具查看状态或日志。"
+    warn "组件已安装，但 sing-box 服务未能正常运行，当前不记为完整安装。"
+    warn "请进入系统工具查看状态或日志，修复后重新执行安装/更新。"
   fi
   pause
 }

@@ -96,6 +96,7 @@ is_install_complete() {
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
   _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
   _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  singbox_service_active || return 1
   return 0
 }
 
@@ -596,13 +597,17 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  # 安装流程完成后写入版本 stamp；服务运行状态单独提示。
-  echo "$tag" > "$SINGBOX_VERSION_STAMP"
   show_versions
   if [ "$singbox_started" = "1" ]; then
+    echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
+      err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
+      pause
+      return 1
+    }
     ok "安装完成。"
   else
-    warn "安装完成，但 sing-box 未能正常运行，请进入系统工具查看状态或日志。"
+    warn "组件已安装，但 sing-box 服务未能正常运行，当前不记为完整安装。"
+    warn "请进入系统工具查看状态或日志，修复后重新执行安装/更新。"
   fi
   pause
 }

@@ -117,6 +117,7 @@ list_all_node_keys() {
 
 route_rebuild(){
   local json="$1"
+  local meta_json="${2:-}"
   local normalized core_auth_users_json relay_pairs_json preserved_rules_json
   local warp_mode="off" warp_tags_json='[]'
   local warp_available_tags_json='[]'
@@ -125,16 +126,18 @@ route_rebuild(){
 
   normalized="$(config_normalize "$json")" || return 1
 
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    warp_mode="$(jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' "$META_FILE" 2>/dev/null || echo "off")"
-    warp_tags_json="$(jq -c '
+  [ -n "$meta_json" ] || meta_json="$(meta_load)"
+
+  if echo "$meta_json" | jq -e . >/dev/null 2>&1; then
+    warp_mode="$(echo "$meta_json" | jq -r 'if (.warp.mode // "off") == "rules" then "rules" else "off" end' 2>/dev/null || echo "off")"
+    warp_tags_json="$(echo "$meta_json" | jq -c '
       [
         .warp.rules[]?
         | (.file // "") as $file
         | select($file != "")
         | "relay-" + (($file | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-"))
       ] | unique
-    ' "$META_FILE" 2>/dev/null || echo '[]')"
+    ' 2>/dev/null || echo '[]')"
   fi
   if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
     warp_mode="off"
@@ -155,8 +158,8 @@ route_rebuild(){
     warp_available_tags_json='[]'
   fi
 
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    relay_rule_groups_json="$(jq -c '
+  if echo "$meta_json" | jq -e . >/dev/null 2>&1; then
+    relay_rule_groups_json="$(echo "$meta_json" | jq -c '
       (.relay // {}) as $relay
       | ($relay.landing // null) as $legacy_landing
       | (
@@ -176,7 +179,7 @@ route_rebuild(){
           | select($tag != "")
           | {tag:$tag, out:("relay-" + $landing_id)}
         ]
-    ' "$META_FILE" 2>/dev/null || echo '[]')"
+    ' 2>/dev/null || echo '[]')"
   fi
   relay_available_groups_json="$(
     echo "$normalized" | jq -c --argjson wanted "$relay_rule_groups_json" '

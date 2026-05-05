@@ -48,7 +48,7 @@ split_rule_clear_all_meta() {
   meta_save "$meta_json"
 }
 
-split_rule_take_over_relay_to_warp() {
+split_rule_confirm_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
   count="$(echo "$conflicts" | jq 'length')" || return 1
@@ -60,6 +60,11 @@ split_rule_take_over_relay_to_warp() {
     | "  - \(.name // .file) -> 落地\(.landing_id // "未设置")：\(.file // "")"
   '
   ask_confirm_yn "是否改为 WARP 分流？(y/N): " || return 1
+}
+
+split_rule_take_over_relay_to_warp() {
+  local files_json="$1"
+  split_rule_confirm_relay_to_warp "$files_json" || return 1
   relay_rule_remove_meta_by_files_json "$files_json"
 }
 

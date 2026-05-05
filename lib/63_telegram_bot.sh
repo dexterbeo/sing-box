@@ -56,6 +56,47 @@ tg_config_save() {
   fi
 }
 
+tg_task_receipts_load() {
+  if [ -s "$TG_TASK_RECEIPTS_FILE" ] && jq -e . "$TG_TASK_RECEIPTS_FILE" >/dev/null 2>&1; then
+    cat "$TG_TASK_RECEIPTS_FILE"
+  else
+    echo '{"tasks":{}}'
+  fi
+}
+
+tg_task_receipts_save() {
+  local json="$1"
+  mkdir -p "$(dirname "$TG_TASK_RECEIPTS_FILE")"
+  chmod 700 "$(dirname "$TG_TASK_RECEIPTS_FILE")" 2>/dev/null || true
+  local tmp_file
+  tmp_file="$(mktemp "${TG_TASK_RECEIPTS_FILE}.tmp.XXXXXX")" || return 1
+  if echo "$json" | jq . > "$tmp_file"; then
+    mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"
+    chmod 600 "$TG_TASK_RECEIPTS_FILE" 2>/dev/null || true
+  else
+    rm -f "$tmp_file" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+tg_task_receipt_get() {
+  local task_id="$1"
+  [ -n "$task_id" ] || return 1
+  tg_task_receipts_load | jq -c --arg id "$task_id" '.tasks[$id] // empty'
+}
+
+tg_task_receipt_save_success() {
+  local task_id="$1" message="$2" now receipts
+  [ -n "$task_id" ] || return 1
+  now="$(date +%s)"
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson now "$now" '
+    .tasks = (.tasks // {})
+    | .tasks[$id] = {ok:true, message:$message, completed_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // $now)) <= 604800))
+  ')" || return 1
+  tg_task_receipts_save "$receipts"
+}
+
 tg_config_enabled_value() {
   local cfg="$1"
   echo "$cfg" | jq -r '
@@ -1323,6 +1364,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             now = int(time.time())
             available = []
+            expired_notifications = []
             with CFG_LOCK:
                 cfg = load_config()
                 tasks = cfg.setdefault("tasks", {})
@@ -1336,6 +1378,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status = task.get("status")
                     picked_at = int(task.get("picked_at") or 0)
                     attempts = int(task.get("attempts") or 0)
+                    if status == "running" and picked_at and now - picked_at > 120 and attempts >= 3:
+                        message = "节点超过重试次数仍未回传结果，任务已停止重试。"
+                        task["status"] = "failed"
+                        task["message"] = message
+                        task["completed_at"] = now
+                        expired_notifications.append((
+                            task.get("created_chat_id"),
+                            f"{vps_id} / {task.get('username') or ''}".strip(" /"),
+                            message,
+                        ))
+                        continue
                     runnable = status == "pending" or (status == "running" and now - picked_at > 120 and attempts < 3)
                     if not runnable:
                         continue
@@ -1349,6 +1402,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "params": task.get("params") or {},
                     })
                 save_config(cfg)
+            for chat_id, title, message in expired_notifications:
+                if chat_id:
+                    send_message(chat_id, f"执行失败：{title}\n{message}")
             write_json(self, 200, {"ok": True, "tasks": available})
             return
 
@@ -1708,7 +1764,7 @@ tg_execute_task() {
 }
 
 tg_process_tasks() {
-  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value
+  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt
   TG_TASKS_REPORTED_STATE=0
   tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
   echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
@@ -1716,8 +1772,13 @@ tg_process_tasks() {
     [ -n "$task" ] || continue
     task_id="$(echo "$task" | jq -r '.id // empty')"
     [ -n "$task_id" ] || continue
-    if msg="$(tg_execute_task "$task" 2>&1)"; then
+    receipt="$(tg_task_receipt_get "$task_id" 2>/dev/null || true)"
+    if [ -n "$receipt" ]; then
+      ok_value="$(echo "$receipt" | jq -r 'if (.ok // false) then "true" else "false" end')"
+      msg="$(echo "$receipt" | jq -r '.message // "执行成功。"')"
+    elif msg="$(tg_execute_task "$task" 2>&1)"; then
       ok_value=true
+      tg_task_receipt_save_success "$task_id" "$msg" >/dev/null 2>&1 || true
       tg_prepare_report_state
       if tg_post_report "$cfg" "$center_url" "$secret"; then
         TG_TASKS_REPORTED_STATE=1

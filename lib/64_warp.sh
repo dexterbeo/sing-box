@@ -47,6 +47,20 @@ warp_meta_save_rules_obj() {
   warp_meta_save_obj "$warp_json"
 }
 
+warp_meta_normalize_obj() {
+  local warp_json="$1"
+  echo "$warp_json" | jq -c '
+    .mode = (if ((.rules // []) | length) > 0 then "rules" else "off" end)
+    | .rules = (.rules // [])
+  '
+}
+
+warp_meta_replace_in_meta_json() {
+  local meta_json="$1" warp_json="$2" normalized
+  normalized="$(warp_meta_normalize_obj "$warp_json")" || return 1
+  echo "$meta_json" | jq --argjson w "$normalized" '.warp = $w'
+}
+
 warp_rule_tag_for_file() {
   local file="$1" base tag
   base="${file%.srs}"
@@ -56,6 +70,38 @@ warp_rule_tag_for_file() {
 
 warp_rule_url_for_file() {
   echo "${WARP_RULE_BASE_URL}/$1"
+}
+
+warp_rule_add_meta_to_json() {
+  local warp_json="$1" name="$2" file="$3" tag url
+  tag="$(warp_rule_tag_for_file "$file")"
+  url="$(warp_rule_url_for_file "$file")"
+  echo "$warp_json" | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" '
+    .rules = ((.rules // []) + [{name:$name,file:$file,tag:$tag,url:$url}])
+    | .rules |= unique_by(.tag)
+  '
+}
+
+warp_rule_remove_meta_by_tags_json_from() {
+  local warp_json="$1" tags_json="$2"
+  echo "$warp_json" | jq --argjson tags "$tags_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
+  '
+}
+
+warp_rule_remove_meta_by_files_json_from() {
+  local warp_json="$1" files_json="$2"
+  echo "$warp_json" | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  '
 }
 
 warp_normalize_rule_file() {
@@ -82,37 +128,20 @@ warp_validate_rule_file() {
 }
 
 warp_rule_add_meta() {
-  local name="$1" file="$2" tag url warp_json
-  tag="$(warp_rule_tag_for_file "$file")"
-  url="$(warp_rule_url_for_file "$file")"
-  warp_json="$(warp_meta_json | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" '
-    .rules = ((.rules // []) + [{name:$name,file:$file,tag:$tag,url:$url}])
-    | .rules |= unique_by(.tag)
-  ')" || return 1
+  local name="$1" file="$2" warp_json
+  warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
 warp_rule_remove_meta_by_tags_json() {
   local tags_json="$1" warp_json
-  warp_json="$(warp_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.tag // "") as $tag
-      | select(($tags | index($tag)) == null)
-    ]
-  ')" || return 1
+  warp_json="$(warp_rule_remove_meta_by_tags_json_from "$(warp_meta_json)" "$tags_json")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
 warp_rule_remove_meta_by_files_json() {
   local files_json="$1" warp_json
-  warp_json="$(warp_meta_json | jq --argjson files "$files_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.file // "") as $file
-      | select(($files | index($file)) == null)
-    ]
-  ')" || return 1
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
   warp_meta_save_rules_obj "$warp_json"
 }
 
@@ -260,11 +289,21 @@ warp_config_project_json() {
   '
 }
 
-warp_apply_current_state() {
-  local json rules_json ready port projected rebuilt
+warp_apply_meta_json_state() {
+  local meta_json="$1" json warp_json rules_json ready port projected rebuilt
   warp_require_singbox || return 1
+  warp_json="$(echo "$meta_json" | jq -c '
+    (.warp // {mode:"off", rules:[]})
+    | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
+    | .rules = [
+        (.rules // [])[]?
+        | select((.file // "") != "")
+        | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
+      ]
+  ')" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
   json="$(config_load)"
-  rules_json="$(warp_meta_rules_json)"
+  rules_json="$(echo "$warp_json" | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "")] | unique_by(.tag)')" || return 1
   ready=false
   port=0
   if warp_wireproxy_ready; then
@@ -272,8 +311,13 @@ warp_apply_current_state() {
     port="$(warp_wireproxy_port)" || return 1
   fi
   projected="$(warp_config_project_json "$json" "$rules_json" "$ready" "$port")" || return 1
-  rebuilt="$(route_rebuild "$projected")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt"
+  rebuilt="$(route_rebuild "$projected" "$meta_json")" || return 1
+  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt" || return 1
+  meta_save "$meta_json"
+}
+
+warp_apply_current_state() {
+  warp_apply_meta_json_state "$(meta_load)"
 }
 
 warp_require_wireproxy_ready() {
@@ -287,7 +331,7 @@ warp_require_wireproxy_ready() {
 }
 
 warp_add_preset_rules() {
-  local raw="$1" picks=() names=() files=() pick item name file files_json
+  local raw="$1" picks=() names=() files=() pick item name file files_json meta_json relay_json warp_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -307,21 +351,26 @@ warp_add_preset_rules() {
     files+=("$file")
   done
   files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
-  split_rule_take_over_relay_to_warp "$files_json" || {
+  split_rule_confirm_relay_to_warp "$files_json" || {
     warn "已取消，未修改 WARP 分流规则。"
     pause
     return 0
   }
+  meta_json="$(meta_load)"
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
+  warp_json="$(warp_meta_json)"
   for pick in "${!files[@]}"; do
-    warp_rule_add_meta "${names[$pick]}" "${files[$pick]}" || return 1
+    warp_json="$(warp_rule_add_meta_to_json "$warp_json" "${names[$pick]}" "${files[$pick]}")" || return 1
   done
-  warp_apply_current_state || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "WARP 分流规则已应用。"
   pause
 }
 
 warp_custom_rule_menu() {
-  local raw file name files_json
+  local raw file name files_json meta_json relay_json warp_json
   warp_require_singbox || return 1
   warp_require_wireproxy_ready || return 1
   clear
@@ -340,19 +389,23 @@ warp_custom_rule_menu() {
   fi
   name="自定义：${file%.srs}"
   files_json="$(split_rule_files_json_from_args "$file")" || return 1
-  split_rule_take_over_relay_to_warp "$files_json" || {
+  split_rule_confirm_relay_to_warp "$files_json" || {
     warn "已取消，未修改 WARP 分流规则。"
     pause
     return 0
   }
-  warp_rule_add_meta "$name" "$file" || return 1
-  warp_apply_current_state || return 1
+  meta_json="$(meta_load)"
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
+  warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "自定义 WARP 分流已添加：$file"
   pause
 }
 
 warp_rules_delete_menu() {
-  local rules_json count raw n tag tags_json has_delete_all=0
+  local rules_json count raw n tag tags_json has_delete_all=0 meta_json warp_json
   local -a idx=()
   local -a selected_tags=()
   rules_json="$(warp_meta_rules_json)"
@@ -385,8 +438,8 @@ warp_rules_delete_menu() {
       return 1
     fi
     ask_confirm_yn "确认删除全部 WARP 分流？(y/N): " || return 0
-    warp_rule_clear_meta || return 1
-    warp_apply_current_state || return 1
+    meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" '{"mode":"off","rules":[]}')" || return 1
+    warp_apply_meta_json_state "$meta_json" || return 1
     ok "已删除全部 WARP 分流。"
     pause
     return 0
@@ -402,8 +455,9 @@ warp_rules_delete_menu() {
     [ -n "$tag" ] && [ "$tag" != "null" ] && selected_tags+=("$tag")
   done
   tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
-  warp_rule_remove_meta_by_tags_json "$tags_json" || return 1
-  warp_apply_current_state || return 1
+  warp_json="$(warp_rule_remove_meta_by_tags_json_from "$(warp_meta_json)" "$tags_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$meta_json" || return 1
   ok "已删除指定 WARP 分流。"
   pause
 }

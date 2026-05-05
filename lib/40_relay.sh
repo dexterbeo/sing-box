@@ -306,7 +306,7 @@ relay_add() {
   relay_user="$(relay_user_name "$entry_key" "$land")"
   out_tag="$(relay_outbound_tag "$entry_key" "$land")"
 
-  local new_user new_out updated_json
+  local new_user new_out updated_json meta_json relay_json
   new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
     err "不支持的入站协议，无法生成中转用户。"
     pause
@@ -335,12 +335,9 @@ relay_add() {
         + [{auth_user:[$ru], outbound:$ot}]
       )
   ' --arg ek "$entry_key" --arg ru "$relay_user" --arg ot "$out_tag" --argjson nu "$new_user" --argjson no "$new_out")"
-  relay_meta_upsert_landing "$landing_json" || {
-    err "保存落地机信息失败，已中止，未写入配置。"
-    pause
-    return 1
-  }
-  updated_json="$(relay_project_partial_state "$updated_json")" || {
+  relay_json="$(relay_meta_upsert_landing_to_json "$(relay_meta_json)" "$landing_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$(meta_load)" "$relay_json")" || return 1
+  updated_json="$(relay_project_partial_state_with_meta "$updated_json" "$meta_json")" || {
     err "重建路由失败，已中止，未写入配置。"
     pause
     return 1
@@ -351,9 +348,13 @@ relay_add() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" && _relay_ok=1
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
+      meta_save "$meta_json" && _relay_ok=1
+    fi
   else
-    _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json" && _relay_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+      meta_save "$meta_json" && _relay_ok=1
+    fi
   fi
   if [ "$_relay_ok" -eq 1 ]; then
     ok "全部流量中转已添加：${relay_user}（落地 SOCKS: ${ip}:${relay_port}）"
@@ -366,8 +367,9 @@ relay_add() {
 
 # ---------- 部分流量中转元数据 ----------
 
-relay_meta_json() {
-  meta_load | jq -c '
+relay_meta_json_from_meta() {
+  local meta_json="$1"
+  echo "$meta_json" | jq -c '
     (.relay // {}) as $relay
     | ($relay.landing // null) as $legacy_landing
     | (
@@ -389,6 +391,10 @@ relay_meta_json() {
         ]
       }
   '
+}
+
+relay_meta_json() {
+  relay_meta_json_from_meta "$(meta_load)"
 }
 
 relay_meta_rules_json() {
@@ -415,6 +421,20 @@ relay_meta_save_rules_obj() {
   relay_meta_save_obj "$relay_json"
 }
 
+relay_meta_normalize_obj() {
+  local relay_json="$1"
+  echo "$relay_json" | jq -c '
+    .landings = (.landings // {})
+    | .rules = (.rules // [])
+  '
+}
+
+relay_meta_replace_in_meta_json() {
+  local meta_json="$1" relay_json="$2" normalized
+  normalized="$(relay_meta_normalize_obj "$relay_json")" || return 1
+  echo "$meta_json" | jq --argjson r "$normalized" '.relay = $r'
+}
+
 relay_meta_upsert_landing() {
   local landing_json="$1" relay_json
   relay_json="$(relay_meta_json | jq --argjson landing "$landing_json" '
@@ -433,6 +453,50 @@ relay_rule_tag_for_file() {
 
 relay_rule_url_for_file() {
   echo "${RELAY_RULE_BASE_URL}/$1"
+}
+
+relay_meta_upsert_landing_to_json() {
+  local relay_json="$1" landing_json="$2"
+  echo "$relay_json" | jq --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+  '
+}
+
+relay_rule_add_meta_to_json() {
+  local relay_json="$1" name="$2" file="$3" landing_json="$4" tag url
+  tag="$(relay_rule_tag_for_file "$file")"
+  url="$(relay_rule_url_for_file "$file")"
+  echo "$relay_json" | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" --argjson landing "$landing_json" '
+    .landings = (.landings // {})
+    | .landings[$landing.id] = $landing
+    | .rules = (
+        ((.rules // []) | map(select((.tag // "") != $tag)))
+        + [{name:$name,file:$file,tag:$tag,url:$url,landing_id:$landing.id}]
+      )
+  '
+}
+
+relay_rule_remove_meta_by_tags_json_from() {
+  local relay_json="$1" tags_json="$2"
+  echo "$relay_json" | jq --argjson tags "$tags_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.tag // "") as $tag
+      | select(($tags | index($tag)) == null)
+    ]
+  '
+}
+
+relay_rule_remove_meta_by_files_json_from() {
+  local relay_json="$1" files_json="$2"
+  echo "$relay_json" | jq --argjson files "$files_json" '
+    .rules = [
+      (.rules // [])[]
+      | (.file // "") as $file
+      | select(($files | index($file)) == null)
+    ]
+  '
 }
 
 relay_normalize_rule_file() {
@@ -471,41 +535,20 @@ relay_preset_rule() {
 }
 
 relay_rule_add_meta() {
-  local name="$1" file="$2" landing_json="$3" tag url relay_json
-  tag="$(relay_rule_tag_for_file "$file")"
-  url="$(relay_rule_url_for_file "$file")"
-  relay_json="$(relay_meta_json | jq --arg name "$name" --arg file "$file" --arg tag "$tag" --arg url "$url" --argjson landing "$landing_json" '
-    .landings = (.landings // {})
-    | .landings[$landing.id] = $landing
-    | .rules = (
-        ((.rules // []) | map(select((.tag // "") != $tag)))
-        + [{name:$name,file:$file,tag:$tag,url:$url,landing_id:$landing.id}]
-      )
-  ')" || return 1
+  local name="$1" file="$2" landing_json="$3" relay_json
+  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json)" "$name" "$file" "$landing_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
 relay_rule_remove_meta_by_tags_json() {
   local tags_json="$1" relay_json
-  relay_json="$(relay_meta_json | jq --argjson tags "$tags_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.tag // "") as $tag
-      | select(($tags | index($tag)) == null)
-    ]
-  ')" || return 1
+  relay_json="$(relay_rule_remove_meta_by_tags_json_from "$(relay_meta_json)" "$tags_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
 relay_rule_remove_meta_by_files_json() {
   local files_json="$1" relay_json
-  relay_json="$(relay_meta_json | jq --argjson files "$files_json" '
-    .rules = [
-      (.rules // [])[]
-      | (.file // "") as $file
-      | select(($files | index($file)) == null)
-    ]
-  ')" || return 1
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
   relay_meta_save_rules_obj "$relay_json"
 }
 
@@ -597,23 +640,37 @@ relay_config_project_json() {
   '
 }
 
-relay_project_partial_state() {
-  local json="$1" rules_json landings_json projected
-  rules_json="$(relay_meta_rules_json)"
-  landings_json="$(relay_meta_landings_json)"
+relay_project_partial_state_with_meta() {
+  local json="$1" meta_json="$2" relay_json rules_json landings_json projected
+  relay_json="$(relay_meta_json_from_meta "$meta_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  rules_json="$(echo "$relay_json" | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "" and (.landing_id // "") != "")] | unique_by(.tag)')" || return 1
+  landings_json="$(echo "$relay_json" | jq -c '.landings // {}')" || return 1
   projected="$(relay_config_project_json "$json" "$rules_json" "$landings_json")" || return 1
-  route_rebuild "$projected"
+  route_rebuild "$projected" "$meta_json"
+}
+
+relay_project_partial_state() {
+  relay_project_partial_state_with_meta "$1" "$(meta_load)"
+}
+
+relay_apply_meta_json_state() {
+  local meta_json="$1" json projected normalized_relay
+  normalized_relay="$(relay_meta_json_from_meta "$meta_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$normalized_relay")" || return 1
+  json="$(config_load)"
+  projected="$(relay_project_partial_state_with_meta "$json" "$meta_json")" || return 1
+  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected" || return 1
+  meta_save "$meta_json"
 }
 
 relay_apply_partial_state() {
-  local json projected
-  json="$(config_load)"
-  projected="$(relay_project_partial_state "$json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected"
+  relay_apply_meta_json_state "$(meta_load)"
 }
 
 relay_add_preset_rules() {
   local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json has_warp_conflict=0
+  local meta_json relay_json warp_json
   init_manager_env || return 1
   json="$(config_load)"
   mapfile -t picks < <(parse_plus_selections "$raw")
@@ -643,17 +700,21 @@ relay_add_preset_rules() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
+  meta_json="$(meta_load)"
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
+  relay_json="$(relay_meta_json)"
   for pick in "${!files[@]}"; do
-    relay_rule_add_meta "${names[$pick]}" "${files[$pick]}" "$landing_json" || return 1
+    relay_json="$(relay_rule_add_meta_to_json "$relay_json" "${names[$pick]}" "${files[$pick]}" "$landing_json")" || return 1
   done
-  relay_apply_partial_state || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  relay_apply_meta_json_state "$meta_json" || return 1
   ok "部分流量中转规则已应用。"
   pause
 }
 
 relay_custom_rule_menu() {
-  local raw file name landing_json json files_json has_warp_conflict=0
+  local raw file name landing_json json files_json has_warp_conflict=0 meta_json relay_json warp_json
   init_manager_env || return 1
   json="$(config_load)"
   clear
@@ -681,9 +742,12 @@ relay_custom_rule_menu() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  [ "$has_warp_conflict" -eq 1 ] && split_rule_take_over_warp_to_relay "$files_json"
-  relay_rule_add_meta "$name" "$file" "$landing_json" || return 1
-  relay_apply_partial_state || return 1
+  meta_json="$(meta_load)"
+  warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
+  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json)" "$name" "$file" "$landing_json")" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  relay_apply_meta_json_state "$meta_json" || return 1
   ok "自定义部分流量中转已添加：$file"
   pause
 }
@@ -694,7 +758,7 @@ relay_delete() {
   init_manager_env || { pause; return 0; }
   local json lines=() node_lines=() partial_json partial_count item_lines=() choice picks=()
   local updated_json line entry relay_user out_tag node_key users_json type payload display idx part
-  local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json
+  local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json meta_json relay_json
   local -a selected_tags=()
 
   json="$(config_load)"
@@ -764,6 +828,8 @@ relay_delete() {
   fi
 
   updated_json="$json"
+  meta_json="$(meta_load)"
+  relay_json="$(relay_meta_json)"
   if [ "$has_delete_all" = "1" ]; then
     for line in "${node_lines[@]}"; do
       IFS=$'\x01' read -r entry node_key out_tag <<< "$line"
@@ -779,7 +845,7 @@ relay_delete() {
       }
       full_changed=1
     done
-    relay_rule_clear_meta || return 1
+    relay_json='{"landings":{},"rules":[]}'
     [ "$partial_count" -gt 0 ] && partial_changed=1
   else
     for part in "${picks[@]}"; do
@@ -813,11 +879,12 @@ relay_delete() {
     done
     if [ ${#selected_tags[@]} -gt 0 ]; then
       tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
-      relay_rule_remove_meta_by_tags_json "$tags_json" || return 1
+      relay_json="$(relay_rule_remove_meta_by_tags_json_from "$relay_json" "$tags_json")" || return 1
     fi
   fi
 
-  final_json="$(relay_project_partial_state "$updated_json")" || {
+  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
+  final_json="$(relay_project_partial_state_with_meta "$updated_json" "$meta_json")" || {
     err "重建中转规则失败，已中止，未写入配置。"
     pause
     return 1
@@ -829,9 +896,13 @@ relay_delete() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
-    _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" && _delete_ok=1
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
+      meta_save "$meta_json" && _delete_ok=1
+    fi
   else
-    _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json" && _delete_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json"; then
+      meta_save "$meta_json" && _delete_ok=1
+    fi
   fi
 
   if [ "$_delete_ok" -eq 1 ]; then

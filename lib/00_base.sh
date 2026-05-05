@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.4"
+SCRIPT_VERSION="6.0.5"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -34,6 +34,7 @@ LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
 META_FILE="/etc/sing-box-manager/meta.json"
 TG_CONFIG_FILE="/etc/sing-box-manager/telegram.json"
+TG_TASK_RECEIPTS_FILE="/etc/sing-box-manager/tg-task-receipts.json"
 TG_CENTER_APP="/etc/sing-box-manager/tg-center-bot.py"
 TG_CENTER_SERVICE="sb-tg-bot"
 SB_LOCK_FILE="/var/lock/singbox-manager.lock"

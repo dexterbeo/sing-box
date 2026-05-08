@@ -151,13 +151,26 @@ _user_manager_apply_changes_body() {
     return 1
   }
 
+  local old_db_json="" had_db=0
+  if user_db_exists; then
+    old_db_json="$(user_db_load)"
+    had_db=1
+  fi
+
+  user_db_save "$db_json" || {
+    err "用户数据库保存失败，已阻止配置变更。"
+    return 1
+  }
+
   if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
-    user_db_save "$db_json" || {
-      err "用户数据库保存失败，用户变更未完整落盘。"
-      return 1
-    }
     [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
     return 0
+  fi
+
+  if [ "$had_db" = "1" ]; then
+    user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
+  else
+    rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
   fi
   return 1
 }

@@ -191,7 +191,10 @@ _sync_user_usage_counters_body() {
       | .value.last_live_down_bytes = $live_down
     )
   ')" || return 0
-  user_db_save "$db_json"
+  user_db_save "$db_json" || {
+    warn "用户流量统计落盘失败：$USER_DB_FILE"
+    return 1
+  }
 }
 
 # ---------- Meta 存储（Reality 公钥等） ----------

@@ -101,7 +101,7 @@ relay_full_summary_lines() {
           print "全部流量转发："
           for (i = 1; i <= entry_count; i++) {
             entry = entries[i]
-            print "  - " entry "：" lands[entry]
+            printf "  - %-18s → 落地机：%s\n", entry, lands[entry]
           }
         }
       }
@@ -524,7 +524,7 @@ relay_validate_rule_file() {
 
 relay_preset_rule() {
   case "$1" in
-    1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
     2) echo "Google|geosite-google.srs" ;;
     3) echo "Netflix|geosite-netflix.srs" ;;
     4) echo "Disney+|geosite-disney.srs" ;;
@@ -582,7 +582,15 @@ relay_rules_print_summary() {
 }
 
 relay_rules_print_numbered() {
-  relay_meta_rules_json | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name) -> \(.value.landing_id)：\(.value.file)"'
+  local idx=0 file name display landing
+  while IFS=$'\x01' read -r file name landing; do
+    [ -z "$file" ] && continue
+    idx=$((idx+1))
+    display="$(split_rule_preset_display_name "$file")"
+    [ -n "$display" ] || display="$name"
+    [ -n "$display" ] || display="$file"
+    printf '  %s. %s -> %s：%s\n' "$idx" "$display" "$landing" "$file"
+  done < <(relay_meta_rules_json | jq -r '.[] | (.file // "") + "" + (.name // "") + "" + (.landing_id // "")')
 }
 
 relay_select_or_prompt_partial_landing() {
@@ -933,15 +941,16 @@ manage_relay_nodes() {
     while IFS= read -r line; do
       echo "  $line"
     done < <(relay_full_summary_lines "$json")
+    echo
     while IFS= read -r line; do
       echo "  $line"
-    done < <(relay_rules_print_summary)
+    done < <(split_rule_overview_lines)
     relay_hr
     echo "----- 全部流量转发至落地机 -----"
     echo -e "  ${C}1.${NC} 本机作为中转机"
     echo
     echo "----- 部分流量转发至落地机 -----"
-    echo -e "  ${C}2.${NC} AI 服务（海外聚合）"
+    echo -e "  ${C}2.${NC} AI 服务"
     echo -e "  ${C}3.${NC} Google"
     echo -e "  ${C}4.${NC} Netflix"
     echo -e "  ${C}5.${NC} Disney+"

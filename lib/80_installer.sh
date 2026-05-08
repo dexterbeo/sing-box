@@ -51,13 +51,48 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
   local v="${1:-}"
   v="${v#v}"
   echo "$v"
+}
+
+# 远端版本缓存：菜单摘要只读这个文件，永不发起网络请求，避免阻塞交互。
+# 写入由后台 cron 和安装/更新流程负责。
+refresh_upstream_tag_cache() {
+  local tag="${1:-}"
+  if [ -z "$tag" ]; then
+    tag="$(get_release_latest_tag)"
+  fi
+  [ -n "$tag" ] || return 1
+  mkdir -p "$(dirname "$UPSTREAM_TAG_CACHE_FILE")" >/dev/null 2>&1 || true
+  local now tmp
+  now="$(date +%s)"
+  tmp="${UPSTREAM_TAG_CACHE_FILE}.tmp.$$"
+  if jq -nc --arg tag "$tag" --argjson now "$now" '{tag:$tag, fetched_at:$now}' > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$UPSTREAM_TAG_CACHE_FILE" || { rm -f "$tmp"; return 1; }
+    return 0
+  fi
+  rm -f "$tmp" >/dev/null 2>&1 || true
+  return 1
+}
+
+# 读缓存中的 upstream 版本号（已 strip "v" 前缀）。
+# 缓存不存在或过期返回空字符串，调用方据此显示"未知"。
+get_cached_upstream_version() {
+  [ -s "$UPSTREAM_TAG_CACHE_FILE" ] || return 0
+  local now fetched age tag
+  now="$(date +%s)"
+  fetched="$(jq -r '.fetched_at // 0' "$UPSTREAM_TAG_CACHE_FILE" 2>/dev/null || echo 0)"
+  [[ "$fetched" =~ ^[0-9]+$ ]] || fetched=0
+  age=$((now - fetched))
+  [ "$age" -le "$UPSTREAM_TAG_CACHE_MAX_AGE_SECS" ] || return 0
+  tag="$(jq -r '.tag // ""' "$UPSTREAM_TAG_CACHE_FILE" 2>/dev/null || true)"
+  [ -n "$tag" ] || return 0
+  normalize_release_tag "$tag"
 }
 
 get_candidate_version() {
@@ -94,8 +129,13 @@ show_versions() {
 is_install_complete() {
   [ -x "$SINGBOX_BIN" ] || return 1
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
-  _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
-  _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  _cron_job_installed "$PERIODIC_SYNC_CRON_MARK" || return 1
+  _cron_job_installed "$DAILY_MAINTENANCE_CRON_MARK" || return 1
+  # 6.0.8 及以前的老 cron 残留也算"组件不一致"，引导用户清理。
+  ! _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
+  ! _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  ! _cron_job_installed "$TG_AGENT_CRON_MARK" || return 1
+  ! _cron_job_installed "$UPSTREAM_REFRESH_CRON_MARK" || return 1
   singbox_service_active || return 1
   return 0
 }
@@ -194,6 +234,9 @@ _cron_job_match_pattern() {
     "$USER_WATCH_CRON_MARK") echo "--user-watch" ;;
     "$LOG_MAINTAIN_CRON_MARK") echo "--maintain-logs" ;;
     "$TG_AGENT_CRON_MARK") echo "--tg-agent-sync" ;;
+    "$UPSTREAM_REFRESH_CRON_MARK") echo "--refresh-upstream" ;;
+    "$PERIODIC_SYNC_CRON_MARK") echo "--periodic-sync" ;;
+    "$DAILY_MAINTENANCE_CRON_MARK") echo "--daily-maintenance" ;;
     *) echo "$mark" ;;
   esac
 }
@@ -265,7 +308,7 @@ cron_job_status_line() {
   else
     daemon_state="${R}未运行${NC}"
   fi
-  printf '  %b%s%b : %b  daemon %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
+  printf '  %b%s%b : %b  定时服务 %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
 }
 
 _install_cron_job() {
@@ -303,6 +346,26 @@ install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_
 remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
 install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
 remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
+install_upstream_refresh_cron() { _install_cron_job "$UPSTREAM_REFRESH_CRON_MARK" "$UPSTREAM_REFRESH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --refresh-upstream"; }
+remove_upstream_refresh_cron()  { _remove_cron_job "$UPSTREAM_REFRESH_CRON_MARK"; }
+install_periodic_sync_cron()    { _install_cron_job "$PERIODIC_SYNC_CRON_MARK" "$PERIODIC_SYNC_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --periodic-sync"; }
+remove_periodic_sync_cron()     { _remove_cron_job "$PERIODIC_SYNC_CRON_MARK"; }
+install_daily_maintenance_cron(){ _install_cron_job "$DAILY_MAINTENANCE_CRON_MARK" "$DAILY_MAINTENANCE_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --daily-maintenance"; }
+remove_daily_maintenance_cron() { _remove_cron_job "$DAILY_MAINTENANCE_CRON_MARK"; }
+
+# 6.0.9 起合并定时任务的执行入口。
+# periodic-sync：每 3 分钟，跑 user_watch + tg_agent_sync（TG 内部自检 enabled）。
+# daily-maintenance：本地凌晨一次，跑 log 截尾 + 上游版本号刷新缓存。
+# 两个 runner 内部都用 `|| true` 隔离故障，避免一步挂导致另一步不跑。
+periodic_sync_run() {
+  user_watch_run || true
+  tg_agent_sync || true
+}
+
+daily_maintenance_run() {
+  maintain_logs || true
+  refresh_upstream_tag_cache >/dev/null 2>&1 || true
+}
 
 # ---------- 服务管理（systemd / OpenRC） ----------
 
@@ -576,20 +639,22 @@ install_or_update_singbox() {
   fi
   ensure_sb_shortcut || true
   ensure_user_manager_ready || { pause; return 1; }
-  install_user_watch_cron || {
-    err "cron 定时任务安装失败：用户流量统计。"
-    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
-    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
+  install_periodic_sync_cron || {
+    err "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
     pause
     return 1
   }
-  install_log_maintain_cron || {
-    err "cron 定时任务安装失败：日志维护。"
-    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
-    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
+  install_daily_maintenance_cron || {
+    err "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
     pause
     return 1
   }
+  # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
+  remove_user_watch_cron || true
+  remove_log_maintain_cron || true
+  remove_tg_agent_cron || true
+  remove_upstream_refresh_cron || true
+  refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
   user_manager_background_sync || {
     err "用户管理后台同步初始化失败。"
     pause
@@ -597,7 +662,6 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  show_versions
   if [ "$singbox_started" = "1" ]; then
     echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
       err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
@@ -818,9 +882,13 @@ uninstall_singbox_keep_config() {
   ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
+  remove_periodic_sync_cron || true
+  remove_daily_maintenance_cron || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
+  remove_upstream_refresh_cron || true
+  rm -f "$UPSTREAM_TAG_CACHE_FILE" >/dev/null 2>&1 || true
   tg_stop_center_service || true
   tg_mark_disabled_keep_config || true
   remove_all_singbox_service_units
@@ -841,10 +909,10 @@ uninstall_singbox_keep_config() {
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
-        pkg_installed sing-box && apt-get remove -y sing-box || true
-        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta || true
-        pkg_installed sing-box && apt-get purge -y sing-box || true
-        pkg_installed sing-box-beta && apt-get purge -y sing-box-beta || true
+        pkg_installed sing-box && apt-get remove -y sing-box >/dev/null 2>&1 || true
+        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta >/dev/null 2>&1 || true
+        pkg_installed sing-box && apt-get purge -y sing-box >/dev/null 2>&1 || true
+        pkg_installed sing-box-beta && apt-get purge -y sing-box-beta >/dev/null 2>&1 || true
         ;;
       apk)
         pkg_installed sing-box && apk del sing-box >/dev/null 2>&1 || true

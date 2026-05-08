@@ -719,7 +719,7 @@ view_config_formatted() {
 }
 
 singbox_status_summary() {
-  local _status _version _state
+  local _status _version _state _upstream _suffix
   case "$INIT_SYSTEM" in
     systemd)
       _state="$(systemctl is-active sing-box 2>/dev/null || true)"
@@ -758,7 +758,18 @@ singbox_status_summary() {
     _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"
   fi
   [ -n "$_version" ] || _version="未知"
-  printf '  %bsing-box%b : %b  版本 %b%s%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC"
+
+  _suffix=""
+  _upstream="$(get_cached_upstream_version 2>/dev/null || true)"
+  if [ "$_version" != "未知" ] && [ -n "$_upstream" ]; then
+    if [ "$_version" != "$_upstream" ] && version_ge "$_upstream" "$_version"; then
+      _suffix="  ${Y}(有新版 ${_upstream})${NC}"
+    fi
+  elif [ "$_version" != "未知" ] && [ -z "$_upstream" ]; then
+    _suffix="  ${Y}(新版检测: 未知)${NC}"
+  fi
+
+  printf '  %bsing-box%b : %b  版本 %b%s%b%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC" "$_suffix"
 }
 
 singbox_start() {
@@ -816,22 +827,26 @@ system_tools_menu() {
     clear
     print_rect_title "系统工具"
     singbox_status_summary
-    cron_job_status_line "流量统计" "$USER_WATCH_CRON_MARK"
-    cron_job_status_line "日志维护" "$LOG_MAINTAIN_CRON_MARK"
+    cron_job_status_line "实时同步" "$PERIODIC_SYNC_CRON_MARK"
+    cron_job_status_line "日常维护" "$DAILY_MAINTENANCE_CRON_MARK"
     echo -e "${B}----------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 查看 sing-box 实时日志"
-    echo -e "  ${C}2.${NC} 启动 sing-box"
-    echo -e "  ${C}3.${NC} 停止 sing-box"
-    echo -e "  ${C}4.${NC} 一键校准系统时间"
-    echo -e "  ${C}5.${NC} 规范化接管旧配置"
+    echo -e "  ${C}1.${NC} 启动 sing-box"
+    echo -e "  ${C}2.${NC} 停止 sing-box"
+    echo -e "  ${C}3.${NC} 查看 sing-box 实时日志"
+    echo -e "  ${C}4.${NC} 查看 config 配置文件"
+    echo -e "  ${C}5.${NC} 清空/重置 config 配置文件"
+    echo -e "  ${C}6.${NC} 一键校准系统时间"
+    echo -e "  ${C}7.${NC} 规范化接管旧配置"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) view_realtime_log ;;
-      2) singbox_start ;;
-      3) singbox_stop ;;
-      4) sync_system_time_chrony ;;
-      5) normalize_takeover ;;
+      1) singbox_start ;;
+      2) singbox_stop ;;
+      3) view_realtime_log ;;
+      4) view_config_formatted ;;
+      5) clear_config_json ;;
+      6) sync_system_time_chrony ;;
+      7) normalize_takeover ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

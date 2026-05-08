@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-05 03:08:01 UTC
+# 构建时间: 2026-05-08 17:52:36 UTC
 # ============================================================
 
 
@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.5"
+SCRIPT_VERSION="6.0.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -39,6 +39,14 @@ LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 TG_AGENT_CRON_MARK="sb.sh --tg-agent-sync"
 TG_AGENT_CRON_SCHEDULE="* * * * *"
+UPSTREAM_REFRESH_CRON_MARK="sb.sh --refresh-upstream"
+UPSTREAM_REFRESH_CRON_SCHEDULE="47 3 * * *"
+PERIODIC_SYNC_CRON_MARK="sb.sh --periodic-sync"
+PERIODIC_SYNC_CRON_SCHEDULE="*/3 * * * *"
+DAILY_MAINTENANCE_CRON_MARK="sb.sh --daily-maintenance"
+DAILY_MAINTENANCE_CRON_SCHEDULE="47 4 * * *"
+UPSTREAM_TAG_CACHE_FILE="/etc/sing-box-manager/.upstream-tag-cache"
+UPSTREAM_TAG_CACHE_MAX_AGE_SECS=172800
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
@@ -2141,6 +2149,69 @@ split_rule_take_over_warp_to_relay() {
   warp_rule_remove_meta_by_files_json "$files_json"
 }
 
+# 预设规则的规范显示名：按 file 反查，未匹配返回空。
+# relay/warp 两边的"规则展示"都走它，避免老 meta 里 .name 与新预设名不同步。
+split_rule_preset_display_name() {
+  case "${1:-}" in
+    geosite-category-ai-!cn.srs) echo "AI 服务" ;;
+    geosite-google.srs)          echo "Google" ;;
+    geosite-netflix.srs)         echo "Netflix" ;;
+    geosite-disney.srs)          echo "Disney+" ;;
+    geosite-youtube.srs)         echo "YouTube" ;;
+    geosite-tiktok.srs)          echo "TikTok" ;;
+    *) echo "" ;;
+  esac
+}
+
+# 分流总览：把 relay 部分流量规则与 WARP 分流规则合并展示，按预设顺序输出"规则名 → 去向"。
+# 中转管理菜单与 WARP 分流管理菜单顶部都调它，两边视图一字不差。
+split_rule_overview_lines() {
+  local relay_rules warp_rules combined count sorted file name dest display arrow padded
+  relay_rules="$(relay_meta_rules_json 2>/dev/null)" || relay_rules='[]'
+  warp_rules="$(warp_meta_rules_json 2>/dev/null)" || warp_rules='[]'
+  [ -n "$relay_rules" ] || relay_rules='[]'
+  [ -n "$warp_rules" ] || warp_rules='[]'
+  combined="$(jq -nc \
+    --argjson relay "$relay_rules" \
+    --argjson warp "$warp_rules" '
+    ($relay | map({file:(.file // ""), name:(.name // ""), dest:("relay:" + (.landing_id // "未设置"))}))
+    + ($warp | map({file:(.file // ""), name:(.name // ""), dest:"warp"}))
+    | unique_by(.file)
+  ' 2>/dev/null)" || combined='[]'
+  count="$(echo "$combined" | jq 'length' 2>/dev/null)" || count=0
+  if [ "$count" -eq 0 ]; then
+    echo "分流总览：暂无规则"
+    return 0
+  fi
+  echo "分流总览：（共 ${count} 条）"
+  sorted="$(echo "$combined" | jq -r '
+    def preset_index($file):
+      if   $file == "geosite-category-ai-!cn.srs" then 0
+      elif $file == "geosite-google.srs"          then 1
+      elif $file == "geosite-netflix.srs"         then 2
+      elif $file == "geosite-disney.srs"          then 3
+      elif $file == "geosite-youtube.srs"         then 4
+      elif $file == "geosite-tiktok.srs"          then 5
+      else 99 end;
+    sort_by(preset_index(.file), .file, .name)
+    | .[]
+    | (.file // "") + "" + (.name // "") + "" + (.dest // "")
+  ' 2>/dev/null)" || return 0
+  while IFS=$'\x01' read -r file name dest; do
+    [ -z "$file" ] && [ -z "$name" ] && continue
+    display="$(split_rule_preset_display_name "$file")"
+    [ -n "$display" ] || display="$name"
+    [ -n "$display" ] || display="$file"
+    case "$dest" in
+      warp)    arrow="WARP" ;;
+      relay:*) arrow="落地机 ${dest#relay:}" ;;
+      *)       arrow="$dest" ;;
+    esac
+    padded="$(pad_display_text "$display" 22)"
+    printf '  %s → %s\n' "$padded" "$arrow"
+  done <<< "$sorted"
+}
+
 # >>>>>>>>> END MODULE: 35_split_rule_conflict.sh <<<<<<<<<<<
 
 # >>>>>>>>> BEGIN MODULE: 40_relay.sh <<<<<<<<<<<
@@ -2246,7 +2317,7 @@ relay_full_summary_lines() {
           print "全部流量转发："
           for (i = 1; i <= entry_count; i++) {
             entry = entries[i]
-            print "  - " entry "：" lands[entry]
+            printf "  - %-18s → 落地机：%s\n", entry, lands[entry]
           }
         }
       }
@@ -2669,7 +2740,7 @@ relay_validate_rule_file() {
 
 relay_preset_rule() {
   case "$1" in
-    1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
     2) echo "Google|geosite-google.srs" ;;
     3) echo "Netflix|geosite-netflix.srs" ;;
     4) echo "Disney+|geosite-disney.srs" ;;
@@ -2727,7 +2798,15 @@ relay_rules_print_summary() {
 }
 
 relay_rules_print_numbered() {
-  relay_meta_rules_json | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name) -> \(.value.landing_id)：\(.value.file)"'
+  local idx=0 file name display landing
+  while IFS=$'\x01' read -r file name landing; do
+    [ -z "$file" ] && continue
+    idx=$((idx+1))
+    display="$(split_rule_preset_display_name "$file")"
+    [ -n "$display" ] || display="$name"
+    [ -n "$display" ] || display="$file"
+    printf '  %s. %s -> %s：%s\n' "$idx" "$display" "$landing" "$file"
+  done < <(relay_meta_rules_json | jq -r '.[] | (.file // "") + "" + (.name // "") + "" + (.landing_id // "")')
 }
 
 relay_select_or_prompt_partial_landing() {
@@ -3078,15 +3157,16 @@ manage_relay_nodes() {
     while IFS= read -r line; do
       echo "  $line"
     done < <(relay_full_summary_lines "$json")
+    echo
     while IFS= read -r line; do
       echo "  $line"
-    done < <(relay_rules_print_summary)
+    done < <(split_rule_overview_lines)
     relay_hr
     echo "----- 全部流量转发至落地机 -----"
     echo -e "  ${C}1.${NC} 本机作为中转机"
     echo
     echo "----- 部分流量转发至落地机 -----"
-    echo -e "  ${C}2.${NC} AI 服务（海外聚合）"
+    echo -e "  ${C}2.${NC} AI 服务"
     echo -e "  ${C}3.${NC} Google"
     echo -e "  ${C}4.${NC} Netflix"
     echo -e "  ${C}5.${NC} Disney+"
@@ -3307,7 +3387,10 @@ _sync_user_usage_counters_body() {
       | .value.last_live_down_bytes = $live_down
     )
   ')" || return 0
-  user_db_save "$db_json"
+  user_db_save "$db_json" || {
+    warn "用户流量统计落盘失败：$USER_DB_FILE"
+    return 1
+  }
 }
 
 # ---------- Meta 存储（Reality 公钥等） ----------
@@ -3664,13 +3747,26 @@ _user_manager_apply_changes_body() {
     return 1
   }
 
+  local old_db_json="" had_db=0
+  if user_db_exists; then
+    old_db_json="$(user_db_load)"
+    had_db=1
+  fi
+
+  user_db_save "$db_json" || {
+    err "用户数据库保存失败，已阻止配置变更。"
+    return 1
+  }
+
   if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
-    user_db_save "$db_json" || {
-      err "用户数据库保存失败，用户变更未完整落盘。"
-      return 1
-    }
     [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
     return 0
+  fi
+
+  if [ "$had_db" = "1" ]; then
+    user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
+  else
+    rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
   fi
   return 1
 }
@@ -4606,14 +4702,29 @@ tg_task_receipt_get() {
   tg_task_receipts_load | jq -c --arg id "$task_id" '.tasks[$id] // empty'
 }
 
-tg_task_receipt_save_success() {
-  local task_id="$1" message="$2" now receipts
+# 预留 receipt 占位：写入成功才允许执行任务，避免崩溃后无法识别已开过头的任务
+tg_task_receipt_reserve() {
+  local task_id="$1" now receipts
   [ -n "$task_id" ] || return 1
   now="$(date +%s)"
-  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson now "$now" '
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --argjson now "$now" '
     .tasks = (.tasks // {})
-    | .tasks[$id] = {ok:true, message:$message, completed_at:$now}
-    | .tasks |= with_entries(select(($now - (.value.completed_at // $now)) <= 604800))
+    | .tasks[$id] = {status:"running", started_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // .value.started_at // $now)) <= 604800))
+  ')" || return 1
+  tg_task_receipts_save "$receipts"
+}
+
+# 任务执行结束后落盘最终结果；保存失败必须返回非零，由调用方决定是否上报主控
+tg_task_receipt_finalize() {
+  local task_id="$1" ok_value="$2" message="$3" now receipts ok_bool
+  [ -n "$task_id" ] || return 1
+  if [ "$ok_value" = "true" ]; then ok_bool="true"; else ok_bool="false"; fi
+  now="$(date +%s)"
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson ok "$ok_bool" --argjson now "$now" '
+    .tasks = (.tasks // {})
+    | .tasks[$id] = {status:"done", ok:$ok, message:$message, completed_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // .value.started_at // $now)) <= 604800))
   ')" || return 1
   tg_task_receipts_save "$receipts"
 }
@@ -6069,7 +6180,11 @@ tg_stop_center_service() {
   esac
 }
 
-install_tg_agent_cron() { _install_cron_job "$TG_AGENT_CRON_MARK" "$TG_AGENT_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --tg-agent-sync"; }
+install_tg_agent_cron() {
+  # 6.0.9 起 TG 上报已合并到 periodic-sync cron，无需独立 cron。
+  # 函数保留为 no-op 以保持现有调用点兼容；TG 是否上报由 enabled 标记 + tg_agent_sync 内部自检决定。
+  return 0
+}
 remove_tg_agent_cron()  { _remove_cron_job "$TG_AGENT_CRON_MARK"; }
 
 tg_collect_report_json() {
@@ -6285,7 +6400,7 @@ tg_execute_task() {
 }
 
 tg_process_tasks() {
-  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt
+  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt receipt_status
   TG_TASKS_REPORTED_STATE=0
   tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
   echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
@@ -6293,21 +6408,44 @@ tg_process_tasks() {
     [ -n "$task" ] || continue
     task_id="$(echo "$task" | jq -r '.id // empty')"
     [ -n "$task_id" ] || continue
+
     receipt="$(tg_task_receipt_get "$task_id" 2>/dev/null || true)"
-    if [ -n "$receipt" ]; then
+    receipt_status="$(echo "${receipt:-}" | jq -r '.status // ""' 2>/dev/null || true)"
+
+    if [ "$receipt_status" = "done" ]; then
+      # 历史已完成任务：只重发结果，不再执行
       ok_value="$(echo "$receipt" | jq -r 'if (.ok // false) then "true" else "false" end')"
       msg="$(echo "$receipt" | jq -r '.message // "执行成功。"')"
-    elif msg="$(tg_execute_task "$task" 2>&1)"; then
-      ok_value=true
-      tg_task_receipt_save_success "$task_id" "$msg" >/dev/null 2>&1 || true
-      tg_prepare_report_state
-      if tg_post_report "$cfg" "$center_url" "$secret"; then
-        TG_TASKS_REPORTED_STATE=1
-      fi
-    else
+    elif [ "$receipt_status" = "running" ]; then
+      # 上一次执行后崩在落盘前；为安全起见不重复执行，标记失败让主控判断
       ok_value=false
-      [ -n "$msg" ] || msg="执行失败。"
+      msg="任务上一次执行未完整落盘，已拒绝重复执行，请人工确认。"
+      tg_task_receipt_finalize "$task_id" false "$msg" >/dev/null 2>&1 || true
+    else
+      # 新任务：先预留 receipt 占位，预留失败就拒绝执行（保证落盘可查）
+      if ! tg_task_receipt_reserve "$task_id" >/dev/null 2>&1; then
+        # 预留失败说明本地存储不可用，跳过本轮，等下次 poll 重试
+        continue
+      fi
+      if msg="$(tg_execute_task "$task" 2>&1)"; then
+        ok_value=true
+      else
+        ok_value=false
+        [ -n "$msg" ] || msg="执行失败。"
+      fi
+      # 落盘最终结果；落盘失败时绝不上报成功
+      if ! tg_task_receipt_finalize "$task_id" "$ok_value" "$msg" >/dev/null 2>&1; then
+        warn "任务回执落盘失败：$task_id（不上报，等待下次重试）"
+        continue
+      fi
+      if [ "$ok_value" = "true" ]; then
+        tg_prepare_report_state
+        if tg_post_report "$cfg" "$center_url" "$secret"; then
+          TG_TASKS_REPORTED_STATE=1
+        fi
+      fi
     fi
+
     tg_post_task_result "$center_url" "$secret" "$task_id" "$vps_id" "$ok_value" "$msg"
   done < <(echo "$tasks" | jq -c '.[]')
 }
@@ -6989,7 +7127,7 @@ warp_wireproxy_display() {
 
 warp_preset_rule() {
   case "$1" in
-    1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
     2) echo "Google|geosite-google.srs" ;;
     3) echo "Netflix|geosite-netflix.srs" ;;
     4) echo "Disney+|geosite-disney.srs" ;;
@@ -7016,7 +7154,15 @@ warp_rules_print_summary() {
 }
 
 warp_rules_print_numbered() {
-  warp_meta_rules_json | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name)：\(.value.file)"'
+  local idx=0 file name display
+  while IFS=$'\x01' read -r file name; do
+    [ -z "$file" ] && continue
+    idx=$((idx+1))
+    display="$(split_rule_preset_display_name "$file")"
+    [ -n "$display" ] || display="$name"
+    [ -n "$display" ] || display="$file"
+    printf '  %s. %s：%s\n' "$idx" "$display" "$file"
+  done < <(warp_meta_rules_json | jq -r '.[] | (.file // "") + "" + (.name // "")')
 }
 
 warp_config_project_json() {
@@ -7244,7 +7390,8 @@ warp_print_status() {
     echo "WireProxy SOCKS：未就绪"
   fi
   echo "本地 SOCKS：$(warp_wireproxy_display)"
-  warp_rules_print_summary
+  echo
+  split_rule_overview_lines
   warp_hr
 }
 
@@ -7281,7 +7428,7 @@ warp_manager_menu() {
       continue
     fi
 
-    echo -e "  ${C}1.${NC} AI 服务（海外聚合）"
+    echo -e "  ${C}1.${NC} AI 服务"
     echo -e "  ${C}2.${NC} Google"
     echo -e "  ${C}3.${NC} Netflix"
     echo -e "  ${C}4.${NC} Disney+"
@@ -7403,13 +7550,6 @@ build_v2rayn_tuic_link() {
     "$(url_encode "$sni")" \
     "$(url_encode "h3")" \
     "$(url_encode "$name")"
-}
-
-build_v2rayn_socks_link() {
-  local server="$1" port="$2" username="$3" password="$4" name="$5"
-  printf 'socks://%s:%s@%s:%s#%s' \
-    "$(url_encode "$username")" "$(url_encode "$password")" \
-    "$server" "$port" "$(url_encode "$name")"
 }
 
 # ---------- 导出上下文收集 ----------
@@ -7591,14 +7731,7 @@ export_configs() {
           [ -z "$pass" ] && continue
           {
             echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: \"${out_name}\", type: socks5, server: $ip, port: ${port}, username: \"${name}\", password: \"${pass}\", udp: true}"
-            echo ""
-            echo -e " Quantumult X: socks5=${ip}:${port}, username=${name}, password=${pass}, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_socks_link "$ip" "$port" "$name" "$pass" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = socks5, ${ip}, ${port}, username=${name}, password=${pass}, udp-relay=true"
+            echo -e " 参数: server=${ip}  port=${port}  username=${name}  password=${pass}"
           } >> "$target_file"
           ;;
       esac
@@ -7691,13 +7824,48 @@ ensure_sagernet_repo() { :; }
 
 get_release_latest_tag() {
   local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
-  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
+  curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
 normalize_release_tag() {
   local v="${1:-}"
   v="${v#v}"
   echo "$v"
+}
+
+# 远端版本缓存：菜单摘要只读这个文件，永不发起网络请求，避免阻塞交互。
+# 写入由后台 cron 和安装/更新流程负责。
+refresh_upstream_tag_cache() {
+  local tag="${1:-}"
+  if [ -z "$tag" ]; then
+    tag="$(get_release_latest_tag)"
+  fi
+  [ -n "$tag" ] || return 1
+  mkdir -p "$(dirname "$UPSTREAM_TAG_CACHE_FILE")" >/dev/null 2>&1 || true
+  local now tmp
+  now="$(date +%s)"
+  tmp="${UPSTREAM_TAG_CACHE_FILE}.tmp.$$"
+  if jq -nc --arg tag "$tag" --argjson now "$now" '{tag:$tag, fetched_at:$now}' > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$UPSTREAM_TAG_CACHE_FILE" || { rm -f "$tmp"; return 1; }
+    return 0
+  fi
+  rm -f "$tmp" >/dev/null 2>&1 || true
+  return 1
+}
+
+# 读缓存中的 upstream 版本号（已 strip "v" 前缀）。
+# 缓存不存在或过期返回空字符串，调用方据此显示"未知"。
+get_cached_upstream_version() {
+  [ -s "$UPSTREAM_TAG_CACHE_FILE" ] || return 0
+  local now fetched age tag
+  now="$(date +%s)"
+  fetched="$(jq -r '.fetched_at // 0' "$UPSTREAM_TAG_CACHE_FILE" 2>/dev/null || echo 0)"
+  [[ "$fetched" =~ ^[0-9]+$ ]] || fetched=0
+  age=$((now - fetched))
+  [ "$age" -le "$UPSTREAM_TAG_CACHE_MAX_AGE_SECS" ] || return 0
+  tag="$(jq -r '.tag // ""' "$UPSTREAM_TAG_CACHE_FILE" 2>/dev/null || true)"
+  [ -n "$tag" ] || return 0
+  normalize_release_tag "$tag"
 }
 
 get_candidate_version() {
@@ -7734,8 +7902,13 @@ show_versions() {
 is_install_complete() {
   [ -x "$SINGBOX_BIN" ] || return 1
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
-  _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
-  _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  _cron_job_installed "$PERIODIC_SYNC_CRON_MARK" || return 1
+  _cron_job_installed "$DAILY_MAINTENANCE_CRON_MARK" || return 1
+  # 6.0.8 及以前的老 cron 残留也算"组件不一致"，引导用户清理。
+  ! _cron_job_installed "$USER_WATCH_CRON_MARK" || return 1
+  ! _cron_job_installed "$LOG_MAINTAIN_CRON_MARK" || return 1
+  ! _cron_job_installed "$TG_AGENT_CRON_MARK" || return 1
+  ! _cron_job_installed "$UPSTREAM_REFRESH_CRON_MARK" || return 1
   singbox_service_active || return 1
   return 0
 }
@@ -7834,6 +8007,9 @@ _cron_job_match_pattern() {
     "$USER_WATCH_CRON_MARK") echo "--user-watch" ;;
     "$LOG_MAINTAIN_CRON_MARK") echo "--maintain-logs" ;;
     "$TG_AGENT_CRON_MARK") echo "--tg-agent-sync" ;;
+    "$UPSTREAM_REFRESH_CRON_MARK") echo "--refresh-upstream" ;;
+    "$PERIODIC_SYNC_CRON_MARK") echo "--periodic-sync" ;;
+    "$DAILY_MAINTENANCE_CRON_MARK") echo "--daily-maintenance" ;;
     *) echo "$mark" ;;
   esac
 }
@@ -7905,7 +8081,7 @@ cron_job_status_line() {
   else
     daemon_state="${R}未运行${NC}"
   fi
-  printf '  %b%s%b : %b  daemon %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
+  printf '  %b%s%b : %b  定时服务 %b\n' "$W" "$label" "$NC" "$installed" "$daemon_state"
 }
 
 _install_cron_job() {
@@ -7943,6 +8119,26 @@ install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_
 remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
 install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
 remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
+install_upstream_refresh_cron() { _install_cron_job "$UPSTREAM_REFRESH_CRON_MARK" "$UPSTREAM_REFRESH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --refresh-upstream"; }
+remove_upstream_refresh_cron()  { _remove_cron_job "$UPSTREAM_REFRESH_CRON_MARK"; }
+install_periodic_sync_cron()    { _install_cron_job "$PERIODIC_SYNC_CRON_MARK" "$PERIODIC_SYNC_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --periodic-sync"; }
+remove_periodic_sync_cron()     { _remove_cron_job "$PERIODIC_SYNC_CRON_MARK"; }
+install_daily_maintenance_cron(){ _install_cron_job "$DAILY_MAINTENANCE_CRON_MARK" "$DAILY_MAINTENANCE_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --daily-maintenance"; }
+remove_daily_maintenance_cron() { _remove_cron_job "$DAILY_MAINTENANCE_CRON_MARK"; }
+
+# 6.0.9 起合并定时任务的执行入口。
+# periodic-sync：每 3 分钟，跑 user_watch + tg_agent_sync（TG 内部自检 enabled）。
+# daily-maintenance：本地凌晨一次，跑 log 截尾 + 上游版本号刷新缓存。
+# 两个 runner 内部都用 `|| true` 隔离故障，避免一步挂导致另一步不跑。
+periodic_sync_run() {
+  user_watch_run || true
+  tg_agent_sync || true
+}
+
+daily_maintenance_run() {
+  maintain_logs || true
+  refresh_upstream_tag_cache >/dev/null 2>&1 || true
+}
 
 # ---------- 服务管理（systemd / OpenRC） ----------
 
@@ -8216,20 +8412,22 @@ install_or_update_singbox() {
   fi
   ensure_sb_shortcut || true
   ensure_user_manager_ready || { pause; return 1; }
-  install_user_watch_cron || {
-    err "cron 定时任务安装失败：用户流量统计。"
-    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
-    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
+  install_periodic_sync_cron || {
+    err "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
     pause
     return 1
   }
-  install_log_maintain_cron || {
-    err "cron 定时任务安装失败：日志维护。"
-    warn "当前环境：PKG_MANAGER=${PKG_MANAGER}, INIT_SYSTEM=${INIT_SYSTEM}"
-    warn "请检查系统是否支持 cron（容器环境可能禁用了 init 系统）。"
+  install_daily_maintenance_cron || {
+    err "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
     pause
     return 1
   }
+  # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
+  remove_user_watch_cron || true
+  remove_log_maintain_cron || true
+  remove_tg_agent_cron || true
+  remove_upstream_refresh_cron || true
+  refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
   user_manager_background_sync || {
     err "用户管理后台同步初始化失败。"
     pause
@@ -8237,7 +8435,6 @@ install_or_update_singbox() {
   }
   tg_refresh_after_singbox_install || true
 
-  show_versions
   if [ "$singbox_started" = "1" ]; then
     echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
       err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
@@ -8458,9 +8655,13 @@ uninstall_singbox_keep_config() {
   ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
 
   sync_user_usage_counters || true
+  remove_periodic_sync_cron || true
+  remove_daily_maintenance_cron || true
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
+  remove_upstream_refresh_cron || true
+  rm -f "$UPSTREAM_TAG_CACHE_FILE" >/dev/null 2>&1 || true
   tg_stop_center_service || true
   tg_mark_disabled_keep_config || true
   remove_all_singbox_service_units
@@ -8481,10 +8682,10 @@ uninstall_singbox_keep_config() {
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
-        pkg_installed sing-box && apt-get remove -y sing-box || true
-        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta || true
-        pkg_installed sing-box && apt-get purge -y sing-box || true
-        pkg_installed sing-box-beta && apt-get purge -y sing-box-beta || true
+        pkg_installed sing-box && apt-get remove -y sing-box >/dev/null 2>&1 || true
+        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta >/dev/null 2>&1 || true
+        pkg_installed sing-box && apt-get purge -y sing-box >/dev/null 2>&1 || true
+        pkg_installed sing-box-beta && apt-get purge -y sing-box-beta >/dev/null 2>&1 || true
         ;;
       apk)
         pkg_installed sing-box && apk del sing-box >/dev/null 2>&1 || true
@@ -9222,7 +9423,7 @@ view_config_formatted() {
 }
 
 singbox_status_summary() {
-  local _status _version _state
+  local _status _version _state _upstream _suffix
   case "$INIT_SYSTEM" in
     systemd)
       _state="$(systemctl is-active sing-box 2>/dev/null || true)"
@@ -9261,7 +9462,18 @@ singbox_status_summary() {
     _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"
   fi
   [ -n "$_version" ] || _version="未知"
-  printf '  %bsing-box%b : %b  版本 %b%s%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC"
+
+  _suffix=""
+  _upstream="$(get_cached_upstream_version 2>/dev/null || true)"
+  if [ "$_version" != "未知" ] && [ -n "$_upstream" ]; then
+    if [ "$_version" != "$_upstream" ] && version_ge "$_upstream" "$_version"; then
+      _suffix="  ${Y}(有新版 ${_upstream})${NC}"
+    fi
+  elif [ "$_version" != "未知" ] && [ -z "$_upstream" ]; then
+    _suffix="  ${Y}(新版检测: 未知)${NC}"
+  fi
+
+  printf '  %bsing-box%b : %b  版本 %b%s%b%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC" "$_suffix"
 }
 
 singbox_start() {
@@ -9319,22 +9531,26 @@ system_tools_menu() {
     clear
     print_rect_title "系统工具"
     singbox_status_summary
-    cron_job_status_line "流量统计" "$USER_WATCH_CRON_MARK"
-    cron_job_status_line "日志维护" "$LOG_MAINTAIN_CRON_MARK"
+    cron_job_status_line "实时同步" "$PERIODIC_SYNC_CRON_MARK"
+    cron_job_status_line "日常维护" "$DAILY_MAINTENANCE_CRON_MARK"
     echo -e "${B}----------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 查看 sing-box 实时日志"
-    echo -e "  ${C}2.${NC} 启动 sing-box"
-    echo -e "  ${C}3.${NC} 停止 sing-box"
-    echo -e "  ${C}4.${NC} 一键校准系统时间"
-    echo -e "  ${C}5.${NC} 规范化接管旧配置"
+    echo -e "  ${C}1.${NC} 启动 sing-box"
+    echo -e "  ${C}2.${NC} 停止 sing-box"
+    echo -e "  ${C}3.${NC} 查看 sing-box 实时日志"
+    echo -e "  ${C}4.${NC} 查看 config 配置文件"
+    echo -e "  ${C}5.${NC} 清空/重置 config 配置文件"
+    echo -e "  ${C}6.${NC} 一键校准系统时间"
+    echo -e "  ${C}7.${NC} 规范化接管旧配置"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
-      1) view_realtime_log ;;
-      2) singbox_start ;;
-      3) singbox_stop ;;
-      4) sync_system_time_chrony ;;
-      5) normalize_takeover ;;
+      1) singbox_start ;;
+      2) singbox_stop ;;
+      3) view_realtime_log ;;
+      4) view_config_formatted ;;
+      5) clear_config_json ;;
+      6) sync_system_time_chrony ;;
+      7) normalize_takeover ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
@@ -9355,30 +9571,28 @@ main_menu() {
   while true; do
     clear
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
+    singbox_status_summary
+    echo -e "${B}--------------------------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 安装/更新 sing-box"
-    echo -e "  ${C}2.${NC} 清空/重置 config.json"
-    echo -e "  ${C}3.${NC} 查看配置"
-    echo -e "  ${C}4.${NC} 协议管理"
-    echo -e "  ${C}5.${NC} 中转管理"
+    echo -e "  ${C}2.${NC} 系统工具"
+    echo -e "  ${C}3.${NC} 协议管理"
+    echo -e "  ${C}4.${NC} 中转管理"
+    echo -e "  ${C}5.${NC} warp分流"
     echo -e "  ${C}6.${NC} 导出节点配置"
     echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} warp分流"
-    echo -e "  ${C}9.${NC} 系统工具"
-    echo -e "  ${C}10.${NC} 卸载 sing-box"
+    echo -e "  ${C}8.${NC} 卸载 sing-box"
     echo -e "  ${R}0.${NC} 退出系统"
     echo -e "${B}--------------------------------------------------------${NC}"
     read -r -p "请选择操作指令: " opt
     case "${opt:-}" in
       1) install_or_update_singbox ;;
-      2) clear_config_json ;;
-      3) view_config_formatted ;;
-      4) protocol_manager || true ;;
-      5) manage_relay_nodes || true ;;
+      2) system_tools_menu || true ;;
+      3) protocol_manager || true ;;
+      4) manage_relay_nodes || true ;;
+      5) warp_manager_menu || true ;;
       6) export_configs || true ;;
       7) user_manager_menu || true ;;
-      8) warp_manager_menu || true ;;
-      9) system_tools_menu || true ;;
-      10) uninstall_singbox_keep_config ;;
+      8) uninstall_singbox_keep_config ;;
       0|q|Q) exit 0 ;;
       *) warn "无效输入：$opt"; sleep 1 ;;
     esac
@@ -9388,18 +9602,21 @@ main_menu() {
 # ====================================================
 # CLI 入口路由
 # ====================================================
-if [[ "${1:-}" == "--user-watch" ]]; then
-  user_watch_run
+if [[ "${1:-}" == "--periodic-sync" ]]; then
+  periodic_sync_run
   exit 0
 fi
 
-if [[ "${1:-}" == "--maintain-logs" ]]; then
-  maintain_logs
+if [[ "${1:-}" == "--daily-maintenance" ]]; then
+  daily_maintenance_run
   exit 0
 fi
 
-if [[ "${1:-}" == "--tg-agent-sync" ]]; then
-  tg_agent_sync
+# 6.0.8 及以前的 4 个老入口已合并到上面两个 runner。
+# 保留为静默墓志铭，避免老 cron 跑过来掉进 main_menu 死循环 / 刷邮箱。
+# is_install_complete 探针会在用户进 1.安装/更新 时引导清理这些老 cron。
+if [[ "${1:-}" == "--user-watch" ]] || [[ "${1:-}" == "--maintain-logs" ]] || \
+   [[ "${1:-}" == "--tg-agent-sync" ]] || [[ "${1:-}" == "--refresh-upstream" ]]; then
   exit 0
 fi
 

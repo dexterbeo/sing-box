@@ -15,7 +15,8 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。
-* **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“9. 卸载 sing-box”（保留数据），再执行“1. 安装/更新 sing-box”进行环境接管。
+* **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“8. 卸载 sing-box”（保留数据），再执行“1. 安装/更新 sing-box”进行环境接管。
+* **升级注意（6.0.8 → 6.0.9+）**：定时任务结构有变（4 个 cron 合并为 2 个）。推荐先在菜单中执行 `8. 卸载 sing-box`（保留数据），再执行 `1. 安装/更新 sing-box`，让定时任务干净迁移。如果直接覆盖新脚本，进入 `2. 系统工具` 看到摘要里 `实时同步/日常维护：未安装` 提示后，进 `1. 安装/更新` 按提示补齐组件即可。
 
 ---
 
@@ -33,7 +34,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 ### 2. 协议安装
 提供主流协议的一键部署：
 * **支持的协议**：Reality、AnyTLS、Shadowsocks2022、SOCKS、Trojan、VMess-WS、VLESS-WS、TUIC。
-* **使用入口**：`4. 协议管理` → `安装协议`。
+* **使用入口**：`3. 协议管理` → `安装协议`。
 
 ### 3. 中转管理
 支持本机作为中转机，将流量转发到落地机：
@@ -41,7 +42,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 * **部分流量转发至落地机**：可按规则只转发 AI 服务、Google、Netflix、Disney+、YouTube、TikTok 或自定义 geosite 网站规则。
 * **落地连接方式**：中转机到落地机统一使用 SOCKS 连接；落地机需要提前准备可连接的 SOCKS 服务。
 * **多落地机**：部分流量规则可以分别转发到不同落地机，脚本会按落地标识管理。
-* **使用入口**：`5. 中转管理`。
+* **使用入口**：`4. 中转管理`。
 
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
@@ -90,7 +91,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 * 依赖 fscarmen WARP 脚本提供的 WireProxy SOCKS。
 * 脚本只管理 sing-box 分流规则，不负责安装、启动、停止或卸载 WARP/WireProxy。
 * 支持 AI 服务、Google、Netflix、Disney+、YouTube、TikTok 和自定义 geosite 规则。
-* **使用入口**：`8. warp分流`。
+* **使用入口**：`5. warp分流`。
 
 ---
 
@@ -108,7 +109,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 ## 卸载说明
 
-菜单中的 **`9. 卸载 sing-box`** 是保留数据的运行环境卸载：
+菜单中的 **`8. 卸载 sing-box`** 是保留数据的运行环境卸载：
 
 * 会停止并移除 sing-box 服务。
 * 会标记 TG Bot 为停用。

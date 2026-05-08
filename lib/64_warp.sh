@@ -222,7 +222,7 @@ warp_wireproxy_display() {
 
 warp_preset_rule() {
   case "$1" in
-    1) echo "AI 服务（海外聚合）|geosite-category-ai-!cn.srs" ;;
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
     2) echo "Google|geosite-google.srs" ;;
     3) echo "Netflix|geosite-netflix.srs" ;;
     4) echo "Disney+|geosite-disney.srs" ;;
@@ -249,7 +249,15 @@ warp_rules_print_summary() {
 }
 
 warp_rules_print_numbered() {
-  warp_meta_rules_json | jq -r 'to_entries[] | "  \(.key + 1). \(.value.name)：\(.value.file)"'
+  local idx=0 file name display
+  while IFS=$'\x01' read -r file name; do
+    [ -z "$file" ] && continue
+    idx=$((idx+1))
+    display="$(split_rule_preset_display_name "$file")"
+    [ -n "$display" ] || display="$name"
+    [ -n "$display" ] || display="$file"
+    printf '  %s. %s：%s\n' "$idx" "$display" "$file"
+  done < <(warp_meta_rules_json | jq -r '.[] | (.file // "") + "" + (.name // "")')
 }
 
 warp_config_project_json() {
@@ -477,7 +485,8 @@ warp_print_status() {
     echo "WireProxy SOCKS：未就绪"
   fi
   echo "本地 SOCKS：$(warp_wireproxy_display)"
-  warp_rules_print_summary
+  echo
+  split_rule_overview_lines
   warp_hr
 }
 
@@ -514,7 +523,7 @@ warp_manager_menu() {
       continue
     fi
 
-    echo -e "  ${C}1.${NC} AI 服务（海外聚合）"
+    echo -e "  ${C}1.${NC} AI 服务"
     echo -e "  ${C}2.${NC} Google"
     echo -e "  ${C}3.${NC} Netflix"
     echo -e "  ${C}4.${NC} Disney+"

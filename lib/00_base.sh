@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.5"
+SCRIPT_VERSION="6.0.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -29,6 +29,14 @@ LOG_MAINTAIN_CRON_MARK="sb.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
 TG_AGENT_CRON_MARK="sb.sh --tg-agent-sync"
 TG_AGENT_CRON_SCHEDULE="* * * * *"
+UPSTREAM_REFRESH_CRON_MARK="sb.sh --refresh-upstream"
+UPSTREAM_REFRESH_CRON_SCHEDULE="47 3 * * *"
+PERIODIC_SYNC_CRON_MARK="sb.sh --periodic-sync"
+PERIODIC_SYNC_CRON_SCHEDULE="*/3 * * * *"
+DAILY_MAINTENANCE_CRON_MARK="sb.sh --daily-maintenance"
+DAILY_MAINTENANCE_CRON_SCHEDULE="47 4 * * *"
+UPSTREAM_TAG_CACHE_FILE="/etc/sing-box-manager/.upstream-tag-cache"
+UPSTREAM_TAG_CACHE_MAX_AGE_SECS=172800
 SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 USER_DB_FILE="/etc/sing-box-manager/user-manager.json"

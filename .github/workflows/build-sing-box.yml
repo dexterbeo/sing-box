@@ -3,8 +3,8 @@ name: Build sing-box with v2ray api
 on:
   workflow_dispatch:
   schedule:
-    # 每周一 03:20 UTC
-    - cron: "20 3 * * 1"
+    # 每天 03:20 UTC，配合 should_build 比对，无新版自动跳过
+    - cron: "20 3 * * *"
 
 permissions:
   contents: write

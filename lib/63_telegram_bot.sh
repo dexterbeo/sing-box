@@ -85,14 +85,29 @@ tg_task_receipt_get() {
   tg_task_receipts_load | jq -c --arg id "$task_id" '.tasks[$id] // empty'
 }
 
-tg_task_receipt_save_success() {
-  local task_id="$1" message="$2" now receipts
+# 预留 receipt 占位：写入成功才允许执行任务，避免崩溃后无法识别已开过头的任务
+tg_task_receipt_reserve() {
+  local task_id="$1" now receipts
   [ -n "$task_id" ] || return 1
   now="$(date +%s)"
-  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson now "$now" '
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --argjson now "$now" '
     .tasks = (.tasks // {})
-    | .tasks[$id] = {ok:true, message:$message, completed_at:$now}
-    | .tasks |= with_entries(select(($now - (.value.completed_at // $now)) <= 604800))
+    | .tasks[$id] = {status:"running", started_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // .value.started_at // $now)) <= 604800))
+  ')" || return 1
+  tg_task_receipts_save "$receipts"
+}
+
+# 任务执行结束后落盘最终结果；保存失败必须返回非零，由调用方决定是否上报主控
+tg_task_receipt_finalize() {
+  local task_id="$1" ok_value="$2" message="$3" now receipts ok_bool
+  [ -n "$task_id" ] || return 1
+  if [ "$ok_value" = "true" ]; then ok_bool="true"; else ok_bool="false"; fi
+  now="$(date +%s)"
+  receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --arg message "$message" --argjson ok "$ok_bool" --argjson now "$now" '
+    .tasks = (.tasks // {})
+    | .tasks[$id] = {status:"done", ok:$ok, message:$message, completed_at:$now}
+    | .tasks |= with_entries(select(($now - (.value.completed_at // .value.started_at // $now)) <= 604800))
   ')" || return 1
   tg_task_receipts_save "$receipts"
 }
@@ -1548,7 +1563,11 @@ tg_stop_center_service() {
   esac
 }
 
-install_tg_agent_cron() { _install_cron_job "$TG_AGENT_CRON_MARK" "$TG_AGENT_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --tg-agent-sync"; }
+install_tg_agent_cron() {
+  # 6.0.9 起 TG 上报已合并到 periodic-sync cron，无需独立 cron。
+  # 函数保留为 no-op 以保持现有调用点兼容；TG 是否上报由 enabled 标记 + tg_agent_sync 内部自检决定。
+  return 0
+}
 remove_tg_agent_cron()  { _remove_cron_job "$TG_AGENT_CRON_MARK"; }
 
 tg_collect_report_json() {
@@ -1764,7 +1783,7 @@ tg_execute_task() {
 }
 
 tg_process_tasks() {
-  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt
+  local cfg="$1" center_url="$2" secret="$3" vps_id="$4" tasks task task_id msg ok_value receipt receipt_status
   TG_TASKS_REPORTED_STATE=0
   tasks="$(tg_poll_tasks "$center_url" "$secret" "$vps_id")" || return 0
   echo "$tasks" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
@@ -1772,21 +1791,44 @@ tg_process_tasks() {
     [ -n "$task" ] || continue
     task_id="$(echo "$task" | jq -r '.id // empty')"
     [ -n "$task_id" ] || continue
+
     receipt="$(tg_task_receipt_get "$task_id" 2>/dev/null || true)"
-    if [ -n "$receipt" ]; then
+    receipt_status="$(echo "${receipt:-}" | jq -r '.status // ""' 2>/dev/null || true)"
+
+    if [ "$receipt_status" = "done" ]; then
+      # 历史已完成任务：只重发结果，不再执行
       ok_value="$(echo "$receipt" | jq -r 'if (.ok // false) then "true" else "false" end')"
       msg="$(echo "$receipt" | jq -r '.message // "执行成功。"')"
-    elif msg="$(tg_execute_task "$task" 2>&1)"; then
-      ok_value=true
-      tg_task_receipt_save_success "$task_id" "$msg" >/dev/null 2>&1 || true
-      tg_prepare_report_state
-      if tg_post_report "$cfg" "$center_url" "$secret"; then
-        TG_TASKS_REPORTED_STATE=1
-      fi
-    else
+    elif [ "$receipt_status" = "running" ]; then
+      # 上一次执行后崩在落盘前；为安全起见不重复执行，标记失败让主控判断
       ok_value=false
-      [ -n "$msg" ] || msg="执行失败。"
+      msg="任务上一次执行未完整落盘，已拒绝重复执行，请人工确认。"
+      tg_task_receipt_finalize "$task_id" false "$msg" >/dev/null 2>&1 || true
+    else
+      # 新任务：先预留 receipt 占位，预留失败就拒绝执行（保证落盘可查）
+      if ! tg_task_receipt_reserve "$task_id" >/dev/null 2>&1; then
+        # 预留失败说明本地存储不可用，跳过本轮，等下次 poll 重试
+        continue
+      fi
+      if msg="$(tg_execute_task "$task" 2>&1)"; then
+        ok_value=true
+      else
+        ok_value=false
+        [ -n "$msg" ] || msg="执行失败。"
+      fi
+      # 落盘最终结果；落盘失败时绝不上报成功
+      if ! tg_task_receipt_finalize "$task_id" "$ok_value" "$msg" >/dev/null 2>&1; then
+        warn "任务回执落盘失败：$task_id（不上报，等待下次重试）"
+        continue
+      fi
+      if [ "$ok_value" = "true" ]; then
+        tg_prepare_report_state
+        if tg_post_report "$cfg" "$center_url" "$secret"; then
+          TG_TASKS_REPORTED_STATE=1
+        fi
+      fi
     fi
+
     tg_post_task_result "$center_url" "$secret" "$task_id" "$vps_id" "$ok_value" "$msg"
   done < <(echo "$tasks" | jq -c '.[]')
 }

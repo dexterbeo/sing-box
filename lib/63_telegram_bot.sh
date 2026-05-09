@@ -1962,19 +1962,59 @@ tg_start_existing_config() {
 
 tg_setup_center() {
   local cfg token admin_id port public_url secret vps_id vps_name username
+  local cur_token cur_admin cur_port cur_vps_name cur_username
   cfg="$(tg_config_load)"
-  read -r -p "Bot Token（回车返回）: " token
-  [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
-  read -r -p "管理员 TG ID（回车返回）: " admin_id
+  cur_token="$(echo "$cfg" | jq -r '.bot_token // empty')"
+  cur_admin="$(echo "$cfg" | jq -r '.admin_chat_ids[0] // empty')"
+  cur_port="$(echo "$cfg" | jq -r '.listen_port // empty')"
+  cur_vps_name="$(echo "$cfg" | jq -r '.vps_name // empty')"
+  cur_username="$(echo "$cfg" | jq -r '.bot_username // empty')"
+
+  # Bot Token（敏感字段不显示当前值）
+  if [ -n "$cur_token" ]; then
+    read -r -p "Bot Token（回车保持当前值）: " token
+    [ -n "$token" ] || token="$cur_token"
+  else
+    read -r -p "Bot Token（回车返回）: " token
+    [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
+  fi
+
+  # 管理员 TG ID（敏感字段不显示当前值）
+  if [ -n "$cur_admin" ]; then
+    read -r -p "管理员 TG ID（回车保持当前值）: " admin_id
+    [ -n "$admin_id" ] || admin_id="$cur_admin"
+  else
+    read -r -p "管理员 TG ID（回车返回）: " admin_id
+  fi
   [[ "$admin_id" =~ ^[0-9]+$ ]] || { warn "管理员 TG ID 必须是数字。"; pause; return 1; }
-  read -r -p "主控监听端口 (默认: 25888): " port
-  port="${port:-25888}"
+
+  # 主控监听端口（非敏感，显示当前值/默认值）
+  if [ -n "$cur_port" ]; then
+    read -r -p "主控监听端口（回车保持当前值: ${cur_port}）: " port
+    port="${port:-$cur_port}"
+  else
+    read -r -p "主控监听端口（默认: 25888）: " port
+    port="${port:-25888}"
+  fi
   is_valid_port "$port" || { warn "端口无效。"; pause; return 1; }
-  read -r -p "本机名称（支持中文，回车返回）: " vps_name
-  [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+
+  # 本机名称（非敏感，显示当前值）
+  if [ -n "$cur_vps_name" ]; then
+    read -r -p "本机名称（支持中文，回车保持当前值: ${cur_vps_name}）: " vps_name
+    [ -n "$vps_name" ] || vps_name="$cur_vps_name"
+  else
+    read -r -p "本机名称（支持中文，回车返回）: " vps_name
+    [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+  fi
+
   public_url="$(tg_normalize_url "http://$(get_public_ip):${port}")"
-  username="$(tg_bot_username_from_token "$token")" || username=""
-  [ -n "$username" ] || { warn "Bot Token 校验失败，无法获取 Bot 用户名。"; pause; return 1; }
+  # Token 没变时复用已存的 bot_username，跳过在线校验 API
+  if [ "$token" = "$cur_token" ] && [ -n "$cur_username" ]; then
+    username="$cur_username"
+  else
+    username="$(tg_bot_username_from_token "$token")" || username=""
+    [ -n "$username" ] || { warn "Bot Token 校验失败，无法获取 Bot 用户名。"; pause; return 1; }
+  fi
   secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
   [ -n "$secret" ] || secret="$(tg_generate_secret)"
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
@@ -2017,14 +2057,40 @@ tg_setup_center() {
 
 tg_setup_agent() {
   local cfg center_url secret vps_id vps_name
+  local cur_url cur_secret cur_vps_name
   cfg="$(tg_config_load)"
-  read -r -p "主控地址（回车返回）: " center_url
+  cur_url="$(echo "$cfg" | jq -r '.center_url // empty')"
+  cur_secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
+  cur_vps_name="$(echo "$cfg" | jq -r '.vps_name // empty')"
+
+  # 主控地址（非敏感，显示当前值）
+  if [ -n "$cur_url" ]; then
+    read -r -p "主控地址（回车保持当前值: ${cur_url}）: " center_url
+    [ -n "$center_url" ] || center_url="$cur_url"
+  else
+    read -r -p "主控地址（回车返回）: " center_url
+  fi
   center_url="$(tg_normalize_url "$center_url")"
   [ -n "$center_url" ] || { warn "主控地址不能为空。"; pause; return 1; }
-  read -r -p "接入密钥（回车返回）: " secret
-  [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
-  read -r -p "本机名称（支持中文，回车返回）: " vps_name
-  [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+
+  # 接入密钥（敏感字段不显示当前值）
+  if [ -n "$cur_secret" ]; then
+    read -r -p "接入密钥（回车保持当前值）: " secret
+    [ -n "$secret" ] || secret="$cur_secret"
+  else
+    read -r -p "接入密钥（回车返回）: " secret
+    [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
+  fi
+
+  # 本机名称（非敏感，显示当前值）
+  if [ -n "$cur_vps_name" ]; then
+    read -r -p "本机名称（支持中文，回车保持当前值: ${cur_vps_name}）: " vps_name
+    [ -n "$vps_name" ] || vps_name="$cur_vps_name"
+  else
+    read -r -p "本机名称（支持中文，回车返回）: " vps_name
+    [ -n "$vps_name" ] || { warn "本机名称不能为空。"; pause; return 1; }
+  fi
+
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
   cfg="$(echo "$cfg" | jq \
@@ -2178,16 +2244,16 @@ tg_reload_center_service_menu() {
   enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   if [ "$enabled" != "true" ] || [ "$role" != "center" ]; then
-    warn "只有已启动的主控节点需要更新/重启 TG Bot 服务。"
+    warn "只有已启动的主控节点需要重启/刷新 TG Bot 服务。"
     pause
     return 1
   fi
-  tg_install_center_service || { err "TG Bot 服务更新/重启失败。"; pause; return 1; }
+  tg_install_center_service || { err "TG Bot 服务重启/刷新失败。"; pause; return 1; }
   install_tg_agent_cron >/dev/null 2>&1 || true
   if tg_agent_sync_now; then
-    ok "TG Bot 服务已更新并重启，本机数据已立即上报。"
+    ok "TG Bot 服务已重启刷新，本机数据已立即上报。"
   else
-    ok "TG Bot 服务已更新并重启。"
+    ok "TG Bot 服务已重启刷新。"
     warn "本机立即上报失败，定时任务会继续自动上报。"
   fi
   pruned_count="$(tg_prune_offline_reports 2>/dev/null || echo 0)"
@@ -2254,7 +2320,7 @@ telegram_bot_manager_menu() {
     echo "  2. 生成用户绑定链接"
     echo "  3. 通知测试"
     if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-      echo "  4. 更新/重启TG Bot"
+      echo "  4. 重启/刷新TG Bot"
       echo "  5. 卸载/停止TG Bot"
     else
       echo "  4. 卸载/停止TG Bot"

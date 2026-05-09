@@ -205,11 +205,11 @@ user_manager_runtime_sync() {
 # ---------- 自动控制（到期/超额/重置） ----------
 
 user_today_date() {
-  date +%F
+  TZ="${BUSINESS_TZ:-Asia/Shanghai}" date +%F
 }
 
 user_current_period() {
-  date +%Y-%m
+  TZ="${BUSINESS_TZ:-Asia/Shanghai}" date +%Y-%m
 }
 
 user_manager_reconcile_user_state() {
@@ -220,10 +220,11 @@ user_manager_reconcile_user_state() {
   local db_json json today period today_day last_day result changed
   db_json="$(user_db_load)"
   json="$(config_load)"
+  # 单一时间真理源：所有派生字段都从 today 字符串切片，避免连续调多次 date 在毫秒级跨日导致字段错位
   today="$(user_today_date)"
-  period="$(user_current_period)"
-  today_day=$((10#$(date +%d)))
-  last_day=$(awk -v y="$(date +%Y)" -v m="$(date +%m)" 'BEGIN {
+  period="${today:0:7}"
+  today_day=$((10#${today:8:2}))
+  last_day=$(awk -v y="${today:0:4}" -v m="${today:5:2}" 'BEGIN {
     split("31 28 31 30 31 30 31 31 30 31 30 31", d, " ")
     d[2] = (y%4==0 && (y%100!=0 || y%400==0)) ? 29 : 28
     print d[m+0]

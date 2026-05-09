@@ -309,7 +309,9 @@ def get_bot_username(cfg):
 
 
 def today():
-    return datetime.date.today()
+    # 锁定北京时间（UTC+8），与 bash 端的 user_today_date / BUSINESS_TZ 保持一致。
+    # 用 utcnow + 8h 而非 zoneinfo，零依赖、不挑 Python 版本。
+    return (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
 
 
 def parse_date(value):
@@ -1318,7 +1320,7 @@ def evaluate_reminders(cfg, report):
         if quota > 0:
             ratio = int(total * 100 / (quota * 1024 ** 3))
             if ratio >= threshold:
-                period = user.get("last_reset_period") or datetime.date.today().strftime("%Y-%m")
+                period = user.get("last_reset_period") or today().strftime("%Y-%m")
                 key = f"{tg_id}:{report.get('vps_id')}:{b.get('username')}:traffic:{threshold}:{period}"
                 if not notify_state.get(key):
                     send_message(b.get("chat_id"), f"{title}\n流量已使用 {ratio}%，请留意。")
@@ -1361,7 +1363,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg = load_config()
                 reports = cfg.setdefault("reports", {})
                 payload["received_at"] = int(time.time())
-                payload["received_at_text"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["received_at_text"] = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
                 payload["updated_at_text"] = payload.get("data_updated_at_text") or ""
                 reports[payload.get("vps_id") or "unknown"] = payload
                 changed = evaluate_reminders(cfg, payload)
@@ -1666,7 +1668,7 @@ tg_task_exec_renew() {
   [[ "$months" =~ ^[0-9]+$ ]] && [ "$months" -ge 1 ] || return 1
   current_expire="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
   [ "$current_expire" != "0" ] || { echo "永久用户无需续期。"; return 1; }
-  today="$(date +%F)"
+  today="$(user_today_date)"
   if user_expire_is_past "$today" "$current_expire"; then
     expired=1
     base_date="$today"
@@ -1715,7 +1717,7 @@ tg_task_exec_set_expire() {
   if [ "$expire_at" != "0" ] && ! is_valid_ymd_date "$expire_at"; then
     return 1
   fi
-  today="$(date +%F)"
+  today="$(user_today_date)"
   active=false
   if [ "$expire_at" = "0" ] || [[ "$today" < "$expire_at" ]]; then
     active=true

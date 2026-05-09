@@ -448,7 +448,7 @@ user_renew_menu() {
     return 1
   fi
 
-  today="$(date +%F)"
+  today="$(user_today_date)"
   if user_expire_is_past "$today" "$current_expire"; then
     expired=1
     base_date="$today"

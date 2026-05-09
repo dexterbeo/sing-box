@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.0.9"
+SCRIPT_VERSION="6.1.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -47,6 +47,10 @@ TG_CENTER_APP="/etc/sing-box-manager/tg-center-bot.py"
 TG_CENTER_SERVICE="sb-tg-bot"
 SB_LOCK_FILE="/var/lock/singbox-manager.lock"
 TG_AGENT_LOCK_FILE="/var/lock/singbox-tg-agent.lock"
+
+# 业务时区：所有"今天/本月"判断（重置日、到期日、续期）都按它算，
+# 与 OS 时区无关，避免跨 VPS 因 OS 时区不同导致重置/到期时刻分裂。
+BUSINESS_TZ="Asia/Shanghai"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'

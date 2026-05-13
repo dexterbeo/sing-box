@@ -655,9 +655,14 @@ user_delete_menu() {
 
 user_manager_menu() {
   if ! user_db_exists; then
-    err "用户数据库不存在或不可用，请先执行 1. 安装/更新 sing-box。"
-    pause
-    return 0
+    init_manager_env || { pause; return 0; }
+    # 自愈：6.1.5 安装事务把 ensure_user_manager_ready 失败改成 warn，
+    # 这里给用户管理菜单一个"进入时重试创建"的机会，避免用户卡在死循环。
+    ensure_user_manager_ready || {
+      err "用户数据库初始化失败，请检查 $USER_DB_FILE 所在磁盘和权限后再试。"
+      pause
+      return 0
+    }
   fi
   while true; do
     local db_json

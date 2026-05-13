@@ -129,6 +129,7 @@ show_versions() {
 is_install_complete() {
   [ -x "$SINGBOX_BIN" ] || return 1
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
+  user_db_exists || return 1
   _cron_job_installed "$PERIODIC_SYNC_CRON_MARK" || return 1
   _cron_job_installed "$DAILY_MAINTENANCE_CRON_MARK" || return 1
   # 6.0.8 及以前的老 cron 残留也算"组件不一致"，引导用户清理。
@@ -589,7 +590,13 @@ install_or_update_singbox() {
       return 1
     fi
   else
-    warn "未获取到校验文件，已跳过校验。"
+    warn "未获取到校验文件。"
+    if ! ask_confirm_yes "输入 YES 确认跳过校验继续安装，其它任意输入取消: "; then
+      rm -rf "$tmp_dir"
+      err "已取消安装。"
+      pause
+      return 1
+    fi
   fi
 
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
@@ -606,20 +613,11 @@ install_or_update_singbox() {
     return 1
   }
 
-  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
-  if [ -x "$SINGBOX_BIN" ]; then
-    cp -f "$SINGBOX_BIN" "${SINGBOX_BIN}.bak" 2>/dev/null || true
-  fi
-  install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN" || {
+  # staging 验证：在替换正式位置之前先验证 with_v2ray_api，避免坏二进制进入 $SINGBOX_BIN
+  chmod +x "$tmp_dir/sing-box" 2>/dev/null || true
+  if ! "$tmp_dir/sing-box" version 2>/dev/null | grep -q 'with_v2ray_api'; then
     rm -rf "$tmp_dir"
-    err "安装失败。"
-    pause
-    return 1
-  }
-  rm -rf "$tmp_dir"
-
-  if ! "$SINGBOX_BIN" version | grep -q 'with_v2ray_api'; then
-    err "当前安装的 sing-box 未检测到 with_v2ray_api。"
+    err "下载的 sing-box 未检测到 with_v2ray_api。"
     if [ "$PKG_MANAGER" = "apk" ]; then
       warn "Alpine 环境提示：若报 'cannot execute' 错误，请手动执行：apk add gcompat"
     fi
@@ -627,52 +625,79 @@ install_or_update_singbox() {
     return 1
   fi
 
+  # 事务边界开始：备份旧 binary → 原子替换。若 service 起不来则回滚 binary。
+  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
+  local _binary_backed_up=0
+  if [ -x "$SINGBOX_BIN" ]; then
+    if cp -a "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"; then
+      _binary_backed_up=1
+    else
+      rm -rf "$tmp_dir"
+      err "无法备份旧 sing-box 二进制：${SINGBOX_BIN} → ${SINGBOX_BIN}.bak"
+      pause
+      return 1
+    fi
+  fi
+  if ! install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN"; then
+    rm -rf "$tmp_dir"
+    err "二进制写入失败：$SINGBOX_BIN"
+    if [ "$_binary_backed_up" = "1" ]; then
+      mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" 2>/dev/null || true
+    fi
+    pause
+    return 1
+  fi
+  rm -rf "$tmp_dir"
+
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
-  local singbox_started=0
-  if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-    singbox_started=1
+  if ! _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
+    # 事务边界：service 启动失败必须回滚旧 binary，保证用户不被卡在"装了新版但起不来"状态
+    if [ "$_binary_backed_up" = "1" ]; then
+      err "sing-box 服务启动失败，正在回滚到旧二进制..."
+      if mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN"; then
+        if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
+          warn "已回滚到旧 sing-box，新版本未安装成功。请检查日志后再次执行 1. 安装/更新。"
+        else
+          err "回滚后服务仍无法启动，请检查 $SINGBOX_BIN 与日志。"
+        fi
+      else
+        err "二进制回滚失败：${SINGBOX_BIN}.bak → ${SINGBOX_BIN}。请手动恢复。"
+      fi
+    else
+      err "sing-box 服务启动失败（首次安装，无旧版本可回滚）。"
+      rm -f "$SINGBOX_BIN" >/dev/null 2>&1 || true
+    fi
+    pause
+    return 1
   fi
+  _binary_backed_up=0
+  # 事务边界结束：service 已起来，后续步骤失败仅 warn，不回滚 binary 也不阻塞 stamp 写入
   ensure_sb_shortcut || true
-  ensure_user_manager_ready || { pause; return 1; }
-  install_periodic_sync_cron || {
-    err "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
-    pause
-    return 1
-  }
-  install_daily_maintenance_cron || {
-    err "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
-    pause
-    return 1
-  }
+  ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
+  install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
+  install_daily_maintenance_cron || warn "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
   # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   remove_upstream_refresh_cron || true
   refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
-  user_manager_background_sync || {
-    err "用户管理后台同步初始化失败。"
+  user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
+  tg_refresh_after_singbox_install || true
+
+  # 走到这里说明 service 已经起来（事务化保证）；后续步骤即使失败也只 warn，不影响 stamp
+  echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
+    err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
     pause
     return 1
   }
-  tg_refresh_after_singbox_install || true
-
-  if [ "$singbox_started" = "1" ]; then
-    echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
-      err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
-      pause
-      return 1
-    }
-    ok "安装完成。"
-  else
-    warn "组件已安装，但 sing-box 服务未能正常运行，当前不记为完整安装。"
-    warn "请进入系统工具查看状态或日志，修复后重新执行安装/更新。"
-  fi
+  rm -f "${SINGBOX_BIN}.bak" >/dev/null 2>&1 || true
+  ok "安装完成。"
   pause
 }
 

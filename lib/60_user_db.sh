@@ -68,7 +68,11 @@ _user_db_save_body() {
   local tmp_file
   tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
   if echo "$db_json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$USER_DB_FILE"
+    if ! mv -f "$tmp_file" "$USER_DB_FILE"; then
+      err "用户数据库写入失败：$USER_DB_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$USER_DB_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file"

@@ -42,13 +42,21 @@ tg_config_load() {
 }
 
 tg_config_save() {
+  with_manager_lock _tg_config_save_body "$@"
+}
+
+_tg_config_save_body() {
   local json="$1"
   mkdir -p "$(dirname "$TG_CONFIG_FILE")"
   chmod 700 "$(dirname "$TG_CONFIG_FILE")" 2>/dev/null || true
   local tmp_file
   tmp_file="$(mktemp "${TG_CONFIG_FILE}.tmp.XXXXXX")" || return 1
   if echo "$json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$TG_CONFIG_FILE"
+    if ! mv -f "$tmp_file" "$TG_CONFIG_FILE"; then
+      err "TG 配置写入失败：$TG_CONFIG_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$TG_CONFIG_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file" >/dev/null 2>&1 || true
@@ -64,6 +72,103 @@ tg_task_receipts_load() {
   fi
 }
 
+# Setup 流程的"持锁原子提交" helper（6.1.6 起）。
+# tg_setup_center / tg_setup_agent 在用户输入完字段后，函数体内的 cfg 已经是 5 分钟前 load 的快照，
+# 整个写回去会覆盖期间 Python 端写入的 reports/tasks/bindings 等字段。
+# 这里在 with_manager_lock 内 reload + merge + save，确保跨进程 RMW 原子。
+_tg_setup_center_commit() {
+  with_manager_lock _tg_setup_center_commit_body "$@"
+}
+
+_tg_setup_center_commit_body() {
+  local token="$1" admin="$2" port="$3" url="$4" secret="$5" vps_id="$6" vps_name="$7" username="$8"
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq \
+    --arg token "$token" \
+    --arg admin "$admin" \
+    --argjson port "$port" \
+    --arg url "$url" \
+    --arg secret "$secret" \
+    --arg vps_id "$vps_id" \
+    --arg vps_name "$vps_name" \
+    --arg username "$username" '
+      .enabled = true
+      | .role = "center"
+      | .bot_token = $token
+      | .bot_username = $username
+      | .admin_chat_ids = [$admin]
+      | .listen_host = "0.0.0.0"
+      | .listen_port = $port
+      | .center_url = $url
+      | .access_secret = $secret
+      | .vps_id = $vps_id
+      | .vps_name = $vps_name
+    ')" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+_tg_setup_agent_commit() {
+  with_manager_lock _tg_setup_agent_commit_body "$@"
+}
+
+_tg_setup_agent_commit_body() {
+  local url="$1" secret="$2" vps_id="$3" vps_name="$4"
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq \
+    --arg url "$url" \
+    --arg secret "$secret" \
+    --arg vps_id "$vps_id" \
+    --arg vps_name "$vps_name" '
+      .enabled = true
+      | .role = "agent"
+      | .center_url = $url
+      | .access_secret = $secret
+      | .vps_id = $vps_id
+      | .vps_name = $vps_name
+    ')" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+# 通用 RMW：持锁内 reload + 应用 jq 表达式 + save。避免 cfg 5+ 分钟前快照被整体写回时覆盖 Python 期间写入的字段。
+# 用法：tg_config_merge_jq '<jq 表达式>' [jq --arg/--argjson 参数...]
+tg_config_merge_jq() {
+  with_manager_lock _tg_config_merge_jq_body "$@"
+}
+
+_tg_config_merge_jq_body() {
+  local jq_expr="$1"
+  shift
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq "$@" "$jq_expr")" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+# 专用 prune helper：reports 过期清理。fast-path 检测+实际写入都在同一把锁内，避免与 /api/report 并发写竞争。
+_tg_prune_reports_with_lock() {
+  with_manager_lock _tg_prune_reports_body "$@"
+}
+
+_tg_prune_reports_body() {
+  local now="$1"
+  local cfg removed pruned
+  cfg="$(tg_config_load)"
+  removed="$(echo "$cfg" | jq -r --argjson now "$now" '
+    [(.reports // {}) | to_entries[] | select(($now - (.value.received_at // $now)) > 900)] | length
+  ')" || return 1
+  if [ "${removed:-0}" -le 0 ]; then
+    echo 0
+    return 0
+  fi
+  pruned="$(echo "$cfg" | jq --argjson now "$now" '
+    .reports = ((.reports // {}) | with_entries(select(($now - (.value.received_at // $now)) <= 900)))
+  ')" || return 1
+  _tg_config_save_body "$pruned" || return 1
+  echo "$removed"
+}
+
 tg_task_receipts_save() {
   local json="$1"
   mkdir -p "$(dirname "$TG_TASK_RECEIPTS_FILE")"
@@ -71,7 +176,11 @@ tg_task_receipts_save() {
   local tmp_file
   tmp_file="$(mktemp "${TG_TASK_RECEIPTS_FILE}.tmp.XXXXXX")" || return 1
   if echo "$json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"
+    if ! mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"; then
+      err "TG 任务回执写入失败：$TG_TASK_RECEIPTS_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$TG_TASK_RECEIPTS_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file" >/dev/null 2>&1 || true
@@ -131,10 +240,7 @@ tg_config_is_enabled() {
 
 tg_mark_disabled_keep_config() {
   [ -s "$TG_CONFIG_FILE" ] || return 0
-  local cfg
-  cfg="$(tg_config_load)"
-  cfg="$(echo "$cfg" | jq '.enabled = false')" || return 1
-  tg_config_save "$cfg"
+  tg_config_merge_jq '.enabled = false'
 }
 
 tg_generate_secret() {
@@ -193,7 +299,9 @@ tg_write_center_app() {
   mkdir -p "$(dirname "$TG_CENTER_APP")"
   cat > "$TG_CENTER_APP" <<'PY'
 #!/usr/bin/env python3
+import contextlib
 import datetime
+import fcntl
 import http.server
 import json
 import os
@@ -207,6 +315,7 @@ import urllib.parse
 import urllib.request
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/sing-box-manager/telegram.json"
+LOCK_PATH = "/var/lock/singbox-manager.lock"
 REPORT_ONLINE_SECONDS = 900
 
 
@@ -219,6 +328,34 @@ def load_config():
 
 
 def save_config(cfg):
+    # 与 bash 端 with_manager_lock 共享同一个 lock 文件。
+    # 这是"单次写"的对外入口，自带文件锁。RMW（load→改→save）必须用 cfg_lock() 包，
+    # 否则 load 和 save 之间存在间隙，跨进程 RMW 仍会丢更新。
+    with file_lock():
+        save_config_unlocked(cfg)
+
+
+@contextlib.contextmanager
+def file_lock():
+    """跨进程文件锁，与 bash with_manager_lock 共享 SB_LOCK_FILE。"""
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    fd = os.open(LOCK_PATH, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def save_config_unlocked(cfg):
+    """save_config 的不持锁版本——调用方已在 file_lock / cfg_lock 内时用这个。"""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -229,6 +366,17 @@ def save_config(cfg):
         os.chmod(CONFIG_PATH, 0o600)
     except OSError:
         pass
+
+
+@contextlib.contextmanager
+def cfg_lock():
+    """RMW 双锁：threading.Lock 防同进程多线程竞争 + file_lock 防跨进程并发。
+    替代 `with CFG_LOCK:` 块——后者只防同进程线程，没防 bash 与 Python 跨进程 RMW 丢更新。
+    内部 load_config / save_config_unlocked 在同一把锁内进行。
+    注意：CFG_LOCK 是非重入 threading.Lock，调用方不能在已持有 cfg_lock 的情况下再进入。"""
+    with CFG_LOCK:
+        with file_lock():
+            yield
 
 
 CFG_LOCK = threading.Lock()
@@ -297,6 +445,8 @@ def answer_callback(callback_id, text=None):
 
 
 def get_bot_username(cfg):
+    """读 bot_username。如果 cfg 里缺，在线 getMe 获取并写入 cfg（**只更新内存**）。
+    调用方负责后续 save——避免与外层 cfg_lock 嵌套死锁（CFG_LOCK 是非重入锁）。"""
     username = cfg.get("bot_username") or ""
     if username:
         return username
@@ -304,7 +454,6 @@ def get_bot_username(cfg):
     username = ((resp.get("result") or {}).get("username") or "")
     if username:
         cfg["bot_username"] = username
-        save_config(cfg)
     return username
 
 
@@ -398,12 +547,12 @@ def back_keyboard(back_to):
 
 
 def clear_waiting_input(tg_id):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         waiting = cfg.setdefault("waiting_inputs", {})
         if str(tg_id) in waiting:
             waiting.pop(str(tg_id), None)
-            save_config(cfg)
+            save_config_unlocked(cfg)
 
 
 def send_home(chat_id, tg_id, message_id=None):
@@ -415,7 +564,7 @@ def send_home(chat_id, tg_id, message_id=None):
 
 
 def bind_token(chat_id, tg_id, token):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_bind_tokens", {})
         item = pending.get(token)
@@ -444,7 +593,7 @@ def bind_token(chat_id, tg_id, token):
         pending.pop(token, None)
         settings = cfg.setdefault("user_settings", {})
         settings.setdefault(str(tg_id), {"notify": True})
-        save_config(cfg)
+        save_config_unlocked(cfg)
     send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}")
     send_home(chat_id, tg_id)
 
@@ -501,12 +650,12 @@ def notify_settings(chat_id, tg_id, admin=False, message_id=None):
 
 
 def toggle_notify(chat_id, tg_id, admin=False, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         settings = cfg.setdefault("user_settings", {})
         item = settings.setdefault(str(tg_id), {"notify": True})
         item["notify"] = not bool(item.get("notify", True))
-        save_config(cfg)
+        save_config_unlocked(cfg)
     notify_settings(chat_id, tg_id, admin, message_id)
 
 
@@ -540,18 +689,18 @@ def ask_unbind(chat_id, tg_id, idx, message_id=None):
 
 
 def do_unbind(chat_id, tg_id, idx, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         real_indices = [
             i for i, b in enumerate(cfg.get("bindings") or [])
             if b.get("active") is not False and str(b.get("tg_user_id")) == str(tg_id)
         ]
         if idx < 0 or idx >= len(real_indices):
-            save_config(cfg)
+            save_config_unlocked(cfg)
             binding_list(chat_id, tg_id, message_id)
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_unbound_user_state(chat_id, message_id, "绑定已解除。\n当前没有绑定。")
 
 
@@ -901,7 +1050,7 @@ def parse_reset_day_input(text):
 
 def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, params, back_data, message_id=None):
     token = secrets.token_urlsafe(6)
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_admin_actions", {})
         pending[token] = {
@@ -914,7 +1063,7 @@ def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, pa
             "back_data": back_data,
             "expires_at": int(time.time()) + 300,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     keyboard = [[
         {"text": "确认执行", "callback_data": f"a:confirm:{token}"},
         {"text": "取消", "callback_data": back_data},
@@ -923,12 +1072,12 @@ def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, pa
 
 
 def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_admin_actions", {})
         action = pending.pop(token, None)
         if not action or str(action.get("tg_user_id")) != str(tg_id) or int(action.get("expires_at") or 0) < int(time.time()):
-            save_config(cfg)
+            save_config_unlocked(cfg)
             render_page(chat_id, "确认已失效，请重新操作。", back_keyboard("a:home"), message_id)
             return
         task_id = secrets.token_urlsafe(8)
@@ -945,12 +1094,12 @@ def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
             "params": action.get("params") or {},
             "attempts": 0,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", None, message_id)
 
 
 def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         waiting = cfg.setdefault("waiting_inputs", {})
         waiting[str(tg_id)] = {
@@ -960,7 +1109,7 @@ def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, m
             "username": username,
             "expires_at": int(time.time()) + 300,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_page(chat_id, prompt, back_keyboard(f"a:user:{vps_id}:{idx}"), message_id)
 
 
@@ -1359,7 +1508,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/report":
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 reports = cfg.setdefault("reports", {})
                 payload["received_at"] = int(time.time())
@@ -1368,9 +1517,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 reports[payload.get("vps_id") or "unknown"] = payload
                 changed = evaluate_reminders(cfg, payload)
                 if changed:
-                    save_config(cfg)
+                    save_config_unlocked(cfg)
                 else:
-                    save_config(cfg)
+                    save_config_unlocked(cfg)
             write_json(self, 200, {"ok": True})
             return
 
@@ -1382,7 +1531,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             now = int(time.time())
             available = []
             expired_notifications = []
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 tasks = cfg.setdefault("tasks", {})
                 for task_id in list(tasks.keys()):
@@ -1418,7 +1567,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "username": task.get("username"),
                         "params": task.get("params") or {},
                     })
-                save_config(cfg)
+                save_config_unlocked(cfg)
             for chat_id, title, message in expired_notifications:
                 if chat_id:
                     send_message(chat_id, f"执行失败：{title}\n{message}")
@@ -1430,7 +1579,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             vps_id = payload.get("vps_id") or ""
             ok_value = bool(payload.get("ok"))
             message = payload.get("message") or ("执行成功" if ok_value else "执行失败")
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 task = (cfg.setdefault("tasks", {})).get(task_id)
                 if not task or task.get("vps_id") != vps_id:
@@ -1442,7 +1591,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 chat_id = task.get("created_chat_id")
                 tg_id = task.get("created_by")
                 username = task.get("username") or ""
-                save_config(cfg)
+                save_config_unlocked(cfg)
             if chat_id:
                 title = f"{vps_id} / {username}".strip(" /")
                 prefix = "执行成功" if ok_value else "执行失败"
@@ -1453,7 +1602,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/bind-token":
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 token = secrets.token_urlsafe(8)
                 pending = cfg.setdefault("pending_bind_tokens", {})
@@ -1464,7 +1613,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "expires_at": int(time.time()) + 600,
                 }
                 username = get_bot_username(cfg)
-                save_config(cfg)
+                save_config_unlocked(cfg)
             if not username:
                 write_json(self, 500, {"ok": False, "error": "bot_username_missing"})
             else:
@@ -1886,14 +2035,36 @@ tg_agent_poll_tasks_once() {
 }
 
 tg_agent_sync_now() {
-  local i
+  local cfg lock_fd lock_dir i rc=1
+  cfg="$(tg_config_load)"
+  tg_config_is_enabled "$cfg" || return 1
+  mkdir -p "$(dirname "$TG_AGENT_LOCK_FILE")" 2>/dev/null || true
+  if has_cmd flock && { exec {lock_fd}>"$TG_AGENT_LOCK_FILE"; } 2>/dev/null; then
+    if ! flock -w 5 "$lock_fd"; then
+      { exec {lock_fd}>&-; } 2>/dev/null || true
+      return 1
+    fi
+  else
+    lock_fd=""
+    lock_dir="${TG_AGENT_LOCK_FILE}.d"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      sleep 1
+      mkdir "$lock_dir" 2>/dev/null || return 1
+    fi
+  fi
   for i in 1 2 3; do
     if tg_agent_sync_once; then
-      return 0
+      rc=0
+      break
     fi
     sleep 1
   done
-  return 1
+  if [ -n "$lock_fd" ]; then
+    { exec {lock_fd}>&-; } 2>/dev/null || true
+  else
+    rmdir "${TG_AGENT_LOCK_FILE}.d" 2>/dev/null || true
+  fi
+  return $rc
 }
 
 tg_agent_sync() {
@@ -1943,16 +2114,15 @@ tg_refresh_after_singbox_install() {
 }
 
 tg_start_existing_config() {
-  local cfg enabled_cfg role
+  local cfg role
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "未找到可启动的 TG Bot 配置。"; return 1; }
-  enabled_cfg="$(echo "$cfg" | jq '.enabled = true')" || return 1
   if [ "$role" = "center" ]; then
     tg_install_center_service || { err "主控服务启动失败。"; return 1; }
   fi
   install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; return 1; }
-  tg_config_save "$enabled_cfg" || { err "TG Bot 配置保存失败。"; return 1; }
+  tg_config_merge_jq '.enabled = true' || { err "TG Bot 配置保存失败。"; return 1; }
   if tg_agent_sync_now; then
     ok "TG Bot 已启动，本机数据已立即上报。"
   else
@@ -2019,28 +2189,11 @@ tg_setup_center() {
   [ -n "$secret" ] || secret="$(tg_generate_secret)"
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
-  cfg="$(echo "$cfg" | jq \
-    --arg token "$token" \
-    --arg admin "$admin_id" \
-    --argjson port "$port" \
-    --arg url "$public_url" \
-    --arg secret "$secret" \
-    --arg vps_id "$vps_id" \
-    --arg vps_name "$vps_name" \
-    --arg username "$username" '
-      .enabled = true
-      | .role = "center"
-      | .bot_token = $token
-      | .bot_username = $username
-      | .admin_chat_ids = [$admin]
-      | .listen_host = "0.0.0.0"
-      | .listen_port = $port
-      | .center_url = $url
-      | .access_secret = $secret
-      | .vps_id = $vps_id
-      | .vps_name = $vps_name
-    ')"
-  tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
+  if ! _tg_setup_center_commit "$token" "$admin_id" "$port" "$public_url" "$secret" "$vps_id" "$vps_name" "$username"; then
+    err "TG Bot 配置保存失败。"
+    pause
+    return 1
+  fi
   tg_install_center_service || { err "主控服务安装失败。"; pause; return 1; }
   install_tg_agent_cron || warn "TG 节点上报定时任务安装失败。"
   if tg_agent_sync_now; then
@@ -2093,19 +2246,11 @@ tg_setup_agent() {
 
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
-  cfg="$(echo "$cfg" | jq \
-    --arg url "$center_url" \
-    --arg secret "$secret" \
-    --arg vps_id "$vps_id" \
-    --arg vps_name "$vps_name" '
-      .enabled = true
-      | .role = "agent"
-      | .center_url = $url
-      | .access_secret = $secret
-      | .vps_id = $vps_id
-      | .vps_name = $vps_name
-    ')"
-  tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
+  if ! _tg_setup_agent_commit "$center_url" "$secret" "$vps_id" "$vps_name"; then
+    err "TG Bot 配置保存失败。"
+    pause
+    return 1
+  fi
   install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; pause; return 1; }
   if tg_agent_sync_now; then
     ok "本机数据已立即上报。"
@@ -2224,18 +2369,9 @@ tg_notify_test() {
 }
 
 tg_prune_offline_reports() {
-  local cfg now removed pruned
-  cfg="$(tg_config_load)"
+  local now
   now="$(date +%s)"
-  removed="$(echo "$cfg" | jq -r --argjson now "$now" '
-    [(.reports // {}) | to_entries[] | select(($now - (.value.received_at // $now)) > 900)] | length
-  ')" || return 1
-  [ "${removed:-0}" -gt 0 ] || { echo 0; return 0; }
-  pruned="$(echo "$cfg" | jq --argjson now "$now" '
-    .reports = ((.reports // {}) | with_entries(select(($now - (.value.received_at // $now)) <= 900)))
-  ')" || return 1
-  tg_config_save "$pruned" || return 1
-  echo "$removed"
+  _tg_prune_reports_with_lock "$now"
 }
 
 tg_reload_center_service_menu() {

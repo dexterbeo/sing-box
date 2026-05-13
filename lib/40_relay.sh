@@ -349,11 +349,11 @@ relay_add() {
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
-      meta_save "$meta_json" && _relay_ok=1
+      _relay_ok=1
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
-      meta_save "$meta_json" && _relay_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$updated_json" "$meta_json"; then
+      _relay_ok=1
     fi
   fi
   if [ "$_relay_ok" -eq 1 ]; then
@@ -668,8 +668,7 @@ relay_apply_meta_json_state() {
   meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$normalized_relay")" || return 1
   json="$(config_load)"
   projected="$(relay_project_partial_state_with_meta "$json" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected" || return 1
-  meta_save "$meta_json"
+  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$projected" "$meta_json"
 }
 
 relay_apply_partial_state() {
@@ -905,11 +904,11 @@ relay_delete() {
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
-      meta_save "$meta_json" && _delete_ok=1
+      _delete_ok=1
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json"; then
-      meta_save "$meta_json" && _delete_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$final_json" "$meta_json"; then
+      _delete_ok=1
     fi
   fi
 

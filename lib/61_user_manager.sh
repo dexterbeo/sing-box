@@ -156,23 +156,42 @@ _user_manager_apply_changes_body() {
     old_db_json="$(user_db_load)"
     had_db=1
   fi
+  # 抓 old_config 用于 meta_save 失败时回滚（即使调用方没传 meta_json 也无害——下面只在传了时才用）
+  local old_config_json
+  old_config_json="$(config_load 2>/dev/null)" || old_config_json='{}'
 
   user_db_save "$db_json" || {
     err "用户数据库保存失败，已阻止配置变更。"
     return 1
   }
 
-  if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
-    [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
-    return 0
+  if ! _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
+    # config 失败，回滚 user_db
+    if [ "$had_db" = "1" ]; then
+      user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
+    else
+      rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
+    fi
+    return 1
   fi
 
-  if [ "$had_db" = "1" ]; then
-    user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
-  else
-    rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
+  # config 已成功，提交 meta（如果调用方传了 meta_json）
+  if [ -n "$meta_json" ]; then
+    if ! meta_save "$meta_json"; then
+      err "元数据保存失败，正在回滚配置和用户数据库..."
+      _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$old_config_json" \
+        || err "回滚配置失败，请手动检查 $CONFIG_FILE"
+      if [ "$had_db" = "1" ]; then
+        user_db_save "$old_db_json" || warn "用户数据库回滚失败，请手动检查 $USER_DB_FILE"
+      else
+        rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "用户数据库清理失败：$USER_DB_FILE"
+      fi
+      return 1
+    fi
   fi
-  return 1
+
+  [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
+  return 0
 }
 
 user_manager_runtime_sync() {

@@ -214,7 +214,11 @@ meta_save() {
   local tmp_file
   tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
   if echo "$meta_json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$META_FILE"
+    if ! mv -f "$tmp_file" "$META_FILE"; then
+      err "元数据写入失败：$META_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$META_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file"

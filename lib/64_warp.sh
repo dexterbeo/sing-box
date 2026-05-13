@@ -320,8 +320,7 @@ warp_apply_meta_json_state() {
   fi
   projected="$(warp_config_project_json "$json" "$rules_json" "$ready" "$port")" || return 1
   rebuilt="$(route_rebuild "$projected" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt" || return 1
-  meta_save "$meta_json"
+  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$rebuilt" "$meta_json"
 }
 
 warp_apply_current_state() {

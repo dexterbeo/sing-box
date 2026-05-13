@@ -294,6 +294,30 @@ config_apply_no_usage_sync() {
   _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$@"
 }
 
+# 配套提交 config + meta：先 config_apply 后 meta_save，meta_save 失败时回滚 config。
+# 用法：config_and_meta_apply <config_json> <meta_json>
+# 环境变量 _CONFIG_APPLY_QUIET_OK / _CONFIG_SKIP_USAGE_SYNC 透传给内部 config_apply。
+# 整个流程在同一把 with_manager_lock 内执行，避免并发会话在 config 已写、meta 未写的间隙插入修改。
+config_and_meta_apply() {
+  with_manager_lock _config_and_meta_apply_body "$@"
+}
+
+_config_and_meta_apply_body() {
+  local config_json="$1" meta_json="$2"
+  local old_config
+  old_config="$(config_load 2>/dev/null)" || old_config='{}'
+  # _config_apply_body 直接调用（持锁状态下 sentinel 会让 config_apply wrapper 走 fast path，
+  # 但直接调 body 更清晰，省一次条件判断）
+  _config_apply_body "$config_json" || return 1
+  if ! meta_save "$meta_json"; then
+    err "元数据保存失败，正在回滚配置..."
+    if ! _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 _config_apply_body "$old_config"; then
+      err "回滚也失败，sing-box 可能运行在新配置上但 meta 是旧的。请手动检查 $CONFIG_FILE 和 $META_FILE"
+    fi
+    return 1
+  fi
+}
+
 _config_apply_body() {
   local json="$1"
   local normalized
@@ -352,12 +376,24 @@ _config_apply_body() {
   chmod 600 "$prev_tmp" 2>/dev/null || true
 
   if [ -f "$CONFIG_FILE" ]; then
-    cp -a "$CONFIG_FILE" "$prev_tmp"
+    if ! cp -a "$CONFIG_FILE" "$prev_tmp"; then
+      err "无法备份旧配置：$CONFIG_FILE → $prev_tmp"
+      rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+      return 1
+    fi
   else
-    : > "$prev_tmp"
+    if ! : > "$prev_tmp"; then
+      err "无法初始化回滚备份文件：$prev_tmp"
+      rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+      return 1
+    fi
   fi
 
-  mv -f "$tmp_file" "$CONFIG_FILE"
+  mv -f "$tmp_file" "$CONFIG_FILE" || {
+    err "配置文件写入失败：$CONFIG_FILE"
+    rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+    return 1
+  }
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
   if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
@@ -374,8 +410,11 @@ _config_apply_body() {
 
   err "热载/重启失败：正在回滚。"
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
-    cp -a "$prev_tmp" "$backup"
-    cp -a "$prev_tmp" "$CONFIG_FILE"
+    cp -a "$prev_tmp" "$backup" || warn "失败现场备份未能保存到 $backup"
+    if ! cp -a "$prev_tmp" "$CONFIG_FILE"; then
+      err "回滚 cp 失败，sing-box 可能仍运行在坏配置上。手动恢复：cp $prev_tmp $CONFIG_FILE"
+      return 1
+    fi
     warn "已生成失败备份：$backup"
   else
     cp -a "$CONFIG_FILE" "$backup" 2>/dev/null || true

@@ -500,6 +500,19 @@ protocol_install_menu() {
   done
 
   updated_json="$(route_rebuild "$updated_json")"
+  # 构造候选 meta：把所有 reality 公钥写进去，与 config 一起原子提交
+  local candidate_meta i
+  candidate_meta="$(meta_load 2>/dev/null)" || candidate_meta='{}'
+  [ -n "$candidate_meta" ] || candidate_meta='{}'
+  for i in "${!reality_meta_tags[@]}"; do
+    candidate_meta="$(echo "$candidate_meta" | jq \
+      --arg t "${reality_meta_tags[$i]}" --arg pk "${reality_meta_pubs[$i]}" \
+      '.[$t] = ((.[$t] // {}) + {public_key:$pk, private_key_auto_generated:true})')" || {
+      err "构造 reality meta 失败。"
+      pause
+      return 1
+    }
+  done
   local _install_ok=0
   if user_db_exists; then
     local db_json node_key
@@ -508,23 +521,19 @@ protocol_install_menu() {
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
     fi
   fi
   if [ "$_install_ok" -eq 1 ]; then
-    local i
-    for i in "${!reality_meta_tags[@]}"; do
-      meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-    done
     ok "协议已安装/更新。"
   fi
   pause
@@ -677,8 +686,15 @@ clear_config_json() {
   echo -e "${Y}--- 清空/重置配置文件 ---${NC}"
   echo -e "${Y}注意：该操作将清空当前 config.json。${NC}"
   ask_confirm_yes || { warn "已取消清空/重置。"; pause; return 0; }
-  if config_reset; then
-    split_rule_clear_all_meta || warn "配置已重置，但分流状态清理失败。"
+  # 原子提交：config 重置 + meta 删 .warp/.relay 在同一把锁内一起做，避免分裂
+  local empty_config empty_meta
+  empty_config="$(config_min_template)"
+  empty_meta="$(meta_load 2>/dev/null | jq 'del(.warp, .relay)' 2>/dev/null)"
+  [ -n "$empty_meta" ] || empty_meta='{}'
+  if config_and_meta_apply "$empty_config" "$empty_meta"; then
+    ok "配置已清空，分流状态已重置。"
+  else
+    err "配置或分流状态清空失败。"
   fi
   pause
 }

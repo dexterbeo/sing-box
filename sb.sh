@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-09 03:38:41 UTC
+# 构建时间: 2026-05-13 16:16:03 UTC
 # ============================================================
 
 
@@ -17,14 +17,13 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.1"
+SCRIPT_VERSION="6.1.7"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sb.sh"
 SB_SHORTCUT="/usr/local/bin/s"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
 SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
@@ -1075,6 +1074,30 @@ config_apply_no_usage_sync() {
   _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$@"
 }
 
+# 配套提交 config + meta：先 config_apply 后 meta_save，meta_save 失败时回滚 config。
+# 用法：config_and_meta_apply <config_json> <meta_json>
+# 环境变量 _CONFIG_APPLY_QUIET_OK / _CONFIG_SKIP_USAGE_SYNC 透传给内部 config_apply。
+# 整个流程在同一把 with_manager_lock 内执行，避免并发会话在 config 已写、meta 未写的间隙插入修改。
+config_and_meta_apply() {
+  with_manager_lock _config_and_meta_apply_body "$@"
+}
+
+_config_and_meta_apply_body() {
+  local config_json="$1" meta_json="$2"
+  local old_config
+  old_config="$(config_load 2>/dev/null)" || old_config='{}'
+  # _config_apply_body 直接调用（持锁状态下 sentinel 会让 config_apply wrapper 走 fast path，
+  # 但直接调 body 更清晰，省一次条件判断）
+  _config_apply_body "$config_json" || return 1
+  if ! meta_save "$meta_json"; then
+    err "元数据保存失败，正在回滚配置..."
+    if ! _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 _config_apply_body "$old_config"; then
+      err "回滚也失败，sing-box 可能运行在新配置上但 meta 是旧的。请手动检查 $CONFIG_FILE 和 $META_FILE"
+    fi
+    return 1
+  fi
+}
+
 _config_apply_body() {
   local json="$1"
   local normalized
@@ -1133,12 +1156,24 @@ _config_apply_body() {
   chmod 600 "$prev_tmp" 2>/dev/null || true
 
   if [ -f "$CONFIG_FILE" ]; then
-    cp -a "$CONFIG_FILE" "$prev_tmp"
+    if ! cp -a "$CONFIG_FILE" "$prev_tmp"; then
+      err "无法备份旧配置：$CONFIG_FILE → $prev_tmp"
+      rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+      return 1
+    fi
   else
-    : > "$prev_tmp"
+    if ! : > "$prev_tmp"; then
+      err "无法初始化回滚备份文件：$prev_tmp"
+      rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+      return 1
+    fi
   fi
 
-  mv -f "$tmp_file" "$CONFIG_FILE"
+  mv -f "$tmp_file" "$CONFIG_FILE" || {
+    err "配置文件写入失败：$CONFIG_FILE"
+    rm -f "$tmp_file" "$prev_tmp" >/dev/null 2>&1 || true
+    return 1
+  }
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
   if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
@@ -1155,8 +1190,11 @@ _config_apply_body() {
 
   err "热载/重启失败：正在回滚。"
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
-    cp -a "$prev_tmp" "$backup"
-    cp -a "$prev_tmp" "$CONFIG_FILE"
+    cp -a "$prev_tmp" "$backup" || warn "失败现场备份未能保存到 $backup"
+    if ! cp -a "$prev_tmp" "$CONFIG_FILE"; then
+      err "回滚 cp 失败，sing-box 可能仍运行在坏配置上。手动恢复：cp $prev_tmp $CONFIG_FILE"
+      return 1
+    fi
     warn "已生成失败备份：$backup"
   else
     cp -a "$CONFIG_FILE" "$backup" 2>/dev/null || true
@@ -2569,11 +2607,11 @@ relay_add() {
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
-      meta_save "$meta_json" && _relay_ok=1
+      _relay_ok=1
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
-      meta_save "$meta_json" && _relay_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$updated_json" "$meta_json"; then
+      _relay_ok=1
     fi
   fi
   if [ "$_relay_ok" -eq 1 ]; then
@@ -2888,8 +2926,7 @@ relay_apply_meta_json_state() {
   meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$normalized_relay")" || return 1
   json="$(config_load)"
   projected="$(relay_project_partial_state_with_meta "$json" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$projected" || return 1
-  meta_save "$meta_json"
+  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$projected" "$meta_json"
 }
 
 relay_apply_partial_state() {
@@ -3125,11 +3162,11 @@ relay_delete() {
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
     if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
-      meta_save "$meta_json" && _delete_ok=1
+      _delete_ok=1
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$final_json"; then
-      meta_save "$meta_json" && _delete_ok=1
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$final_json" "$meta_json"; then
+      _delete_ok=1
     fi
   fi
 
@@ -3414,7 +3451,11 @@ meta_save() {
   local tmp_file
   tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
   if echo "$meta_json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$META_FILE"
+    if ! mv -f "$tmp_file" "$META_FILE"; then
+      err "元数据写入失败：$META_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$META_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file"
@@ -3508,7 +3549,11 @@ _user_db_save_body() {
   local tmp_file
   tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
   if echo "$db_json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$USER_DB_FILE"
+    if ! mv -f "$tmp_file" "$USER_DB_FILE"; then
+      err "用户数据库写入失败：$USER_DB_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$USER_DB_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file"
@@ -3756,23 +3801,42 @@ _user_manager_apply_changes_body() {
     old_db_json="$(user_db_load)"
     had_db=1
   fi
+  # 抓 old_config 用于 meta_save 失败时回滚（即使调用方没传 meta_json 也无害——下面只在传了时才用）
+  local old_config_json
+  old_config_json="$(config_load 2>/dev/null)" || old_config_json='{}'
 
   user_db_save "$db_json" || {
     err "用户数据库保存失败，已阻止配置变更。"
     return 1
   }
 
-  if _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
-    [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
-    return 0
+  if ! _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
+    # config 失败，回滚 user_db
+    if [ "$had_db" = "1" ]; then
+      user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
+    else
+      rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
+    fi
+    return 1
   fi
 
-  if [ "$had_db" = "1" ]; then
-    user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
-  else
-    rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
+  # config 已成功，提交 meta（如果调用方传了 meta_json）
+  if [ -n "$meta_json" ]; then
+    if ! meta_save "$meta_json"; then
+      err "元数据保存失败，正在回滚配置和用户数据库..."
+      _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$old_config_json" \
+        || err "回滚配置失败，请手动检查 $CONFIG_FILE"
+      if [ "$had_db" = "1" ]; then
+        user_db_save "$old_db_json" || warn "用户数据库回滚失败，请手动检查 $USER_DB_FILE"
+      else
+        rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "用户数据库清理失败：$USER_DB_FILE"
+      fi
+      return 1
+    fi
   fi
-  return 1
+
+  [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
+  return 0
 }
 
 user_manager_runtime_sync() {
@@ -4591,9 +4655,14 @@ user_delete_menu() {
 
 user_manager_menu() {
   if ! user_db_exists; then
-    err "用户数据库不存在或不可用，请先执行 1. 安装/更新 sing-box。"
-    pause
-    return 0
+    init_manager_env || { pause; return 0; }
+    # 自愈：6.1.5 安装事务把 ensure_user_manager_ready 失败改成 warn，
+    # 这里给用户管理菜单一个"进入时重试创建"的机会，避免用户卡在死循环。
+    ensure_user_manager_ready || {
+      err "用户数据库初始化失败，请检查 $USER_DB_FILE 所在磁盘和权限后再试。"
+      pause
+      return 0
+    }
   fi
   while true; do
     local db_json
@@ -4664,13 +4733,21 @@ tg_config_load() {
 }
 
 tg_config_save() {
+  with_manager_lock _tg_config_save_body "$@"
+}
+
+_tg_config_save_body() {
   local json="$1"
   mkdir -p "$(dirname "$TG_CONFIG_FILE")"
   chmod 700 "$(dirname "$TG_CONFIG_FILE")" 2>/dev/null || true
   local tmp_file
   tmp_file="$(mktemp "${TG_CONFIG_FILE}.tmp.XXXXXX")" || return 1
   if echo "$json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$TG_CONFIG_FILE"
+    if ! mv -f "$tmp_file" "$TG_CONFIG_FILE"; then
+      err "TG 配置写入失败：$TG_CONFIG_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$TG_CONFIG_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file" >/dev/null 2>&1 || true
@@ -4686,6 +4763,103 @@ tg_task_receipts_load() {
   fi
 }
 
+# Setup 流程的"持锁原子提交" helper（6.1.6 起）。
+# tg_setup_center / tg_setup_agent 在用户输入完字段后，函数体内的 cfg 已经是 5 分钟前 load 的快照，
+# 整个写回去会覆盖期间 Python 端写入的 reports/tasks/bindings 等字段。
+# 这里在 with_manager_lock 内 reload + merge + save，确保跨进程 RMW 原子。
+_tg_setup_center_commit() {
+  with_manager_lock _tg_setup_center_commit_body "$@"
+}
+
+_tg_setup_center_commit_body() {
+  local token="$1" admin="$2" port="$3" url="$4" secret="$5" vps_id="$6" vps_name="$7" username="$8"
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq \
+    --arg token "$token" \
+    --arg admin "$admin" \
+    --argjson port "$port" \
+    --arg url "$url" \
+    --arg secret "$secret" \
+    --arg vps_id "$vps_id" \
+    --arg vps_name "$vps_name" \
+    --arg username "$username" '
+      .enabled = true
+      | .role = "center"
+      | .bot_token = $token
+      | .bot_username = $username
+      | .admin_chat_ids = [$admin]
+      | .listen_host = "0.0.0.0"
+      | .listen_port = $port
+      | .center_url = $url
+      | .access_secret = $secret
+      | .vps_id = $vps_id
+      | .vps_name = $vps_name
+    ')" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+_tg_setup_agent_commit() {
+  with_manager_lock _tg_setup_agent_commit_body "$@"
+}
+
+_tg_setup_agent_commit_body() {
+  local url="$1" secret="$2" vps_id="$3" vps_name="$4"
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq \
+    --arg url "$url" \
+    --arg secret "$secret" \
+    --arg vps_id "$vps_id" \
+    --arg vps_name "$vps_name" '
+      .enabled = true
+      | .role = "agent"
+      | .center_url = $url
+      | .access_secret = $secret
+      | .vps_id = $vps_id
+      | .vps_name = $vps_name
+    ')" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+# 通用 RMW：持锁内 reload + 应用 jq 表达式 + save。避免 cfg 5+ 分钟前快照被整体写回时覆盖 Python 期间写入的字段。
+# 用法：tg_config_merge_jq '<jq 表达式>' [jq --arg/--argjson 参数...]
+tg_config_merge_jq() {
+  with_manager_lock _tg_config_merge_jq_body "$@"
+}
+
+_tg_config_merge_jq_body() {
+  local jq_expr="$1"
+  shift
+  local cfg
+  cfg="$(tg_config_load)"
+  cfg="$(echo "$cfg" | jq "$@" "$jq_expr")" || return 1
+  _tg_config_save_body "$cfg"
+}
+
+# 专用 prune helper：reports 过期清理。fast-path 检测+实际写入都在同一把锁内，避免与 /api/report 并发写竞争。
+_tg_prune_reports_with_lock() {
+  with_manager_lock _tg_prune_reports_body "$@"
+}
+
+_tg_prune_reports_body() {
+  local now="$1"
+  local cfg removed pruned
+  cfg="$(tg_config_load)"
+  removed="$(echo "$cfg" | jq -r --argjson now "$now" '
+    [(.reports // {}) | to_entries[] | select(($now - (.value.received_at // $now)) > 900)] | length
+  ')" || return 1
+  if [ "${removed:-0}" -le 0 ]; then
+    echo 0
+    return 0
+  fi
+  pruned="$(echo "$cfg" | jq --argjson now "$now" '
+    .reports = ((.reports // {}) | with_entries(select(($now - (.value.received_at // $now)) <= 900)))
+  ')" || return 1
+  _tg_config_save_body "$pruned" || return 1
+  echo "$removed"
+}
+
 tg_task_receipts_save() {
   local json="$1"
   mkdir -p "$(dirname "$TG_TASK_RECEIPTS_FILE")"
@@ -4693,7 +4867,11 @@ tg_task_receipts_save() {
   local tmp_file
   tmp_file="$(mktemp "${TG_TASK_RECEIPTS_FILE}.tmp.XXXXXX")" || return 1
   if echo "$json" | jq . > "$tmp_file"; then
-    mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"
+    if ! mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"; then
+      err "TG 任务回执写入失败：$TG_TASK_RECEIPTS_FILE"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
     chmod 600 "$TG_TASK_RECEIPTS_FILE" 2>/dev/null || true
   else
     rm -f "$tmp_file" >/dev/null 2>&1 || true
@@ -4753,10 +4931,7 @@ tg_config_is_enabled() {
 
 tg_mark_disabled_keep_config() {
   [ -s "$TG_CONFIG_FILE" ] || return 0
-  local cfg
-  cfg="$(tg_config_load)"
-  cfg="$(echo "$cfg" | jq '.enabled = false')" || return 1
-  tg_config_save "$cfg"
+  tg_config_merge_jq '.enabled = false'
 }
 
 tg_generate_secret() {
@@ -4815,7 +4990,9 @@ tg_write_center_app() {
   mkdir -p "$(dirname "$TG_CENTER_APP")"
   cat > "$TG_CENTER_APP" <<'PY'
 #!/usr/bin/env python3
+import contextlib
 import datetime
+import fcntl
 import http.server
 import json
 import os
@@ -4829,6 +5006,7 @@ import urllib.parse
 import urllib.request
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/sing-box-manager/telegram.json"
+LOCK_PATH = "/var/lock/singbox-manager.lock"
 REPORT_ONLINE_SECONDS = 900
 
 
@@ -4841,6 +5019,34 @@ def load_config():
 
 
 def save_config(cfg):
+    # 与 bash 端 with_manager_lock 共享同一个 lock 文件。
+    # 这是"单次写"的对外入口，自带文件锁。RMW（load→改→save）必须用 cfg_lock() 包，
+    # 否则 load 和 save 之间存在间隙，跨进程 RMW 仍会丢更新。
+    with file_lock():
+        save_config_unlocked(cfg)
+
+
+@contextlib.contextmanager
+def file_lock():
+    """跨进程文件锁，与 bash with_manager_lock 共享 SB_LOCK_FILE。"""
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    fd = os.open(LOCK_PATH, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def save_config_unlocked(cfg):
+    """save_config 的不持锁版本——调用方已在 file_lock / cfg_lock 内时用这个。"""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -4851,6 +5057,17 @@ def save_config(cfg):
         os.chmod(CONFIG_PATH, 0o600)
     except OSError:
         pass
+
+
+@contextlib.contextmanager
+def cfg_lock():
+    """RMW 双锁：threading.Lock 防同进程多线程竞争 + file_lock 防跨进程并发。
+    替代 `with CFG_LOCK:` 块——后者只防同进程线程，没防 bash 与 Python 跨进程 RMW 丢更新。
+    内部 load_config / save_config_unlocked 在同一把锁内进行。
+    注意：CFG_LOCK 是非重入 threading.Lock，调用方不能在已持有 cfg_lock 的情况下再进入。"""
+    with CFG_LOCK:
+        with file_lock():
+            yield
 
 
 CFG_LOCK = threading.Lock()
@@ -4919,6 +5136,8 @@ def answer_callback(callback_id, text=None):
 
 
 def get_bot_username(cfg):
+    """读 bot_username。如果 cfg 里缺，在线 getMe 获取并写入 cfg（**只更新内存**）。
+    调用方负责后续 save——避免与外层 cfg_lock 嵌套死锁（CFG_LOCK 是非重入锁）。"""
     username = cfg.get("bot_username") or ""
     if username:
         return username
@@ -4926,7 +5145,6 @@ def get_bot_username(cfg):
     username = ((resp.get("result") or {}).get("username") or "")
     if username:
         cfg["bot_username"] = username
-        save_config(cfg)
     return username
 
 
@@ -5020,12 +5238,12 @@ def back_keyboard(back_to):
 
 
 def clear_waiting_input(tg_id):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         waiting = cfg.setdefault("waiting_inputs", {})
         if str(tg_id) in waiting:
             waiting.pop(str(tg_id), None)
-            save_config(cfg)
+            save_config_unlocked(cfg)
 
 
 def send_home(chat_id, tg_id, message_id=None):
@@ -5037,7 +5255,7 @@ def send_home(chat_id, tg_id, message_id=None):
 
 
 def bind_token(chat_id, tg_id, token):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_bind_tokens", {})
         item = pending.get(token)
@@ -5066,7 +5284,7 @@ def bind_token(chat_id, tg_id, token):
         pending.pop(token, None)
         settings = cfg.setdefault("user_settings", {})
         settings.setdefault(str(tg_id), {"notify": True})
-        save_config(cfg)
+        save_config_unlocked(cfg)
     send_message(chat_id, f"绑定成功：{item.get('vps_name')} / {item.get('username')}")
     send_home(chat_id, tg_id)
 
@@ -5123,12 +5341,12 @@ def notify_settings(chat_id, tg_id, admin=False, message_id=None):
 
 
 def toggle_notify(chat_id, tg_id, admin=False, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         settings = cfg.setdefault("user_settings", {})
         item = settings.setdefault(str(tg_id), {"notify": True})
         item["notify"] = not bool(item.get("notify", True))
-        save_config(cfg)
+        save_config_unlocked(cfg)
     notify_settings(chat_id, tg_id, admin, message_id)
 
 
@@ -5162,18 +5380,18 @@ def ask_unbind(chat_id, tg_id, idx, message_id=None):
 
 
 def do_unbind(chat_id, tg_id, idx, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         real_indices = [
             i for i, b in enumerate(cfg.get("bindings") or [])
             if b.get("active") is not False and str(b.get("tg_user_id")) == str(tg_id)
         ]
         if idx < 0 or idx >= len(real_indices):
-            save_config(cfg)
+            save_config_unlocked(cfg)
             binding_list(chat_id, tg_id, message_id)
             return
         cfg["bindings"][real_indices[idx]]["active"] = False
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_unbound_user_state(chat_id, message_id, "绑定已解除。\n当前没有绑定。")
 
 
@@ -5523,7 +5741,7 @@ def parse_reset_day_input(text):
 
 def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, params, back_data, message_id=None):
     token = secrets.token_urlsafe(6)
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_admin_actions", {})
         pending[token] = {
@@ -5536,7 +5754,7 @@ def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, pa
             "back_data": back_data,
             "expires_at": int(time.time()) + 300,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     keyboard = [[
         {"text": "确认执行", "callback_data": f"a:confirm:{token}"},
         {"text": "取消", "callback_data": back_data},
@@ -5545,12 +5763,12 @@ def create_admin_confirmation(chat_id, tg_id, text, action, vps_id, username, pa
 
 
 def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         pending = cfg.setdefault("pending_admin_actions", {})
         action = pending.pop(token, None)
         if not action or str(action.get("tg_user_id")) != str(tg_id) or int(action.get("expires_at") or 0) < int(time.time()):
-            save_config(cfg)
+            save_config_unlocked(cfg)
             render_page(chat_id, "确认已失效，请重新操作。", back_keyboard("a:home"), message_id)
             return
         task_id = secrets.token_urlsafe(8)
@@ -5567,12 +5785,12 @@ def create_task_from_confirmation(chat_id, tg_id, token, message_id=None):
             "params": action.get("params") or {},
             "attempts": 0,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_page(chat_id, "任务已提交，等待节点执行，通常 10 秒内完成。", None, message_id)
 
 
 def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, message_id=None):
-    with CFG_LOCK:
+    with cfg_lock():
         cfg = load_config()
         waiting = cfg.setdefault("waiting_inputs", {})
         waiting[str(tg_id)] = {
@@ -5582,7 +5800,7 @@ def start_waiting_input(chat_id, tg_id, action, vps_id, idx, username, prompt, m
             "username": username,
             "expires_at": int(time.time()) + 300,
         }
-        save_config(cfg)
+        save_config_unlocked(cfg)
     render_page(chat_id, prompt, back_keyboard(f"a:user:{vps_id}:{idx}"), message_id)
 
 
@@ -5981,7 +6199,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/report":
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 reports = cfg.setdefault("reports", {})
                 payload["received_at"] = int(time.time())
@@ -5990,9 +6208,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 reports[payload.get("vps_id") or "unknown"] = payload
                 changed = evaluate_reminders(cfg, payload)
                 if changed:
-                    save_config(cfg)
+                    save_config_unlocked(cfg)
                 else:
-                    save_config(cfg)
+                    save_config_unlocked(cfg)
             write_json(self, 200, {"ok": True})
             return
 
@@ -6004,7 +6222,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             now = int(time.time())
             available = []
             expired_notifications = []
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 tasks = cfg.setdefault("tasks", {})
                 for task_id in list(tasks.keys()):
@@ -6040,7 +6258,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "username": task.get("username"),
                         "params": task.get("params") or {},
                     })
-                save_config(cfg)
+                save_config_unlocked(cfg)
             for chat_id, title, message in expired_notifications:
                 if chat_id:
                     send_message(chat_id, f"执行失败：{title}\n{message}")
@@ -6052,7 +6270,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             vps_id = payload.get("vps_id") or ""
             ok_value = bool(payload.get("ok"))
             message = payload.get("message") or ("执行成功" if ok_value else "执行失败")
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 task = (cfg.setdefault("tasks", {})).get(task_id)
                 if not task or task.get("vps_id") != vps_id:
@@ -6064,7 +6282,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 chat_id = task.get("created_chat_id")
                 tg_id = task.get("created_by")
                 username = task.get("username") or ""
-                save_config(cfg)
+                save_config_unlocked(cfg)
             if chat_id:
                 title = f"{vps_id} / {username}".strip(" /")
                 prefix = "执行成功" if ok_value else "执行失败"
@@ -6075,7 +6293,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/bind-token":
-            with CFG_LOCK:
+            with cfg_lock():
                 cfg = load_config()
                 token = secrets.token_urlsafe(8)
                 pending = cfg.setdefault("pending_bind_tokens", {})
@@ -6086,7 +6304,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "expires_at": int(time.time()) + 600,
                 }
                 username = get_bot_username(cfg)
-                save_config(cfg)
+                save_config_unlocked(cfg)
             if not username:
                 write_json(self, 500, {"ok": False, "error": "bot_username_missing"})
             else:
@@ -6508,14 +6726,36 @@ tg_agent_poll_tasks_once() {
 }
 
 tg_agent_sync_now() {
-  local i
+  local cfg lock_fd lock_dir i rc=1
+  cfg="$(tg_config_load)"
+  tg_config_is_enabled "$cfg" || return 1
+  mkdir -p "$(dirname "$TG_AGENT_LOCK_FILE")" 2>/dev/null || true
+  if has_cmd flock && { exec {lock_fd}>"$TG_AGENT_LOCK_FILE"; } 2>/dev/null; then
+    if ! flock -w 5 "$lock_fd"; then
+      { exec {lock_fd}>&-; } 2>/dev/null || true
+      return 1
+    fi
+  else
+    lock_fd=""
+    lock_dir="${TG_AGENT_LOCK_FILE}.d"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      sleep 1
+      mkdir "$lock_dir" 2>/dev/null || return 1
+    fi
+  fi
   for i in 1 2 3; do
     if tg_agent_sync_once; then
-      return 0
+      rc=0
+      break
     fi
     sleep 1
   done
-  return 1
+  if [ -n "$lock_fd" ]; then
+    { exec {lock_fd}>&-; } 2>/dev/null || true
+  else
+    rmdir "${TG_AGENT_LOCK_FILE}.d" 2>/dev/null || true
+  fi
+  return $rc
 }
 
 tg_agent_sync() {
@@ -6565,16 +6805,15 @@ tg_refresh_after_singbox_install() {
 }
 
 tg_start_existing_config() {
-  local cfg enabled_cfg role
+  local cfg role
   cfg="$(tg_config_load)"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   [ "$role" = "center" ] || [ "$role" = "agent" ] || { warn "未找到可启动的 TG Bot 配置。"; return 1; }
-  enabled_cfg="$(echo "$cfg" | jq '.enabled = true')" || return 1
   if [ "$role" = "center" ]; then
     tg_install_center_service || { err "主控服务启动失败。"; return 1; }
   fi
   install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; return 1; }
-  tg_config_save "$enabled_cfg" || { err "TG Bot 配置保存失败。"; return 1; }
+  tg_config_merge_jq '.enabled = true' || { err "TG Bot 配置保存失败。"; return 1; }
   if tg_agent_sync_now; then
     ok "TG Bot 已启动，本机数据已立即上报。"
   else
@@ -6641,28 +6880,11 @@ tg_setup_center() {
   [ -n "$secret" ] || secret="$(tg_generate_secret)"
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
-  cfg="$(echo "$cfg" | jq \
-    --arg token "$token" \
-    --arg admin "$admin_id" \
-    --argjson port "$port" \
-    --arg url "$public_url" \
-    --arg secret "$secret" \
-    --arg vps_id "$vps_id" \
-    --arg vps_name "$vps_name" \
-    --arg username "$username" '
-      .enabled = true
-      | .role = "center"
-      | .bot_token = $token
-      | .bot_username = $username
-      | .admin_chat_ids = [$admin]
-      | .listen_host = "0.0.0.0"
-      | .listen_port = $port
-      | .center_url = $url
-      | .access_secret = $secret
-      | .vps_id = $vps_id
-      | .vps_name = $vps_name
-    ')"
-  tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
+  if ! _tg_setup_center_commit "$token" "$admin_id" "$port" "$public_url" "$secret" "$vps_id" "$vps_name" "$username"; then
+    err "TG Bot 配置保存失败。"
+    pause
+    return 1
+  fi
   tg_install_center_service || { err "主控服务安装失败。"; pause; return 1; }
   install_tg_agent_cron || warn "TG 节点上报定时任务安装失败。"
   if tg_agent_sync_now; then
@@ -6715,19 +6937,11 @@ tg_setup_agent() {
 
   vps_id="$(echo "$cfg" | jq -r '.vps_id // empty')"
   [ -n "$vps_id" ] || vps_id="$(tg_generate_vps_id)"
-  cfg="$(echo "$cfg" | jq \
-    --arg url "$center_url" \
-    --arg secret "$secret" \
-    --arg vps_id "$vps_id" \
-    --arg vps_name "$vps_name" '
-      .enabled = true
-      | .role = "agent"
-      | .center_url = $url
-      | .access_secret = $secret
-      | .vps_id = $vps_id
-      | .vps_name = $vps_name
-    ')"
-  tg_config_save "$cfg" || { err "TG Bot 配置保存失败。"; pause; return 1; }
+  if ! _tg_setup_agent_commit "$center_url" "$secret" "$vps_id" "$vps_name"; then
+    err "TG Bot 配置保存失败。"
+    pause
+    return 1
+  fi
   install_tg_agent_cron || { err "TG 节点上报定时任务安装失败。"; pause; return 1; }
   if tg_agent_sync_now; then
     ok "本机数据已立即上报。"
@@ -6846,18 +7060,9 @@ tg_notify_test() {
 }
 
 tg_prune_offline_reports() {
-  local cfg now removed pruned
-  cfg="$(tg_config_load)"
+  local now
   now="$(date +%s)"
-  removed="$(echo "$cfg" | jq -r --argjson now "$now" '
-    [(.reports // {}) | to_entries[] | select(($now - (.value.received_at // $now)) > 900)] | length
-  ')" || return 1
-  [ "${removed:-0}" -gt 0 ] || { echo 0; return 0; }
-  pruned="$(echo "$cfg" | jq --argjson now "$now" '
-    .reports = ((.reports // {}) | with_entries(select(($now - (.value.received_at // $now)) <= 900)))
-  ')" || return 1
-  tg_config_save "$pruned" || return 1
-  echo "$removed"
+  _tg_prune_reports_with_lock "$now"
 }
 
 tg_reload_center_service_menu() {
@@ -7298,8 +7503,7 @@ warp_apply_meta_json_state() {
   fi
   projected="$(warp_config_project_json "$json" "$rules_json" "$ready" "$port")" || return 1
   rebuilt="$(route_rebuild "$projected" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$rebuilt" || return 1
-  meta_save "$meta_json"
+  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$rebuilt" "$meta_json"
 }
 
 warp_apply_current_state() {
@@ -7975,6 +8179,7 @@ show_versions() {
 is_install_complete() {
   [ -x "$SINGBOX_BIN" ] || return 1
   [ -s "$SINGBOX_VERSION_STAMP" ] || return 1
+  user_db_exists || return 1
   _cron_job_installed "$PERIODIC_SYNC_CRON_MARK" || return 1
   _cron_job_installed "$DAILY_MAINTENANCE_CRON_MARK" || return 1
   # 6.0.8 及以前的老 cron 残留也算"组件不一致"，引导用户清理。
@@ -8435,7 +8640,13 @@ install_or_update_singbox() {
       return 1
     fi
   else
-    warn "未获取到校验文件，已跳过校验。"
+    warn "未获取到校验文件。"
+    if ! ask_confirm_yes "输入 YES 确认跳过校验继续安装，其它任意输入取消: "; then
+      rm -rf "$tmp_dir"
+      err "已取消安装。"
+      pause
+      return 1
+    fi
   fi
 
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
@@ -8452,20 +8663,11 @@ install_or_update_singbox() {
     return 1
   }
 
-  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
-  if [ -x "$SINGBOX_BIN" ]; then
-    cp -f "$SINGBOX_BIN" "${SINGBOX_BIN}.bak" 2>/dev/null || true
-  fi
-  install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN" || {
+  # staging 验证：在替换正式位置之前先验证 with_v2ray_api，避免坏二进制进入 $SINGBOX_BIN
+  chmod +x "$tmp_dir/sing-box" 2>/dev/null || true
+  if ! "$tmp_dir/sing-box" version 2>/dev/null | grep -q 'with_v2ray_api'; then
     rm -rf "$tmp_dir"
-    err "安装失败。"
-    pause
-    return 1
-  }
-  rm -rf "$tmp_dir"
-
-  if ! "$SINGBOX_BIN" version | grep -q 'with_v2ray_api'; then
-    err "当前安装的 sing-box 未检测到 with_v2ray_api。"
+    err "下载的 sing-box 未检测到 with_v2ray_api。"
     if [ "$PKG_MANAGER" = "apk" ]; then
       warn "Alpine 环境提示：若报 'cannot execute' 错误，请手动执行：apk add gcompat"
     fi
@@ -8473,52 +8675,79 @@ install_or_update_singbox() {
     return 1
   fi
 
+  # 事务边界开始：备份旧 binary → 原子替换。若 service 起不来则回滚 binary。
+  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
+  local _binary_backed_up=0
+  if [ -x "$SINGBOX_BIN" ]; then
+    if cp -a "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"; then
+      _binary_backed_up=1
+    else
+      rm -rf "$tmp_dir"
+      err "无法备份旧 sing-box 二进制：${SINGBOX_BIN} → ${SINGBOX_BIN}.bak"
+      pause
+      return 1
+    fi
+  fi
+  if ! install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN"; then
+    rm -rf "$tmp_dir"
+    err "二进制写入失败：$SINGBOX_BIN"
+    if [ "$_binary_backed_up" = "1" ]; then
+      mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" 2>/dev/null || true
+    fi
+    pause
+    return 1
+  fi
+  rm -rf "$tmp_dir"
+
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
 
   prepare_script_runtime
   config_ensure_exists
   config_force_access_log_settings || true
-  local singbox_started=0
-  if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-    singbox_started=1
+  if ! _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
+    # 事务边界：service 启动失败必须回滚旧 binary，保证用户不被卡在"装了新版但起不来"状态
+    if [ "$_binary_backed_up" = "1" ]; then
+      err "sing-box 服务启动失败，正在回滚到旧二进制..."
+      if mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN"; then
+        if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
+          warn "已回滚到旧 sing-box，新版本未安装成功。请检查日志后再次执行 1. 安装/更新。"
+        else
+          err "回滚后服务仍无法启动，请检查 $SINGBOX_BIN 与日志。"
+        fi
+      else
+        err "二进制回滚失败：${SINGBOX_BIN}.bak → ${SINGBOX_BIN}。请手动恢复。"
+      fi
+    else
+      err "sing-box 服务启动失败（首次安装，无旧版本可回滚）。"
+      rm -f "$SINGBOX_BIN" >/dev/null 2>&1 || true
+    fi
+    pause
+    return 1
   fi
+  _binary_backed_up=0
+  # 事务边界结束：service 已起来，后续步骤失败仅 warn，不回滚 binary 也不阻塞 stamp 写入
   ensure_sb_shortcut || true
-  ensure_user_manager_ready || { pause; return 1; }
-  install_periodic_sync_cron || {
-    err "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
-    pause
-    return 1
-  }
-  install_daily_maintenance_cron || {
-    err "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}，请检查 cron 是否可用）。"
-    pause
-    return 1
-  }
+  ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
+  install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
+  install_daily_maintenance_cron || warn "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
   # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   remove_upstream_refresh_cron || true
   refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
-  user_manager_background_sync || {
-    err "用户管理后台同步初始化失败。"
+  user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
+  tg_refresh_after_singbox_install || true
+
+  # 走到这里说明 service 已经起来（事务化保证）；后续步骤即使失败也只 warn，不影响 stamp
+  echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
+    err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
     pause
     return 1
   }
-  tg_refresh_after_singbox_install || true
-
-  if [ "$singbox_started" = "1" ]; then
-    echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
-      err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
-      pause
-      return 1
-    }
-    ok "安装完成。"
-  else
-    warn "组件已安装，但 sing-box 服务未能正常运行，当前不记为完整安装。"
-    warn "请进入系统工具查看状态或日志，修复后重新执行安装/更新。"
-  fi
+  rm -f "${SINGBOX_BIN}.bak" >/dev/null 2>&1 || true
+  ok "安装完成。"
   pause
 }
 
@@ -9277,6 +9506,19 @@ protocol_install_menu() {
   done
 
   updated_json="$(route_rebuild "$updated_json")"
+  # 构造候选 meta：把所有 reality 公钥写进去，与 config 一起原子提交
+  local candidate_meta i
+  candidate_meta="$(meta_load 2>/dev/null)" || candidate_meta='{}'
+  [ -n "$candidate_meta" ] || candidate_meta='{}'
+  for i in "${!reality_meta_tags[@]}"; do
+    candidate_meta="$(echo "$candidate_meta" | jq \
+      --arg t "${reality_meta_tags[$i]}" --arg pk "${reality_meta_pubs[$i]}" \
+      '.[$t] = ((.[$t] // {}) + {public_key:$pk, private_key_auto_generated:true})')" || {
+      err "构造 reality meta 失败。"
+      pause
+      return 1
+    }
+  done
   local _install_ok=0
   if user_db_exists; then
     local db_json node_key
@@ -9285,23 +9527,19 @@ protocol_install_menu() {
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
     fi
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$updated_json"; then
+    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
     fi
   fi
   if [ "$_install_ok" -eq 1 ]; then
-    local i
-    for i in "${!reality_meta_tags[@]}"; do
-      meta_set_reality_public_key "${reality_meta_tags[$i]}" "${reality_meta_pubs[$i]}" || true
-    done
     ok "协议已安装/更新。"
   fi
   pause
@@ -9454,8 +9692,15 @@ clear_config_json() {
   echo -e "${Y}--- 清空/重置配置文件 ---${NC}"
   echo -e "${Y}注意：该操作将清空当前 config.json。${NC}"
   ask_confirm_yes || { warn "已取消清空/重置。"; pause; return 0; }
-  if config_reset; then
-    split_rule_clear_all_meta || warn "配置已重置，但分流状态清理失败。"
+  # 原子提交：config 重置 + meta 删 .warp/.relay 在同一把锁内一起做，避免分裂
+  local empty_config empty_meta
+  empty_config="$(config_min_template)"
+  empty_meta="$(meta_load 2>/dev/null | jq 'del(.warp, .relay)' 2>/dev/null)"
+  [ -n "$empty_meta" ] || empty_meta='{}'
+  if config_and_meta_apply "$empty_config" "$empty_meta"; then
+    ok "配置已清空，分流状态已重置。"
+  else
+    err "配置或分流状态清空失败。"
   fi
   pause
 }

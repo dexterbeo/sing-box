@@ -7,14 +7,13 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.1"
+SCRIPT_VERSION="6.1.7"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sb.sh"
 SB_SHORTCUT="/usr/local/bin/s"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
 SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"

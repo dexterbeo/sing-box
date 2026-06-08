@@ -24,7 +24,7 @@ CONFIG_FILE="/etc/sing-box/config.json"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sb.sh"
 SB_SHORTCUT="/usr/local/bin/s"
-SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
+SINGBOX_RELEASE_REPO="dexterbeo/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
 SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
 SINGBOX_VERSION_STAMP="/etc/sing-box/.installed_release"
@@ -8100,7 +8100,7 @@ ensure_sagernet_repo() { :; }
 # ---------- 版本管理 ----------
 
 get_release_latest_tag() {
-  local repo="${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"
+  local repo="${SINGBOX_RELEASE_REPO:-dexterbeo/sing-box}"
   curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty'
 }
 
@@ -8618,7 +8618,7 @@ install_or_update_singbox() {
     pause
     return 1
   }
-  base_url="https://github.com/${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}/releases/download/${tag}"
+  base_url="https://github.com/${SINGBOX_RELEASE_REPO:-dexterbeo/sing-box}/releases/download/${tag}"
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 

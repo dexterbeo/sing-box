@@ -80,6 +80,15 @@ build_v2rayn_anytls_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_hysteria2_link() {
+  local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  printf 'hysteria2://%s@%s:%s?sni=%s&alpn=%s&insecure=1#%s' \
+    "$(url_encode "$password")" "$server" "$port" \
+    "$(url_encode "$sni")" \
+    "$(url_encode "h3")" \
+    "$(url_encode "$name")"
+}
+
 build_v2rayn_trojan_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
   printf 'trojan://%s@%s:%s?security=tls&sni=%s&alpn=%s&allowInsecure=1#%s' \
@@ -217,6 +226,18 @@ export_configs() {
             echo -e " 通用链接: ${v2rayn_link}"
             echo ""
             echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
+          } >> "$target_file"
+          ;;
+        hysteria2)
+          [ -z "$pass" ] && continue
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            echo -e " Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: \"${pass}\", alpn: [h3], sni: \"${sni}\", skip-cert-verify: true, udp: true}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = hysteria2, ${ip}, ${port}, password=${pass}, sni=${sni}, skip-cert-verify=true"
           } >> "$target_file"
           ;;
         trojan)

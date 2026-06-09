@@ -158,12 +158,13 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks socks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks hysteria2 socks trojan vmess-ws vless-ws tuic)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
   [anytls]=anytls
   [shadowsocks]=ss
+  [hysteria2]=hy2
   [trojan]=trojan
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
@@ -175,6 +176,7 @@ declare -A PREFIX_TO_PROTO=(
   [reality]=vless-reality
   [anytls]=anytls
   [ss]=shadowsocks
+  [hy2]=hysteria2
   [trojan]=trojan
   [vmess-ws]=vmess-ws
   [vless-ws]=vless-ws
@@ -186,6 +188,7 @@ declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
   [shadowsocks]=tcp
+  [hysteria2]=udp
   [trojan]=tcp
   [vmess-ws]=tcp
   [vless-ws]=tcp
@@ -223,6 +226,7 @@ def detect_protocol:
   if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
   elif .type == "anytls" then "anytls"
   elif .type == "shadowsocks" then "shadowsocks"
+  elif .type == "hysteria2" then "hysteria2"
   elif .type == "trojan" then "trojan"
   elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
   elif .type == "vless" and ((.transport.type // "") == "ws") then "vless-ws"
@@ -253,11 +257,12 @@ def protocol_sort_index($tag):
   if ($tag | startswith("reality-")) then 0
   elif ($tag | startswith("anytls-")) then 1
   elif ($tag | startswith("ss-")) then 2
-  elif ($tag | startswith("socks-")) then 3
-  elif ($tag | startswith("trojan-")) then 4
-  elif ($tag | startswith("vmess-ws-")) then 5
-  elif ($tag | startswith("vless-ws-")) then 6
-  elif ($tag | startswith("tuic-")) then 7
+  elif ($tag | startswith("hy2-")) then 3
+  elif ($tag | startswith("socks-")) then 4
+  elif ($tag | startswith("trojan-")) then 5
+  elif ($tag | startswith("vmess-ws-")) then 6
+  elif ($tag | startswith("vless-ws-")) then 7
+  elif ($tag | startswith("tuic-")) then 8
   else 99
   end;
 '

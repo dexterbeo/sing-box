@@ -303,6 +303,32 @@ build_ss_inbound() {
   '
 }
 
+build_hysteria2_inbound() {
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
+  entry_key="$(entry_key_from_parts hysteria2 "$port")"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
+  crt="/etc/sing-box/hysteria2-${port}.crt"
+  key="/etc/sing-box/hysteria2-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"hysteria2",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "alpn":["h3"],
+        "certificate_path":$crt,
+        "key_path":$key
+      }
+    }
+  '
+}
+
 build_trojan_inbound() {
   local port="$1" sni="$2" pass="${3:-}"
   local entry_key crt key
@@ -432,7 +458,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks|anytls|trojan)
+    shadowsocks|hysteria2|anytls|trojan)
       jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)

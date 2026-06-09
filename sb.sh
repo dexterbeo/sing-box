@@ -4,7 +4,7 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-13 16:16:03 UTC
+# 构建时间: 2026-06-09 09:07:15 UTC
 # ============================================================
 
 
@@ -1546,6 +1546,32 @@ build_ss_inbound() {
   '
 }
 
+build_hysteria2_inbound() {
+  local port="$1" sni="$2" pass="${3:-}"
+  local entry_key crt key
+  entry_key="$(entry_key_from_parts hysteria2 "$port")"
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
+  crt="/etc/sing-box/hysteria2-${port}.crt"
+  key="/etc/sing-box/hysteria2-${port}.key"
+  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
+    {
+      "type":"hysteria2",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "tls":{
+        "enabled":true,
+        "server_name":$sni,
+        "alpn":["h3"],
+        "certificate_path":$crt,
+        "key_path":$key
+      }
+    }
+  '
+}
+
 build_trojan_inbound() {
   local port="$1" sni="$2" pass="${3:-}"
   local entry_key crt key
@@ -1675,7 +1701,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks|anytls|trojan)
+    shadowsocks|hysteria2|anytls|trojan)
       jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
@@ -7816,6 +7842,15 @@ build_v2rayn_anytls_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_hysteria2_link() {
+  local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  printf 'hysteria2://%s@%s:%s?sni=%s&alpn=%s&insecure=1#%s' \
+    "$(url_encode "$password")" "$server" "$port" \
+    "$(url_encode "$sni")" \
+    "$(url_encode "h3")" \
+    "$(url_encode "$name")"
+}
+
 build_v2rayn_trojan_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
   printf 'trojan://%s@%s:%s?security=tls&sni=%s&alpn=%s&allowInsecure=1#%s' \
@@ -7953,6 +7988,18 @@ export_configs() {
             echo -e " 通用链接: ${v2rayn_link}"
             echo ""
             echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
+          } >> "$target_file"
+          ;;
+        hysteria2)
+          [ -z "$pass" ] && continue
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            echo -e " Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: \"${pass}\", alpn: [h3], sni: \"${sni}\", skip-cert-verify: true, udp: true}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+            echo ""
+            echo -e " Surge: ${out_name} = hysteria2, ${ip}, ${port}, password=${pass}, sni=${sni}, skip-cert-verify=true"
           } >> "$target_file"
           ;;
         trojan)

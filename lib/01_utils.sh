@@ -13,6 +13,21 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+ensure_singbox_runtime_ready() {
+  if ! has_cmd sing-box; then
+    return 1
+  fi
+  if sing-box version >/dev/null 2>&1; then
+    return 0
+  fi
+  if has_cmd apk; then
+    apk add --no-cache gcompat libc6-compat libstdc++ ca-certificates >/dev/null 2>&1 || \
+      apk add --no-cache gcompat >/dev/null 2>&1 || true
+    sing-box version >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
 make_disk_tmp_dir() {
   local prefix="${1:-sb-install}" base="/var/tmp" tmp_dir
   mkdir -p "$base" 2>/dev/null || base="/tmp"

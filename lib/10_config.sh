@@ -116,8 +116,12 @@ ensure_manager_file_permissions() {
 }
 
 check_config_or_print() {
-  if ! has_cmd sing-box; then
-    err "未找到 sing-box 命令。请先安装。"
+  if ! ensure_singbox_runtime_ready; then
+    if ! has_cmd sing-box; then
+      err "未找到 sing-box 命令。请先安装。"
+    else
+      err "sing-box 无法执行，已尝试 Alpine 兼容修复但仍失败。"
+    fi
     return 1
   fi
   if [ ! -f "$CONFIG_FILE" ]; then

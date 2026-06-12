@@ -337,6 +337,21 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+ensure_singbox_runtime_ready() {
+  if ! has_cmd sing-box; then
+    return 1
+  fi
+  if sing-box version >/dev/null 2>&1; then
+    return 0
+  fi
+  if has_cmd apk; then
+    apk add --no-cache gcompat libc6-compat libstdc++ ca-certificates >/dev/null 2>&1 || \
+      apk add --no-cache gcompat >/dev/null 2>&1 || true
+    sing-box version >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
 make_disk_tmp_dir() {
   local prefix="${1:-sb-install}" base="/var/tmp" tmp_dir
   mkdir -p "$base" 2>/dev/null || base="/tmp"
@@ -901,8 +916,12 @@ ensure_manager_file_permissions() {
 }
 
 check_config_or_print() {
-  if ! has_cmd sing-box; then
-    err "未找到 sing-box 命令。请先安装。"
+  if ! ensure_singbox_runtime_ready; then
+    if ! has_cmd sing-box; then
+      err "未找到 sing-box 命令。请先安装。"
+    else
+      err "sing-box 无法执行，已尝试 Alpine 兼容修复但仍失败。"
+    fi
     return 1
   fi
   if [ ! -f "$CONFIG_FILE" ]; then
@@ -8120,7 +8139,7 @@ ensure_deps_for_installer() {
   install_pkg tar
   case "$PKG_MANAGER" in
     apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
-    apk) install_pkg ca-certificates; install_pkg gcompat ;;
+    apk) install_pkg ca-certificates; install_pkg gcompat; install_pkg libc6-compat; install_pkg libstdc++ ;;
   esac
 }
 

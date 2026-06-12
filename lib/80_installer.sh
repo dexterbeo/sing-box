@@ -392,7 +392,10 @@ remove_all_singbox_service_units() {
 }
 
 write_managed_singbox_service() {
-  mkdir -p /var/lib/sing-box /etc/sing-box
+  mkdir -p /var/lib/sing-box /etc/sing-box /var/log/sing-box
+  touch /var/log/sing-box/access.log /var/log/sing-box/error.log >/dev/null 2>&1 || true
+  chmod 0755 /var/log/sing-box >/dev/null 2>&1 || true
+  chmod 0644 /var/log/sing-box/access.log /var/log/sing-box/error.log >/dev/null 2>&1 || true
   case "$INIT_SYSTEM" in
     systemd)
       mkdir -p /etc/systemd/system
@@ -426,6 +429,11 @@ pidfile="/run/sing-box.pid"
 depend() {
   need net
   after firewall
+}
+start_pre() {
+  checkpath -d -m 0755 /var/log/sing-box
+  checkpath -f -m 0644 /var/log/sing-box/access.log
+  checkpath -f -m 0644 /var/log/sing-box/error.log
 }
 EOF
       chmod +x /etc/init.d/sing-box
@@ -483,6 +491,9 @@ prepare_script_runtime() {
   write_managed_singbox_service
   ensure_command_compat_links
   mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
+  touch /var/log/sing-box/access.log /var/log/sing-box/error.log >/dev/null 2>&1 || true
+  chmod 0755 /var/log/sing-box >/dev/null 2>&1 || true
+  chmod 0644 /var/log/sing-box/access.log /var/log/sing-box/error.log >/dev/null 2>&1 || true
   [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
